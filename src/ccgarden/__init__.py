@@ -1,6 +1,8 @@
+import subprocess
 import webbrowser
 from pathlib import Path
 
+from ccgarden.claude_stats import DEFAULT_LOG_ROOT, print_report
 from ccgarden.data import load_garden_data
 from ccgarden.render import render_svg
 
@@ -8,9 +10,34 @@ DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
 DEFAULT_OUTPUT_PATH = Path.home() / '.claude' / 'ccgarden.svg'
 
 
+def _is_wsl() -> bool:
+    try:
+        return 'microsoft' in Path('/proc/version').read_text().lower()
+    except OSError:
+        return False
+
+
+def _open_in_browser(path: Path) -> None:
+    if _is_wsl():
+        windows_path = subprocess.run(  # noqa: S603
+            ['wslpath', '-w', str(path)],  # noqa: S607
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        # explorer.exe always exits 1 on success, so don't check the code.
+        subprocess.run(  # noqa: S603
+            ['explorer.exe', windows_path],  # noqa: S607
+            check=False,
+        )
+    else:
+        webbrowser.open(path.as_uri())
+
+
 def main() -> None:
     garden = load_garden_data(str(DEFAULT_DB_PATH))
     svg = render_svg(garden)
     DEFAULT_OUTPUT_PATH.write_text(svg)
-    webbrowser.open(DEFAULT_OUTPUT_PATH.as_uri())
+    _open_in_browser(DEFAULT_OUTPUT_PATH)
     print(f'wrote {DEFAULT_OUTPUT_PATH}')
+    print_report([DEFAULT_LOG_ROOT], db_path=DEFAULT_DB_PATH)

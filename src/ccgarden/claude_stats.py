@@ -1680,6 +1680,74 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_pricing_or_warn(pricing_path: Path) -> PricingTable | None:
+    if pricing_path.exists():
+        return load_pricing(pricing_path)
+    print(
+        f'No pricing file at {pricing_path} -- spend estimates disabled',
+        file=sys.stderr,
+    )
+    return None
+
+
+def record_today(
+    roots: list[Path],
+    db_path: Path,
+    pricing: PricingTable | None,
+) -> None:
+    today = date.today()
+    conn = sqlite3.connect(db_path)
+    try:
+        ensure_schema(conn)
+        record_range(conn, roots, today, today, pricing)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def print_report(
+    roots: list[Path],
+    *,
+    since: date | None = None,
+    until: date | None = None,
+    pricing_path: Path = DEFAULT_PRICING_PATH,
+    db_path: Path = DEFAULT_DB_PATH,
+    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    json_output: bool = False,
+    color: bool | None = None,
+    explain: bool = False,
+) -> None:
+    """Print the usage report for `roots`, recording today's snapshot too."""
+    pricing = load_pricing_or_warn(pricing_path)
+
+    by_repo = collect_stats_by_repo(roots, since=since, until=until)
+    stats = merge_stats(by_repo.values())
+    repos = build_repo_reports(by_repo, pricing)
+    cost = compute_cost(stats, pricing) if pricing else None
+
+    cartoon_raw = run_cartoon_stats(cartoon_since)
+    cartoon = (
+        parse_cartoon_stats(cartoon_raw) if cartoon_raw is not None else None
+    )
+
+    record_today(roots, db_path, pricing)
+
+    if json_output:
+        print(json.dumps(stats_as_dict(stats, cost, repos, cartoon), indent=2))
+    else:
+        print(
+            format_report(
+                stats,
+                color=color,
+                cost=cost,
+                repos=repos,
+                explain=explain,
+                cartoon=cartoon,
+                cartoon_since=cartoon_since,
+            ),
+        )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     roots = args.log_root or [DEFAULT_LOG_ROOT]
@@ -1690,17 +1758,8 @@ def main() -> None:
         print(f'No such log root: {paths}', file=sys.stderr)
         sys.exit(1)
 
-    pricing = None
-    if args.pricing_path.exists():
-        pricing = load_pricing(args.pricing_path)
-    else:
-        print(
-            f'No pricing file at {args.pricing_path} -- '
-            'spend estimates disabled',
-            file=sys.stderr,
-        )
-
     if args.record:
+        pricing = load_pricing_or_warn(args.pricing_path)
         today = date.today()
         since = args.since or today
         until = args.until or today
@@ -1714,45 +1773,17 @@ def main() -> None:
         print(f'recorded {written} day(s) to {args.db_path}')
         return
 
-    by_repo = collect_stats_by_repo(roots, since=args.since, until=args.until)
-    stats = merge_stats(by_repo.values())
-    repos = build_repo_reports(by_repo, pricing)
-    cost = compute_cost(stats, pricing) if pricing else None
-
-    cartoon_raw = run_cartoon_stats(args.cartoon_since)
-    cartoon = (
-        parse_cartoon_stats(cartoon_raw) if cartoon_raw is not None else None
+    print_report(
+        roots,
+        since=args.since,
+        until=args.until,
+        pricing_path=args.pricing_path,
+        db_path=args.db_path,
+        cartoon_since=args.cartoon_since,
+        json_output=args.json,
+        color=False if args.no_color else None,
+        explain=args.explain,
     )
-
-    today = date.today()
-    conn = sqlite3.connect(args.db_path)
-    try:
-        ensure_schema(conn)
-        record_range(conn, roots, today, today, pricing)
-        conn.commit()
-    finally:
-        conn.close()
-
-    if args.json:
-        print(
-            json.dumps(
-                stats_as_dict(stats, cost, repos, cartoon),
-                indent=2,
-            ),
-        )
-    else:
-        color = False if args.no_color else None
-        print(
-            format_report(
-                stats,
-                color=color,
-                cost=cost,
-                repos=repos,
-                explain=args.explain,
-                cartoon=cartoon,
-                cartoon_since=args.cartoon_since,
-            ),
-        )
 
 
 if __name__ == '__main__':
