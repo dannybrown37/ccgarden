@@ -23,7 +23,8 @@ BRANCH_LENGTH_MIN = 30.0
 BRANCH_LENGTH_MAX = 230.0
 BRANCH_SPREAD_DEGREES = 55.0
 BRANCH_TIP_WIDTH = 1.6
-MAX_LEAVES_PER_BRANCH = 500
+LEAVES_PER_SESSION = 5
+LEAF_SATURATION_COUNT = 2000
 CANOPY_MIN_LEAVES = 3
 CANOPY_RADIUS_MIN = 20.0
 CANOPY_RADIUS_MAX = 130.0
@@ -32,6 +33,14 @@ LEAF_RADIUS = 7.0
 LEAF_COLORS = ('#3f7a3f', '#4f8f4f', '#5a9e5a', '#6bb26b', '#7dc47d')
 LEAF_SHAPE_D = 'M0,-1 C0.55,-0.75 0.55,0.75 0,1 C-0.55,0.75 -0.55,-0.75 0,-1 Z'
 LEAF_VEIN_D = 'M0,-0.85 L0,0.85'
+# Greenery covers the outer FOLIAGE_START_FRACTION..FOLIAGE_TIP_OVERHANG span
+# of each branch's length (as a fraction from origin to tip), so long
+# branches get proportionally more covered length instead of a single leaf
+# ball stuck at the very tip.
+FOLIAGE_START_FRACTION = 0.4
+FOLIAGE_TIP_OVERHANG = 1.08
+FOLIAGE_BLOB_SPACING = 55.0
+MAX_FOLIAGE_BLOBS = 6
 
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
@@ -296,10 +305,8 @@ def _render_branches_and_leaves(
             f'd="{shape_d}" fill="url(#trunkGradient)" '
             f'stroke="#3a2412" stroke-width="0.75" opacity="0.95" />'
         )
-        leaf_anchor_x = end_x + (end_x - origin_x) * 0.08
-        leaf_anchor_y = end_y + (end_y - origin_y) * 0.08
         elements.append(
-            _render_leaves(repo_branch, leaf_anchor_x, leaf_anchor_y)
+            _render_leaves(repo_branch, origin_x, origin_y, end_x, end_y)
         )
     return ''.join(elements)
 
@@ -341,49 +348,135 @@ def _canopy_radius(leaf_count: int) -> float:
     (and every leaf scattered around it) jump to its final size on its
     first active day instead of visibly growing across days after.
     """
-    saturation = min(leaf_count, MAX_LEAVES_PER_BRANCH)
-    growth = math.sqrt(saturation / MAX_LEAVES_PER_BRANCH)
+    saturation = min(leaf_count, LEAF_SATURATION_COUNT)
+    growth = math.sqrt(saturation / LEAF_SATURATION_COUNT)
     return CANOPY_RADIUS_MIN + (CANOPY_RADIUS_MAX - CANOPY_RADIUS_MIN) * growth
 
 
-def _render_leaves(
-    repo_branch: RepoBranch, center_x: float, center_y: float
+def _foliage_girth_fraction(t: float) -> float:
+    """0 at the start of the foliage zone, 1 by the tip.
+
+    Leaves and blobs hug close to the branch where the greenery begins and
+    billow out wider as they approach the tip.
+    """
+    span = FOLIAGE_TIP_OVERHANG - FOLIAGE_START_FRACTION
+    return max(0.0, min(1.0, (t - FOLIAGE_START_FRACTION) / span))
+
+
+def _foliage_blob_fractions(length: float) -> list[float]:
+    """Fractions-along-the-branch at which to anchor filler canopy blobs.
+
+    More, evenly-spaced blobs for a longer branch so the greenery visibly
+    bridges more of it instead of staying a single ball at the tip.
+    """
+    covered = length * (FOLIAGE_TIP_OVERHANG - FOLIAGE_START_FRACTION)
+    blob_count = max(
+        1, min(MAX_FOLIAGE_BLOBS, round(covered / FOLIAGE_BLOB_SPACING) + 1)
+    )
+    if blob_count == 1:
+        return [FOLIAGE_TIP_OVERHANG]
+    span = FOLIAGE_TIP_OVERHANG - FOLIAGE_START_FRACTION
+    return [
+        FOLIAGE_START_FRACTION + span * i / (blob_count - 1)
+        for i in range(blob_count)
+    ]
+
+
+def _leaf_along_branch_offset(
+    rng: random.Random,
+) -> tuple[float, float, float]:
+    """A leaf's fixed (t, perpendicular, along) placement, branch-relative.
+
+    t is skewed toward the tip so foliage is densest out there, while still
+    covering back into the branch.
+    """
+    t_raw = rng.random() ** 0.55
+    t = (
+        FOLIAGE_START_FRACTION
+        + (FOLIAGE_TIP_OVERHANG - FOLIAGE_START_FRACTION) * t_raw
+    )
+    perp_unit = rng.uniform(-1.0, 1.0)
+    along_unit = rng.uniform(-0.3, 0.3)
+    return t, perp_unit, along_unit
+
+
+def _render_foliage_blob(
+    origin_x: float,
+    origin_y: float,
+    dx: float,
+    dy: float,
+    *,
+    fraction: float,
+    canopy_radius: float,
+    seed: str,
 ) -> str:
-    leaf_count = min(repo_branch.sessions, MAX_LEAVES_PER_BRANCH)
+    girth = _foliage_girth_fraction(fraction)
+    blob_radius = canopy_radius * (0.35 + 0.65 * girth)
+    cx = origin_x + fraction * dx
+    cy = origin_y + fraction * dy
+    shadow_d = _blob_path(
+        cx + blob_radius * 0.18,
+        cy + blob_radius * 0.22,
+        blob_radius * 0.92,
+        random.Random(f'{seed}:shadow'),
+    )
+    main_d = _blob_path(cx, cy, blob_radius, random.Random(f'{seed}:canopy'))
+    return (
+        f'<path class="canopy" d="{shadow_d}" fill="#2f5f2f" '
+        f'opacity="0.3" filter="url(#softBlur)" />'
+        f'<path class="canopy" d="{main_d}" fill="url(#canopyGradient)" '
+        f'opacity="0.9" />'
+    )
+
+
+def _render_leaves(
+    repo_branch: RepoBranch,
+    origin_x: float,
+    origin_y: float,
+    end_x: float,
+    end_y: float,
+) -> str:
+    leaf_count = repo_branch.sessions * LEAVES_PER_SESSION
     if leaf_count == 0:
         return ''
     rng = random.Random(repo_branch.repo)
     elements = []
 
+    dx, dy = end_x - origin_x, end_y - origin_y
+    length = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+
     canopy_radius = _canopy_radius(leaf_count)
-    if leaf_count >= CANOPY_MIN_LEAVES:
-        shadow_d = _blob_path(
-            center_x + canopy_radius * 0.18,
-            center_y + canopy_radius * 0.22,
-            canopy_radius * 0.92,
-            rng,
-        )
-        elements.append(
-            f'<path class="canopy" d="{shadow_d}" fill="#2f5f2f" '
-            f'opacity="0.35" filter="url(#softBlur)" />'
-        )
-        blob_d = _blob_path(center_x, center_y, canopy_radius, rng)
-        elements.append(
-            f'<path class="canopy" d="{blob_d}" fill="url(#canopyGradient)" '
-            f'opacity="0.92" />'
-        )
-        scatter_radius = canopy_radius * 0.75
-    else:
-        scatter_radius = LEAF_SCATTER_RADIUS * 0.4
+    has_canopy = leaf_count >= CANOPY_MIN_LEAVES
+    if has_canopy:
+        for fraction in _foliage_blob_fractions(length):
+            elements.append(
+                _render_foliage_blob(
+                    origin_x,
+                    origin_y,
+                    dx,
+                    dy,
+                    fraction=fraction,
+                    canopy_radius=canopy_radius,
+                    seed=f'{repo_branch.repo}:{fraction:.3f}',
+                )
+            )
 
     for _ in range(leaf_count):
-        offset_x = rng.uniform(-scatter_radius, scatter_radius)
-        offset_y = rng.uniform(-scatter_radius, scatter_radius)
+        t, perp_unit, along_unit = _leaf_along_branch_offset(rng)
+        radius_bound = (
+            canopy_radius * (0.2 + 0.8 * _foliage_girth_fraction(t))
+            if has_canopy
+            else LEAF_SCATTER_RADIUS * 0.4
+        )
+        cx = origin_x + t * dx
+        cy = origin_y + t * dy
+        leaf_x = cx + (px * perp_unit + ux * along_unit) * radius_bound
+        leaf_y = cy + (py * perp_unit + uy * along_unit) * radius_bound
         radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
-        leaf_x = center_x + offset_x
-        leaf_y = center_y + offset_y
         elements.append(
             f'<g class="leaf" transform="translate({leaf_x:.1f},{leaf_y:.1f}) '
             f'rotate({angle:.1f}) scale({radius:.2f})">'
@@ -395,6 +488,95 @@ def _render_leaves(
     return ''.join(elements)
 
 
+LEGEND_X = 20.0
+LEGEND_Y = 20.0
+LEGEND_WIDTH = 250.0
+LEGEND_PADDING = 14.0
+LEGEND_TITLE_HEIGHT = 20.0
+LEGEND_ROW_HEIGHT = 32.0
+LEGEND_ROWS = (
+    ('Trunk', 'width grows with total sessions', 'trunk'),
+    ('Rings', 'one per day worked; bolder = busier day', 'ring'),
+    ('Branches', 'one per repo; longer = more lines added', 'branch'),
+    ('Leaves', 'one per session; more = busier repo', 'leaf'),
+)
+
+
+def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
+    if icon == 'trunk':
+        return (
+            f'<rect x="{cx - 6:.1f}" y="{cy - 7:.1f}" width="12" height="14" '
+            f'rx="3" fill="url(#trunkGradient)" stroke="#3a2412" '
+            f'stroke-width="0.6" />'
+        )
+    if icon == 'ring':
+        return (
+            f'<path d="M{cx - 7:.1f},{cy + 3:.1f} Q{cx:.1f},{cy - 5:.1f} '
+            f'{cx + 7:.1f},{cy + 3:.1f}" fill="none" stroke="#3a2412" '
+            f'stroke-width="2.2" stroke-linecap="round" opacity="0.6" />'
+        )
+    if icon == 'branch':
+        return (
+            f'<path d="M{cx - 7:.1f},{cy + 7:.1f} Q{cx:.1f},{cy - 2:.1f} '
+            f'{cx + 7:.1f},{cy - 7:.1f}" fill="none" '
+            f'stroke="url(#trunkGradient)" stroke-width="3" '
+            f'stroke-linecap="round" />'
+        )
+    return (
+        f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-15) scale(6)">'
+        f'<path d="{LEAF_SHAPE_D}" fill="#5a9e5a" opacity="0.95" />'
+        f'</g>'
+    )
+
+
+def _render_legend() -> str:
+    """A small key panel explaining what each part of the tree represents.
+
+    Without it, the trunk/rings/branches/leaves are just abstract shapes.
+    """
+    height = (
+        LEGEND_PADDING * 2
+        + LEGEND_TITLE_HEIGHT
+        + LEGEND_ROW_HEIGHT * len(LEGEND_ROWS)
+    )
+    icon_cx = LEGEND_X + LEGEND_PADDING + 10
+    text_x = LEGEND_X + LEGEND_PADDING + 26
+    parts = [
+        (
+            f'<g class="legend">'
+            f'<rect x="{LEGEND_X:.1f}" y="{LEGEND_Y:.1f}" '
+            f'width="{LEGEND_WIDTH:.1f}" height="{height:.1f}" rx="10" '
+            f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" '
+            f'opacity="0.88" />'
+            f'<text x="{LEGEND_X + LEGEND_PADDING:.1f}" '
+            f'y="{LEGEND_Y + LEGEND_PADDING + 12:.1f}" '
+            f'font-family="Georgia, serif" font-size="13" font-weight="bold" '
+            f'fill="#2f3b23">Key</text>'
+        )
+    ]
+    for index, (label, desc, icon) in enumerate(LEGEND_ROWS):
+        row_cy = (
+            LEGEND_Y
+            + LEGEND_PADDING
+            + LEGEND_TITLE_HEIGHT
+            + LEGEND_ROW_HEIGHT * index
+            + LEGEND_ROW_HEIGHT / 2
+        )
+        parts.append(_render_legend_icon(icon, icon_cx, row_cy))
+        parts.append(
+            f'<text x="{text_x:.1f}" y="{row_cy - 3:.1f}" '
+            f'font-family="Georgia, serif" font-size="10.5" '
+            f'font-weight="bold" fill="#2f3b23">{label}</text>'
+        )
+        parts.append(
+            f'<text x="{text_x:.1f}" y="{row_cy + 10:.1f}" '
+            f'font-family="Georgia, serif" font-size="9.5" '
+            f'fill="#4a4a3a">{desc}</text>'
+        )
+    parts.append('</g>')
+    return ''.join(parts)
+
+
 def render_svg(garden: GardenData) -> str:
     total_sessions = sum(day_ring.sessions for day_ring in garden.rings)
     base_half_width = _trunk_half_width(total_sessions)
@@ -403,6 +585,7 @@ def render_svg(garden: GardenData) -> str:
         _render_trunk(base_half_width)
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
+        + _render_legend()
     )
 
     return (
@@ -632,7 +815,7 @@ def _render_timeline_branches_and_leaves(
         final_width = min(2.2 + final_sessions * 0.22, 7.0)
 
         d_values = []
-        anchor_by_day: list[tuple[float, float]] = []
+        day_vectors: list[tuple[float, float]] = []
         for day_stat in days:
             if day_stat.sessions == 0:
                 d_values.append(
@@ -646,7 +829,7 @@ def _render_timeline_branches_and_leaves(
                         bow=0.0,
                     )
                 )
-                anchor_by_day.append((origin_x, origin_y))
+                day_vectors.append((0.0, 0.0))
                 continue
             # Grown as a share of the *final* length/width, not the same
             # absolute-lines_added formula re-evaluated per day -- that
@@ -684,12 +867,7 @@ def _render_timeline_branches_and_leaves(
                     bow=bow,
                 )
             )
-            anchor_by_day.append(
-                (
-                    end_x + (end_x - origin_x) * 0.08,
-                    end_y + (end_y - origin_y) * 0.08,
-                )
-            )
+            day_vectors.append((end_x - origin_x, end_y - origin_y))
 
         animate = _animate_tag('d', d_values, key_times, duration)
         elements.append(
@@ -702,7 +880,10 @@ def _render_timeline_branches_and_leaves(
             _render_timeline_leaves(
                 repo,
                 days,
-                anchor_by_day,
+                origin_x,
+                origin_y,
+                day_vectors,
+                final_length=final_length,
                 key_times=key_times,
                 duration=duration,
             )
@@ -713,87 +894,106 @@ def _render_timeline_branches_and_leaves(
 def _render_timeline_leaves(
     repo: str,
     days: list[RepoBranchDay],
-    anchor_by_day: list[tuple[float, float]],
+    origin_x: float,
+    origin_y: float,
+    day_vectors: list[tuple[float, float]],
     *,
+    final_length: float,
     key_times: list[float],
     duration: float,
 ) -> str:
+    # A branch's direction is fixed once chosen (only its length grows day
+    # to day), so the unit vectors from the *final* vector describe every
+    # day's branch equally well.
+    final_dx, final_dy = day_vectors[-1]
+    final_length = math.hypot(final_dx, final_dy) or final_length or 1.0
+    ux, uy = final_dx / final_length, final_dy / final_length
+    px, py = -uy, ux
+
     day_count = len(days)
-    leaf_count = min(days[-1].sessions, MAX_LEAVES_PER_BRANCH)
+    leaf_count = days[-1].sessions * LEAVES_PER_SESSION
     if leaf_count == 0:
         return ''
 
     elements = []
     has_canopy = leaf_count >= CANOPY_MIN_LEAVES
-    # Scatter radius per day -- grown in step with the canopy/leaf count so
-    # a leaf born early (while the branch is still short) lands close to
-    # that day's small cluster instead of being flung out to where the
-    # *final* canopy will eventually reach.
-    scatter_radius_by_day = []
+    day_canopy_radius = [
+        _canopy_radius(day_stat.sessions * LEAVES_PER_SESSION)
+        if day_stat.sessions * LEAVES_PER_SESSION >= CANOPY_MIN_LEAVES
+        else 0.0
+        for day_stat in days
+    ]
+
     if has_canopy:
-        shadow_values = []
-        main_values = []
-        for day_stat, (center_x, center_y) in zip(
-            days, anchor_by_day, strict=True
-        ):
-            day_leaf_count = min(day_stat.sessions, MAX_LEAVES_PER_BRANCH)
-            radius = (
-                _canopy_radius(day_leaf_count)
-                if day_leaf_count >= CANOPY_MIN_LEAVES
-                else 0.0
-            )
-            scatter_radius_by_day.append(radius * 0.75)
-            shadow_values.append(
-                _blob_path(
-                    center_x + radius * 0.18,
-                    center_y + radius * 0.22,
-                    radius * 0.92,
-                    random.Random(f'{repo}:shadow'),
+        for fraction in _foliage_blob_fractions(final_length):
+            girth = _foliage_girth_fraction(fraction)
+            shadow_values = []
+            main_values = []
+            for day_index, (dx, dy) in enumerate(day_vectors):
+                cx = origin_x + fraction * dx
+                cy = origin_y + fraction * dy
+                blob_radius = day_canopy_radius[day_index] * (
+                    0.35 + 0.65 * girth
                 )
-            )
-            main_values.append(
-                _blob_path(
-                    center_x, center_y, radius, random.Random(f'{repo}:canopy')
+                shadow_values.append(
+                    _blob_path(
+                        cx + blob_radius * 0.18,
+                        cy + blob_radius * 0.22,
+                        blob_radius * 0.92,
+                        random.Random(f'{repo}:{fraction:.3f}:shadow'),
+                    )
                 )
+                main_values.append(
+                    _blob_path(
+                        cx,
+                        cy,
+                        blob_radius,
+                        random.Random(f'{repo}:{fraction:.3f}:canopy'),
+                    )
+                )
+            shadow_animate = _animate_tag(
+                'd', shadow_values, key_times, duration
             )
-        shadow_animate = _animate_tag('d', shadow_values, key_times, duration)
-        main_animate = _animate_tag('d', main_values, key_times, duration)
-        elements.append(
-            f'<path class="canopy" d="{shadow_values[-1]}" fill="#2f5f2f" '
-            f'opacity="0.35" filter="url(#softBlur)">{shadow_animate}</path>'
-        )
-        elements.append(
-            f'<path class="canopy" d="{main_values[-1]}" '
-            f'fill="url(#canopyGradient)" opacity="0.92">{main_animate}</path>'
-        )
-    else:
-        final_scatter = LEAF_SCATTER_RADIUS * 0.4
-        for day_stat in days:
-            day_leaf_count = min(day_stat.sessions, MAX_LEAVES_PER_BRANCH)
-            fraction = day_leaf_count / leaf_count if leaf_count else 0.0
-            scatter_radius_by_day.append(final_scatter * fraction)
+            main_animate = _animate_tag('d', main_values, key_times, duration)
+            elements.append(
+                f'<path class="canopy" d="{shadow_values[-1]}" '
+                f'fill="#2f5f2f" opacity="0.3" '
+                f'filter="url(#softBlur)">{shadow_animate}</path>'
+            )
+            elements.append(
+                f'<path class="canopy" d="{main_values[-1]}" '
+                f'fill="url(#canopyGradient)" opacity="0.9">'
+                f'{main_animate}</path>'
+            )
 
     rng = random.Random(f'{repo}:leaves')
     for leaf_index in range(leaf_count):
-        offset_unit_x = rng.uniform(-1.0, 1.0)
-        offset_unit_y = rng.uniform(-1.0, 1.0)
+        t, perp_unit, along_unit = _leaf_along_branch_offset(rng)
         radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
+        girth = _foliage_girth_fraction(t)
 
-        # Track the branch's anchor point every day, not just on the day
-        # this leaf appears -- otherwise the leaf fades in already sitting
-        # at its (eventual) resting spot while the branch under it is
-        # still visibly mid-growth, instead of riding the tip out with it.
-        positions = [
-            (
-                anchor_x + offset_unit_x * scatter,
-                anchor_y + offset_unit_y * scatter,
+        # Track the branch's position every day, not just on the day this
+        # leaf appears -- otherwise the leaf fades in already sitting at its
+        # (eventual) resting spot while the branch under it is still
+        # visibly mid-growth, instead of riding the tip out with it.
+        positions = []
+        for day_index, (dx, dy) in enumerate(day_vectors):
+            cx = origin_x + t * dx
+            cy = origin_y + t * dy
+            radius_bound = (
+                day_canopy_radius[day_index] * (0.2 + 0.8 * girth)
+                if has_canopy
+                else LEAF_SCATTER_RADIUS * 0.4
             )
-            for (anchor_x, anchor_y), scatter in zip(
-                anchor_by_day, scatter_radius_by_day, strict=True
+            positions.append(
+                (
+                    cx + (px * perp_unit + ux * along_unit) * radius_bound,
+                    cy + (py * perp_unit + uy * along_unit) * radius_bound,
+                )
             )
-        ]
+
         final_x, final_y = positions[-1]
         translate_values = [f'{x:.1f},{y:.1f}' for x, y in positions]
         translate_animate = _animate_transform_tag(
@@ -804,7 +1004,7 @@ def _render_timeline_leaves(
             (
                 i
                 for i, day_stat in enumerate(days)
-                if day_stat.sessions > leaf_index
+                if day_stat.sessions * LEAVES_PER_SESSION > leaf_index
             ),
             day_count - 1,
         )
@@ -886,6 +1086,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
         )
+        + _render_legend()
     )
 
     return (

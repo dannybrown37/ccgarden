@@ -1,7 +1,7 @@
 import pytest
 
 from ccgarden.data import DayRing, GardenData, RepoBranch
-from ccgarden.render import MAX_LEAVES_PER_BRANCH, render_svg
+from ccgarden.render import LEAVES_PER_SESSION, render_svg
 
 
 def ring(day: str, *, sessions: int = 1) -> DayRing:
@@ -66,16 +66,9 @@ def test_render_svg_draws_one_branch_per_repo(branch_count: int) -> None:
     assert svg.count('class="branch"') == branch_count
 
 
-@pytest.mark.parametrize(
-    ('sessions', 'expected_leaves'),
-    [
-        (3, 3),
-        (40, 40),
-        (600, MAX_LEAVES_PER_BRANCH),
-    ],
-)
-def test_render_svg_leaf_count_matches_sessions_capped(
-    sessions: int, expected_leaves: int
+@pytest.mark.parametrize('sessions', [3, 40, 600])
+def test_render_svg_leaf_count_scales_uncapped_with_sessions(
+    sessions: int,
 ) -> None:
     garden = GardenData(
         rings=[], branches=[branch('dotfiles', sessions=sessions)]
@@ -83,7 +76,7 @@ def test_render_svg_leaf_count_matches_sessions_capped(
 
     svg = render_svg(garden)
 
-    assert svg.count('class="leaf"') == expected_leaves
+    assert svg.count('class="leaf"') == sessions * LEAVES_PER_SESSION
 
 
 def test_render_svg_leaf_positions_are_deterministic_across_renders() -> None:
