@@ -1,0 +1,224 @@
+import sqlite3
+from pathlib import Path
+
+import pytest
+
+from ccgarden.data import DayRing, RepoBranch, load_garden_data
+
+SCHEMA = """
+CREATE TABLE daily_totals (
+    day TEXT PRIMARY KEY,
+    sessions INTEGER NOT NULL,
+    prompts INTEGER NOT NULL,
+    replies INTEGER NOT NULL,
+    thinking_blocks INTEGER NOT NULL,
+    subagent_runs INTEGER NOT NULL,
+    lines_added INTEGER NOT NULL,
+    lines_removed INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    cost_total REAL,
+    recorded_at TEXT NOT NULL
+);
+
+CREATE TABLE daily_repo_usage (
+    day TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    sessions INTEGER NOT NULL,
+    prompts INTEGER NOT NULL,
+    replies INTEGER NOT NULL,
+    lines_added INTEGER NOT NULL,
+    lines_removed INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    cost REAL,
+    PRIMARY KEY (day, repo)
+);
+"""
+
+
+def make_db(
+    tmp_path: Path, totals_rows: list[tuple], repo_rows: list[tuple]
+) -> str:
+    db_path = tmp_path / 'ccstats.db'
+    conn = sqlite3.connect(db_path)
+    conn.executescript(SCHEMA)
+    conn.executemany(
+        'INSERT INTO daily_totals VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        totals_rows,
+    )
+    conn.executemany(
+        'INSERT INTO daily_repo_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        repo_rows,
+    )
+    conn.commit()
+    conn.close()
+    return str(db_path)
+
+
+def totals_row(
+    day: str, sessions: int, lines_added: int, lines_removed: int
+) -> tuple:
+    return (
+        day,
+        sessions,
+        0,
+        0,
+        0,
+        0,
+        lines_added,
+        lines_removed,
+        0,
+        0,
+        0,
+        0,
+        0.0,
+        day,
+    )
+
+
+def repo_row(
+    day: str,
+    repo: str,
+    *,
+    sessions: int,
+    lines_added: int,
+    lines_removed: int,
+    output_tokens: int = 0,
+    input_tokens: int = 0,
+    cost: float = 0.0,
+) -> tuple:
+    return (
+        day,
+        repo,
+        sessions,
+        0,
+        0,
+        lines_added,
+        lines_removed,
+        output_tokens,
+        input_tokens,
+        0,
+        0,
+        cost,
+    )
+
+
+def test_load_garden_data_from_empty_db_returns_empty_lists(
+    tmp_path: Path,
+) -> None:
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=[])
+
+    garden = load_garden_data(db_path)
+
+    assert garden.rings == []
+    assert garden.branches == []
+
+
+@pytest.mark.parametrize(
+    'insert_order',
+    [
+        ['2026-07-26', '2026-07-27', '2026-07-28'],
+        ['2026-07-28', '2026-07-26', '2026-07-27'],
+    ],
+)
+def test_load_rings_returns_days_ordered_ascending(
+    tmp_path: Path, insert_order: list[str]
+) -> None:
+    totals_rows = [
+        totals_row(day, sessions=1, lines_added=10, lines_removed=1)
+        for day in insert_order
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=[])
+
+    garden = load_garden_data(db_path)
+
+    assert [ring.day for ring in garden.rings] == [
+        '2026-07-26',
+        '2026-07-27',
+        '2026-07-28',
+    ]
+    assert garden.rings[0] == DayRing(
+        day='2026-07-26', sessions=1, lines_added=10, lines_removed=1
+    )
+
+
+def test_load_branches_aggregates_same_repo_across_days(
+    tmp_path: Path,
+) -> None:
+    repo_rows = [
+        repo_row(
+            '2026-07-26',
+            'dotfiles',
+            sessions=2,
+            lines_added=100,
+            lines_removed=10,
+            output_tokens=500,
+            input_tokens=50,
+            cost=1.5,
+        ),
+        repo_row(
+            '2026-07-27',
+            'dotfiles',
+            sessions=3,
+            lines_added=200,
+            lines_removed=20,
+            output_tokens=700,
+            input_tokens=70,
+            cost=2.5,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=repo_rows)
+
+    garden = load_garden_data(db_path)
+
+    assert garden.branches == [
+        RepoBranch(
+            repo='dotfiles',
+            sessions=5,
+            lines_added=300,
+            lines_removed=30,
+            output_tokens=1200,
+            input_tokens=120,
+            cost=4.0,
+        )
+    ]
+
+
+def test_load_branches_sorts_by_lines_added_descending(tmp_path: Path) -> None:
+    repo_rows = [
+        repo_row(
+            '2026-07-26',
+            'small-repo',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+        ),
+        repo_row(
+            '2026-07-26',
+            'big-repo',
+            sessions=1,
+            lines_added=999,
+            lines_removed=1,
+        ),
+        repo_row(
+            '2026-07-26',
+            'mid-repo',
+            sessions=1,
+            lines_added=500,
+            lines_removed=1,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=repo_rows)
+
+    garden = load_garden_data(db_path)
+
+    assert [branch.repo for branch in garden.branches] == [
+        'big-repo',
+        'mid-repo',
+        'small-repo',
+    ]

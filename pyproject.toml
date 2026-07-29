@@ -1,0 +1,56 @@
+[project]
+name = "ccgarden"
+version = "0.1.0"
+description = "Grow a tree/garden visualization from ccstats.db session history"
+authors = [
+    { name = "Danny Brown", email = "dannybrown37@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+ccgarden = "ccgarden:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 79
+show-fixes = true
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+  "A", "ANN", "ARG", "B", "C4", "COM", "C90",
+  "D200", "D201", "D202", "D205", "D212",
+  "E", "EM", "ERA", "EXE", "F", "FBT", "G", "I", "ICN", "ISC", "N",
+  "PGH", "PIE", "PL", "PLE", "PLR", "PLW", "PT", "PTH", "PYI", "Q",
+  "RET", "RSE", "RUF", "S", "SLF", "SIM", "TCH", "TID", "TRY", "W",
+  "UP", "YTT",
+]
+ignore = [
+    "S311",
+    "S101",
+    "I001",
+    "S113",
+    "PLR0913",
+    "PLC0415",
+    "COM812",  # conflicts with formatter
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN201", "PLR2004", "ANN001", "ANN003", "ARG002", "PT019"]
+
+[tool.ruff.format]
+quote-style = "single"
+docstring-code-format = true
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.0",
+]

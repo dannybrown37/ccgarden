@@ -1,0 +1,95 @@
+import pytest
+
+from ccgarden.data import DayRing, GardenData, RepoBranch
+from ccgarden.render import MAX_LEAVES_PER_BRANCH, render_svg
+
+
+def ring(day: str, *, sessions: int = 1) -> DayRing:
+    return DayRing(day=day, sessions=sessions, lines_added=10, lines_removed=1)
+
+
+def branch(
+    repo: str, *, sessions: int = 1, lines_added: int = 100
+) -> RepoBranch:
+    return RepoBranch(
+        repo=repo,
+        sessions=sessions,
+        lines_added=lines_added,
+        lines_removed=10,
+        output_tokens=1000,
+        input_tokens=100,
+        cost=1.0,
+    )
+
+
+def test_render_svg_wraps_content_in_svg_tag() -> None:
+    garden = GardenData(
+        rings=[ring('2026-07-26')], branches=[branch('dotfiles')]
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.strip().startswith('<svg')
+    assert svg.strip().endswith('</svg>')
+    assert 'viewBox' in svg
+
+
+def test_render_svg_empty_garden_still_renders_bare_trunk() -> None:
+    garden = GardenData(rings=[], branches=[])
+
+    svg = render_svg(garden)
+
+    assert svg.strip().startswith('<svg')
+    assert 'class="trunk"' in svg
+    assert svg.count('class="ring"') == 0
+    assert svg.count('class="branch"') == 0
+    assert svg.count('class="leaf"') == 0
+
+
+@pytest.mark.parametrize('ring_count', [1, 3, 5])
+def test_render_svg_draws_one_ring_per_day(ring_count: int) -> None:
+    rings = [ring(f'2026-07-{26 + i}') for i in range(ring_count)]
+    garden = GardenData(rings=rings, branches=[])
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="ring"') == ring_count
+
+
+@pytest.mark.parametrize('branch_count', [1, 3, 5])
+def test_render_svg_draws_one_branch_per_repo(branch_count: int) -> None:
+    branches = [branch(f'repo-{i}') for i in range(branch_count)]
+    garden = GardenData(rings=[], branches=branches)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="branch"') == branch_count
+
+
+@pytest.mark.parametrize(
+    ('sessions', 'expected_leaves'),
+    [
+        (3, 3),
+        (40, 40),
+        (100, MAX_LEAVES_PER_BRANCH),
+    ],
+)
+def test_render_svg_leaf_count_matches_sessions_capped(
+    sessions: int, expected_leaves: int
+) -> None:
+    garden = GardenData(
+        rings=[], branches=[branch('dotfiles', sessions=sessions)]
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="leaf"') == expected_leaves
+
+
+def test_render_svg_leaf_positions_are_deterministic_across_renders() -> None:
+    garden = GardenData(rings=[], branches=[branch('dotfiles', sessions=10)])
+
+    first = render_svg(garden)
+    second = render_svg(garden)
+
+    assert first == second
