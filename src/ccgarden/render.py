@@ -450,22 +450,56 @@ def _foliage_blob_fractions(length: float) -> list[float]:
     ]
 
 
-def _leaf_along_branch_offset(
-    rng: random.Random,
-) -> tuple[float, float, float]:
-    """A leaf's fixed (t, perpendicular, along) placement, branch-relative.
+def _foliage_blob_relative_radii(length: float) -> list[tuple[float, float]]:
+    """(fraction, radius-as-a-fraction-of-canopy_radius) per foliage blob.
 
-    t is skewed toward the tip so foliage is densest out there, while still
-    covering back into the branch.
+    Mirrors the radius `_render_foliage_blob` actually draws at each
+    fraction, so leaf placement can be weighted by real blob area instead
+    of by raw along-branch position.
     """
-    t_raw = rng.random() ** 0.55
-    t = (
-        FOLIAGE_START_FRACTION
-        + (FOLIAGE_TIP_OVERHANG - FOLIAGE_START_FRACTION) * t_raw
-    )
-    perp_unit = rng.uniform(-1.0, 1.0)
-    along_unit = rng.uniform(-0.3, 0.3)
-    return t, perp_unit, along_unit
+    return [
+        (
+            fraction,
+            0.35 + 0.65 * _foliage_girth_fraction(fraction),
+        )
+        for fraction in _foliage_blob_fractions(length)
+    ]
+
+
+def _leaf_placement(
+    rng: random.Random,
+    blob_relative_radii: list[tuple[float, float]],
+) -> tuple[float, float, float, float]:
+    """A leaf's fixed (t, relative_radius, r_frac, angle) placement.
+
+    Assigns the leaf to one of the branch's actual canopy blobs, weighted
+    by that blob's area, then fixes a position inside its disk (radius
+    fraction via sqrt for area-uniform density, angle over the full
+    circle). Weighting by area -- rather than sampling t directly along
+    the branch -- makes leaf density track how much green each blob
+    actually covers, instead of piling up wherever the raw along-branch
+    position happens to land. `relative_radius` and `r_frac` are kept
+    separate (not pre-multiplied) so callers can rescale by a per-day
+    canopy_radius during the growth timeline.
+    """
+    weights = [radius**2 for _, radius in blob_relative_radii]
+    fraction, relative_radius = rng.choices(
+        blob_relative_radii, weights=weights
+    )[0]
+    angle = rng.uniform(0.0, 2 * math.pi)
+    r_frac = math.sqrt(rng.random())
+    return fraction, relative_radius, r_frac, angle
+
+
+def _leaf_offset(
+    relative_radius: float,
+    r_frac: float,
+    angle: float,
+    canopy_radius: float,
+) -> tuple[float, float]:
+    """A leaf's (perpendicular, along) pixel offset from its blob center."""
+    radius = canopy_radius * relative_radius * r_frac
+    return radius * math.cos(angle), radius * math.sin(angle)
 
 
 def _render_foliage_blob(
@@ -517,8 +551,11 @@ def _render_leaves(
 
     canopy_radius = _canopy_radius(leaf_count)
     has_canopy = leaf_count >= CANOPY_MIN_LEAVES
+    blob_relative_radii = (
+        _foliage_blob_relative_radii(length) if has_canopy else []
+    )
     if has_canopy:
-        for fraction in _foliage_blob_fractions(length):
+        for fraction, _ in blob_relative_radii:
             elements.append(
                 _render_foliage_blob(
                     origin_x,
@@ -532,16 +569,23 @@ def _render_leaves(
             )
 
     for _ in range(leaf_count):
-        t, perp_unit, along_unit = _leaf_along_branch_offset(rng)
-        radius_bound = (
-            canopy_radius * (0.2 + 0.8 * _foliage_girth_fraction(t))
-            if has_canopy
-            else LEAF_SCATTER_RADIUS * 0.4
-        )
+        if has_canopy:
+            t, relative_radius, r_frac, blob_angle = _leaf_placement(
+                rng, blob_relative_radii
+            )
+            perp_offset, along_offset = _leaf_offset(
+                relative_radius, r_frac, blob_angle, canopy_radius
+            )
+        else:
+            t = rng.uniform(FOLIAGE_START_FRACTION, FOLIAGE_TIP_OVERHANG)
+            blob_angle = rng.uniform(0.0, 2 * math.pi)
+            scatter_r = LEAF_SCATTER_RADIUS * 0.4 * math.sqrt(rng.random())
+            perp_offset = scatter_r * math.cos(blob_angle)
+            along_offset = scatter_r * math.sin(blob_angle)
         cx = origin_x + t * dx
         cy = origin_y + t * dy
-        leaf_x = cx + (px * perp_unit + ux * along_unit) * radius_bound
-        leaf_y = cy + (py * perp_unit + uy * along_unit) * radius_bound
+        leaf_x = cx + px * perp_offset + ux * along_offset
+        leaf_y = cy + py * perp_offset + uy * along_offset
         radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
@@ -1042,6 +1086,9 @@ def _render_timeline_leaves(
         else 0.0
         for day_stat in days
     ]
+    blob_relative_radii = (
+        _foliage_blob_relative_radii(final_length) if has_canopy else []
+    )
 
     if has_canopy:
         for fraction in _foliage_blob_fractions(final_length):
@@ -1087,11 +1134,16 @@ def _render_timeline_leaves(
 
     rng = random.Random(f'{repo}:leaves')
     for leaf_index in range(leaf_count):
-        t, perp_unit, along_unit = _leaf_along_branch_offset(rng)
+        if has_canopy:
+            t, relative_radius, r_frac, blob_angle = _leaf_placement(
+                rng, blob_relative_radii
+            )
+        else:
+            t = rng.uniform(FOLIAGE_START_FRACTION, FOLIAGE_TIP_OVERHANG)
+            blob_angle = rng.uniform(0.0, 2 * math.pi)
         radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
-        girth = _foliage_girth_fraction(t)
 
         # Track the branch's position every day, not just on the day this
         # leaf appears -- otherwise the leaf fades in already sitting at its
@@ -1101,15 +1153,21 @@ def _render_timeline_leaves(
         for day_index, (dx, dy) in enumerate(day_vectors):
             cx = origin_x + t * dx
             cy = origin_y + t * dy
-            radius_bound = (
-                day_canopy_radius[day_index] * (0.2 + 0.8 * girth)
-                if has_canopy
-                else LEAF_SCATTER_RADIUS * 0.4
-            )
+            if has_canopy:
+                perp_offset, along_offset = _leaf_offset(
+                    relative_radius,
+                    r_frac,
+                    blob_angle,
+                    day_canopy_radius[day_index],
+                )
+            else:
+                scatter_r = LEAF_SCATTER_RADIUS * 0.4
+                perp_offset = scatter_r * math.cos(blob_angle)
+                along_offset = scatter_r * math.sin(blob_angle)
             positions.append(
                 (
-                    cx + (px * perp_unit + ux * along_unit) * radius_bound,
-                    cy + (py * perp_unit + uy * along_unit) * radius_bound,
+                    cx + px * perp_offset + ux * along_offset,
+                    cy + py * perp_offset + uy * along_offset,
                 )
             )
 
