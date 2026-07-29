@@ -3,8 +3,8 @@ import webbrowser
 from pathlib import Path
 
 from ccgarden.claude_stats import DEFAULT_LOG_ROOT, print_report
-from ccgarden.data import load_garden_data
-from ccgarden.render import render_svg
+from ccgarden.data import load_garden_timeline
+from ccgarden.render import render_timeline_svg
 
 DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
 DEFAULT_OUTPUT_PATH = Path.home() / '.claude' / 'ccgarden.svg'
@@ -35,8 +35,8 @@ def _open_in_browser(path: Path) -> None:
 
 
 def main() -> None:
-    garden = load_garden_data(str(DEFAULT_DB_PATH))
-    svg = render_svg(garden)
+    timeline = load_garden_timeline(str(DEFAULT_DB_PATH))
+    svg = render_timeline_svg(timeline)
     DEFAULT_OUTPUT_PATH.write_text(svg)
     _open_in_browser(DEFAULT_OUTPUT_PATH)
     print(f'wrote {DEFAULT_OUTPUT_PATH}')

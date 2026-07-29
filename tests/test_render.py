@@ -71,7 +71,7 @@ def test_render_svg_draws_one_branch_per_repo(branch_count: int) -> None:
     [
         (3, 3),
         (40, 40),
-        (100, MAX_LEAVES_PER_BRANCH),
+        (600, MAX_LEAVES_PER_BRANCH),
     ],
 )
 def test_render_svg_leaf_count_matches_sessions_capped(
