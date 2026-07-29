@@ -11,16 +11,18 @@ if TYPE_CHECKING:
 
 VIEWBOX_WIDTH = 800
 VIEWBOX_HEIGHT = 800
-GROUND_Y = 750
+GROUND_Y = 728
 TRUNK_HEIGHT = 300
 TRUNK_TOP_Y = GROUND_Y - TRUNK_HEIGHT
 TRUNK_CENTER_X = VIEWBOX_WIDTH / 2
 TRUNK_BASE_HALF_WIDTH_MIN = 9.0
 TRUNK_BASE_HALF_WIDTH_MAX = 30.0
+TRUNK_SESSIONS_SATURATION = 400
 TRUNK_TOP_TAPER = 0.72
 BRANCH_ZONE_HEIGHT = 220
 BRANCH_LENGTH_MIN = 30.0
 BRANCH_LENGTH_MAX = 230.0
+BRANCH_LINES_SATURATION = 6000
 BRANCH_SPREAD_DEGREES = 55.0
 BRANCH_TIP_WIDTH = 1.6
 LEAVES_PER_SESSION = 5
@@ -41,6 +43,9 @@ FOLIAGE_START_FRACTION = 0.4
 FOLIAGE_TIP_OVERHANG = 1.08
 FOLIAGE_BLOB_SPACING = 55.0
 MAX_FOLIAGE_BLOBS = 6
+RING_STROKE_WIDTH_MIN = 0.75
+RING_STROKE_WIDTH_MAX = 3.5
+RING_SESSIONS_SATURATION = 60
 
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
@@ -49,10 +54,76 @@ TIMELINE_MIN_DAYS_TO_ANIMATE = 2
 
 
 def _trunk_half_width(total_sessions: int) -> float:
-    return min(
-        TRUNK_BASE_HALF_WIDTH_MIN + total_sessions * 0.8,
-        TRUNK_BASE_HALF_WIDTH_MAX,
+    """Base half-width of the trunk, growing with cumulative sessions.
+
+    A plain linear formula saturates at its cap within the first ~26
+    sessions, which made the trunk (and its day-by-day growth animation)
+    jump straight to full width on day one for anyone with a normal daily
+    session count, instead of visibly widening across days/months like the
+    canopy already does (see `_canopy_radius`).
+    """
+    growth = math.sqrt(
+        min(total_sessions, TRUNK_SESSIONS_SATURATION)
+        / TRUNK_SESSIONS_SATURATION
     )
+    return (
+        TRUNK_BASE_HALF_WIDTH_MIN
+        + (TRUNK_BASE_HALF_WIDTH_MAX - TRUNK_BASE_HALF_WIDTH_MIN) * growth
+    )
+
+
+def _trunk_half_widths_for_timeline(
+    cumulative_sessions: list[int],
+) -> list[float]:
+    """Per-day trunk half-widths for the growth timelapse.
+
+    Evaluating `_trunk_half_width` independently on each day's raw
+    cumulative total (as `render_svg`'s static render does) makes the
+    trunk start already partway up the saturation curve on day one --
+    with a normal amount of prior history, there's almost no headroom left
+    to visibly grow into over the remaining days. Branches sidestep this
+    by interpolating as a fraction of *their own* final size instead of
+    re-deriving an absolute value per day; do the same here so the trunk
+    always starts near the minimum and grows into the real final width.
+    """
+    final_width = _trunk_half_width(cumulative_sessions[-1])
+    final_total = cumulative_sessions[-1] or 1
+    return [
+        TRUNK_BASE_HALF_WIDTH_MIN
+        + (final_width - TRUNK_BASE_HALF_WIDTH_MIN) * (sessions / final_total)
+        for sessions in cumulative_sessions
+    ]
+
+
+def _ring_stroke_width(sessions: int) -> float:
+    """A ring's boldness for a day with this many sessions.
+
+    Same saturation problem as the trunk: a linear formula capped out by
+    ~9 sessions/day, so any normal work day maxed out the stroke and every
+    ring looked identically bold regardless of how busy the day actually
+    was.
+    """
+    growth = math.sqrt(
+        min(sessions, RING_SESSIONS_SATURATION) / RING_SESSIONS_SATURATION
+    )
+    return (
+        RING_STROKE_WIDTH_MIN
+        + (RING_STROKE_WIDTH_MAX - RING_STROKE_WIDTH_MIN) * growth
+    )
+
+
+def _branch_length(lines_added: int) -> float:
+    """A branch's length for a repo with this many cumulative lines added.
+
+    Same saturation problem as the trunk and rings: a linear formula
+    capped out by ~1,333 lines added, so any repo worked on for more than
+    a few sessions maxed out the length and every branch looked the same
+    regardless of how much bigger one repo's diffs actually were.
+    """
+    growth = math.sqrt(
+        min(lines_added, BRANCH_LINES_SATURATION) / BRANCH_LINES_SATURATION
+    )
+    return BRANCH_LENGTH_MIN + (BRANCH_LENGTH_MAX - BRANCH_LENGTH_MIN) * growth
 
 
 def _half_width_at(y: float, base_half_width: float) -> float:
@@ -188,7 +259,7 @@ def _render_rings(rings: list[DayRing], base_half_width: float) -> str:
         half_width = _half_width_at(y, base_half_width) * 0.85
         cx = TRUNK_CENTER_X
         bow = half_width * 0.1
-        stroke_width = min(0.75 + day_ring.sessions * 0.3, 3.5)
+        stroke_width = _ring_stroke_width(day_ring.sessions)
         d = f'M {cx - half_width},{y} Q {cx},{y - bow} {cx + half_width},{y}'
         elements.append(
             f'<path class="ring" d="{d}" fill="none" stroke="#3a2412" '
@@ -280,10 +351,7 @@ def _render_branches_and_leaves(
         origin_half_width = _half_width_at(origin_y, base_half_width)
         origin_x = TRUNK_CENTER_X + origin_half_width * side * 0.5
 
-        length = min(
-            BRANCH_LENGTH_MIN + repo_branch.lines_added * 0.15,
-            BRANCH_LENGTH_MAX,
-        )
+        length = _branch_length(repo_branch.lines_added)
         end_x, end_y = _branch_endpoint(
             origin_x, origin_y, length, side, y_fraction
         )
@@ -488,18 +556,70 @@ def _render_leaves(
     return ''.join(elements)
 
 
-LEGEND_X = 20.0
-LEGEND_Y = 20.0
-LEGEND_WIDTH = 250.0
-LEGEND_PADDING = 14.0
-LEGEND_TITLE_HEIGHT = 20.0
-LEGEND_ROW_HEIGHT = 32.0
+LEGEND_MARGIN = 4.0
+LEGEND_Y = GROUND_Y + LEGEND_MARGIN
+LEGEND_HEIGHT = VIEWBOX_HEIGHT - GROUND_Y - LEGEND_MARGIN * 2
+LEGEND_X = 14.0
+LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
+LEGEND_PADDING = 10.0
 LEGEND_ROWS = (
-    ('Trunk', 'width grows with total sessions', 'trunk'),
-    ('Rings', 'one per day worked; bolder = busier day', 'ring'),
-    ('Branches', 'one per repo; longer = more lines added', 'branch'),
-    ('Leaves', 'one per session; more = busier repo', 'leaf'),
+    ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
+    ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
+    ('Branches', ('one per repo; longer', '= more lines added'), 'branch'),
+    ('Leaves', ('one per session;', 'more = busier repo'), 'leaf'),
 )
+BRANCH_SCALE_REFERENCE_LINES = (500, 2000, BRANCH_LINES_SATURATION)
+BRANCH_SCALE_THOUSAND = 1000
+MINI_BRANCH_LENGTH_MIN = 6.0
+MINI_BRANCH_LENGTH_MAX = 34.0
+
+
+def _mini_branch_scale_length(lines_added: int) -> float:
+    """A scaled-down branch length for the legend's reference ruler.
+
+    Mirrors `_branch_length`'s growth curve so the ruler's tick lengths
+    are actually proportional to what the tree draws, just shrunk to fit
+    a legend cell instead of the full canopy.
+    """
+    growth = math.sqrt(
+        min(lines_added, BRANCH_LINES_SATURATION) / BRANCH_LINES_SATURATION
+    )
+    return (
+        MINI_BRANCH_LENGTH_MIN
+        + (MINI_BRANCH_LENGTH_MAX - MINI_BRANCH_LENGTH_MIN) * growth
+    )
+
+
+def _render_branch_scale(text_x: float, top_y: float) -> str:
+    """A small tick-mark ruler mapping branch length to lines added.
+
+    Without this, the legend said "longer = more lines added" but gave no
+    sense of *how much* -- there was no way to read a branch's length back
+    into an approximate line count.
+    """
+    parts = []
+    for index, lines in enumerate(BRANCH_SCALE_REFERENCE_LINES):
+        y = top_y + index * 8
+        length = _mini_branch_scale_length(lines)
+        label = (
+            f'{lines // BRANCH_SCALE_THOUSAND}k'
+            if lines >= BRANCH_SCALE_THOUSAND
+            else str(lines)
+        )
+        if lines >= BRANCH_LINES_SATURATION:
+            label += '+'
+        parts.append(
+            f'<line x1="{text_x:.1f}" y1="{y:.1f}" '
+            f'x2="{text_x + length:.1f}" y2="{y:.1f}" '
+            f'stroke="#6b4226" stroke-width="2.4" '
+            f'stroke-linecap="round" />'
+        )
+        parts.append(
+            f'<text x="{text_x + length + 5:.1f}" y="{y + 2.6:.1f}" '
+            f'font-family="Georgia, serif" font-size="7.5" '
+            f'fill="#4a4a3a">{label} lines</text>'
+        )
+    return ''.join(parts)
 
 
 def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
@@ -530,49 +650,50 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
 
 
 def _render_legend() -> str:
-    """A small key panel explaining what each part of the tree represents.
+    """A key strip explaining what each part of the tree represents.
 
-    Without it, the trunk/rings/branches/leaves are just abstract shapes.
+    Runs the full width along the bottom, below the ground line -- every
+    other part of the tree (trunk, rings, branches, leaves) sits above
+    GROUND_Y, so a strip confined to the margin below it can never overlap
+    them, unlike a panel placed somewhere over the canopy.
     """
-    height = (
-        LEGEND_PADDING * 2
-        + LEGEND_TITLE_HEIGHT
-        + LEGEND_ROW_HEIGHT * len(LEGEND_ROWS)
-    )
-    icon_cx = LEGEND_X + LEGEND_PADDING + 10
-    text_x = LEGEND_X + LEGEND_PADDING + 26
+    column_width = LEGEND_WIDTH / len(LEGEND_ROWS)
+    # Anchored near the top of the (taller-than-content) box rather than
+    # vertically centered, so the branch row's reference ruler has room
+    # to sit below the icon/text without overflowing the box.
+    row_cy = LEGEND_Y + 17.0
     parts = [
         (
             f'<g class="legend">'
             f'<rect x="{LEGEND_X:.1f}" y="{LEGEND_Y:.1f}" '
-            f'width="{LEGEND_WIDTH:.1f}" height="{height:.1f}" rx="10" '
+            f'width="{LEGEND_WIDTH:.1f}" height="{LEGEND_HEIGHT:.1f}" rx="8" '
             f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" '
             f'opacity="0.88" />'
-            f'<text x="{LEGEND_X + LEGEND_PADDING:.1f}" '
-            f'y="{LEGEND_Y + LEGEND_PADDING + 12:.1f}" '
-            f'font-family="Georgia, serif" font-size="13" font-weight="bold" '
-            f'fill="#2f3b23">Key</text>'
         )
     ]
-    for index, (label, desc, icon) in enumerate(LEGEND_ROWS):
-        row_cy = (
-            LEGEND_Y
-            + LEGEND_PADDING
-            + LEGEND_TITLE_HEIGHT
-            + LEGEND_ROW_HEIGHT * index
-            + LEGEND_ROW_HEIGHT / 2
-        )
-        parts.append(_render_legend_icon(icon, icon_cx, row_cy))
+    for index, (label, desc_lines, icon) in enumerate(LEGEND_ROWS):
+        col_x = LEGEND_X + column_width * index
+        icon_cx = col_x + LEGEND_PADDING + 8
+        text_x = col_x + LEGEND_PADDING + 20
+        desc_line1, desc_line2 = desc_lines
+        parts.append(_render_legend_icon(icon, icon_cx, row_cy - 2))
         parts.append(
-            f'<text x="{text_x:.1f}" y="{row_cy - 3:.1f}" '
-            f'font-family="Georgia, serif" font-size="10.5" '
+            f'<text x="{text_x:.1f}" y="{row_cy - 9:.1f}" '
+            f'font-family="Georgia, serif" font-size="10" '
             f'font-weight="bold" fill="#2f3b23">{label}</text>'
         )
         parts.append(
-            f'<text x="{text_x:.1f}" y="{row_cy + 10:.1f}" '
-            f'font-family="Georgia, serif" font-size="9.5" '
-            f'fill="#4a4a3a">{desc}</text>'
+            f'<text x="{text_x:.1f}" y="{row_cy + 2:.1f}" '
+            f'font-family="Georgia, serif" font-size="8.2" '
+            f'fill="#4a4a3a">{desc_line1}</text>'
         )
+        parts.append(
+            f'<text x="{text_x:.1f}" y="{row_cy + 11:.1f}" '
+            f'font-family="Georgia, serif" font-size="8.2" '
+            f'fill="#4a4a3a">{desc_line2}</text>'
+        )
+        if icon == 'branch':
+            parts.append(_render_branch_scale(text_x, row_cy + 24))
     parts.append('</g>')
     return ''.join(parts)
 
@@ -743,7 +864,7 @@ def _render_timeline_rings(
         half_width = _half_width_at(y, final_base_half_width) * 0.85
         cx = TRUNK_CENTER_X
         bow = half_width * 0.1
-        target_width = min(0.75 + sessions * 0.3, 3.5)
+        target_width = _ring_stroke_width(sessions)
         d = (
             f'M {cx - half_width:.2f},{y:.2f} '
             f'Q {cx:.2f},{y - bow:.2f} {cx + half_width:.2f},{y:.2f}'
@@ -809,9 +930,7 @@ def _render_timeline_branches_and_leaves(
         days = timeline.branch_days[repo]
         final_lines_added = days[-1].lines_added
         final_sessions = days[-1].sessions
-        final_length = min(
-            BRANCH_LENGTH_MIN + final_lines_added * 0.15, BRANCH_LENGTH_MAX
-        )
+        final_length = _branch_length(final_lines_added)
         final_width = min(2.2 + final_sessions * 0.22, 7.0)
 
         d_values = []
@@ -1068,10 +1187,9 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
 
     duration = _timeline_duration(day_count)
     key_times = _key_times(day_count)
-    base_half_width_by_day = [
-        _trunk_half_width(sessions)
-        for sessions in timeline.cumulative_sessions
-    ]
+    base_half_width_by_day = _trunk_half_widths_for_timeline(
+        timeline.cumulative_sessions
+    )
     final_base_half_width = base_half_width_by_day[-1]
 
     body = (
