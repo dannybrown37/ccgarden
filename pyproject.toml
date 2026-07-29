@@ -10,6 +10,7 @@ dependencies = []
 
 [project.scripts]
 ccgarden = "ccgarden:main"
+ccstats = "ccgarden.claude_stats:main"
 
 [build-system]
 requires = ["hatchling"]
