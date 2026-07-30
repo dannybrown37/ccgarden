@@ -138,9 +138,9 @@ def _render_defs() -> str:
     return (
         '<defs>'
         '<linearGradient id="skyGradient" x1="0%" y1="0%" x2="0%" y2="100%">'
-        '<stop offset="0%" stop-color="#eaf6f0" />'
-        '<stop offset="70%" stop-color="#eaf4ea" />'
-        '<stop offset="100%" stop-color="#dcefe0" />'
+        '<stop offset="0%" stop-color="#1c3d5a" />'
+        '<stop offset="55%" stop-color="#2f5c82" />'
+        '<stop offset="100%" stop-color="#4a7fa5" />'
         '</linearGradient>'
         '<linearGradient id="groundGradient" '
         'x1="0%" y1="0%" x2="0%" y2="100%">'
