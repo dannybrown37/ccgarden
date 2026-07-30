@@ -1,9 +1,10 @@
 import pytest
 
-from ccgarden.data import DayRing, GardenData, RepoBranch
+from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch
 from ccgarden.render import (
     LEAVES_PER_SESSION,
     _cache_efficiency_flower_count,
+    _cloud_radius,
     render_svg,
 )
 
@@ -134,3 +135,30 @@ def test_render_svg_draws_no_flowers_without_cache_writes() -> None:
     svg = render_svg(garden)
 
     assert svg.count('class="flower"') == 0
+
+
+@pytest.mark.parametrize('model_count', [1, 2, 4])
+def test_render_svg_draws_one_cloud_per_model(model_count: int) -> None:
+    models = [
+        ModelCloud(
+            model=f'model-{i}', output_tokens=100_000, input_tokens=1_000
+        )
+        for i in range(model_count)
+    ]
+    garden = GardenData(rings=[], branches=[], models=models)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="cloud"') == model_count
+
+
+def test_render_svg_draws_no_clouds_without_models() -> None:
+    garden = GardenData(rings=[], branches=[], models=[])
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="cloud"') == 0
+
+
+def test_cloud_radius_grows_with_total_tokens() -> None:
+    assert _cloud_radius(0) < _cloud_radius(1_000) < _cloud_radius(5_000_000)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from ccgarden.data import DayRing, RepoBranch, load_garden_data
+from ccgarden.data import DayRing, ModelCloud, RepoBranch, load_garden_data
 
 SCHEMA = """
 CREATE TABLE daily_totals (
@@ -38,11 +38,25 @@ CREATE TABLE daily_repo_usage (
     cost REAL,
     PRIMARY KEY (day, repo)
 );
+
+CREATE TABLE daily_model_usage (
+    day TEXT NOT NULL,
+    model TEXT NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    cost REAL,
+    PRIMARY KEY (day, model)
+);
 """
 
 
 def make_db(
-    tmp_path: Path, totals_rows: list[tuple], repo_rows: list[tuple]
+    tmp_path: Path,
+    totals_rows: list[tuple],
+    repo_rows: list[tuple],
+    model_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -55,9 +69,34 @@ def make_db(
         'INSERT INTO daily_repo_usage VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
         repo_rows,
     )
+    conn.executemany(
+        'INSERT INTO daily_model_usage VALUES (?,?,?,?,?,?,?)',
+        model_rows or [],
+    )
     conn.commit()
     conn.close()
     return str(db_path)
+
+
+def model_row(
+    day: str,
+    model: str,
+    *,
+    output_tokens: int = 0,
+    input_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    cost: float = 0.0,
+) -> tuple:
+    return (
+        day,
+        model,
+        output_tokens,
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost,
+    )
 
 
 def totals_row(
@@ -259,3 +298,63 @@ def test_load_branches_sorts_by_lines_added_descending(tmp_path: Path) -> None:
         'mid-repo',
         'small-repo',
     ]
+
+
+def test_load_models_aggregates_same_model_across_days(
+    tmp_path: Path,
+) -> None:
+    model_rows = [
+        model_row(
+            '2026-07-26', 'claude-sonnet-5', output_tokens=100, input_tokens=10
+        ),
+        model_row(
+            '2026-07-27', 'claude-sonnet-5', output_tokens=200, input_tokens=20
+        ),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], model_rows=model_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.models == [
+        ModelCloud(model='claude-sonnet-5', output_tokens=300, input_tokens=30)
+    ]
+
+
+def test_load_models_sorts_by_total_tokens_descending(tmp_path: Path) -> None:
+    model_rows = [
+        model_row(
+            '2026-07-26', 'claude-haiku-4-5', output_tokens=10, input_tokens=1
+        ),
+        model_row(
+            '2026-07-26', 'claude-opus-5', output_tokens=1000, input_tokens=100
+        ),
+        model_row(
+            '2026-07-26', 'claude-sonnet-5', output_tokens=100, input_tokens=10
+        ),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], model_rows=model_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [model_cloud.model for model_cloud in garden.models] == [
+        'claude-opus-5',
+        'claude-sonnet-5',
+        'claude-haiku-4-5',
+    ]
+
+
+def test_load_models_excludes_models_with_no_token_usage(
+    tmp_path: Path,
+) -> None:
+    model_rows = [model_row('2026-07-26', '<synthetic>')]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], model_rows=model_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.models == []

@@ -4,7 +4,7 @@ import math
 import random
 from typing import TYPE_CHECKING
 
-from ccgarden.data import DayRing, GardenData, RepoBranch
+from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch
 
 if TYPE_CHECKING:
     from ccgarden.data import GardenTimeline, RepoBranchDay
@@ -55,6 +55,21 @@ FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
 FLOWER_CENTER_COLOR = '#5a3d1a'
 FLOWER_RADIUS = 5.0
 FLOWER_MARGIN = 16.0
+
+# One cloud per model used, sized by how many tokens that model produced.
+CLOUD_MARGIN = 50.0
+CLOUD_Y_MIN = 50.0
+CLOUD_Y_MAX = 150.0
+CLOUD_RADIUS_MIN = 16.0
+CLOUD_RADIUS_MAX = 60.0
+CLOUD_TOKENS_SATURATION = 6_000_000
+CLOUD_PUFFS = (
+    (0.0, -0.18, 1.0),
+    (-0.55, 0.12, 0.68),
+    (0.55, 0.12, 0.68),
+    (-0.18, 0.3, 0.55),
+    (0.22, 0.3, 0.5),
+)
 
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
@@ -190,6 +205,11 @@ def _render_defs() -> str:
         '<stop offset="55%" stop-color="#5a9e5a" />'
         '<stop offset="100%" stop-color="#2f5f2f" />'
         '</radialGradient>'
+        '<radialGradient id="cloudGradient" cx="35%" cy="30%" r="75%">'
+        '<stop offset="0%" stop-color="#ffffff" />'
+        '<stop offset="60%" stop-color="#eef3f8" />'
+        '<stop offset="100%" stop-color="#c7d5e4" />'
+        '</radialGradient>'
         '<filter id="softBlur" x="-50%" y="-50%" width="200%" height="200%">'
         '<feGaussianBlur stdDeviation="3" />'
         '</filter>'
@@ -296,6 +316,81 @@ def _render_flower_floor(count: int) -> str:
         color = rng.choice(FLOWER_COLORS)
         elements.append(
             f'<g class="flower">{_render_flower(x, y, size, color, rng)}</g>'
+        )
+    return ''.join(elements)
+
+
+def _cloud_radius(total_tokens: int) -> float:
+    """A model's cloud radius, growing quickly then leveling off.
+
+    Same sqrt-saturation shape as the other size formulas (see
+    `_canopy_radius`, `_branch_width`) so a lightly-used model's cloud is
+    still visible off the floor instead of vanishing, while a heavily-used
+    model doesn't need an unbounded amount of sky to read as "the big one".
+    """
+    growth = math.sqrt(
+        min(total_tokens, CLOUD_TOKENS_SATURATION) / CLOUD_TOKENS_SATURATION
+    )
+    return CLOUD_RADIUS_MIN + (CLOUD_RADIUS_MAX - CLOUD_RADIUS_MIN) * growth
+
+
+def _cloud_puffs_d(radius: float, seed: str) -> list[str]:
+    """`d` values for each lumpy puff making up one cloud, at this radius."""
+    rng = random.Random(seed)
+    d_values = []
+    for index, (dx_frac, dy_frac, r_frac) in enumerate(CLOUD_PUFFS):
+        jitter = rng.uniform(0.92, 1.08)
+        puff_radius = radius * r_frac * jitter
+        d_values.append(
+            _blob_path(
+                dx_frac * radius,
+                dy_frac * radius,
+                puff_radius,
+                random.Random(f'{seed}:{index}'),
+                points=8,
+                jitter=0.16,
+            )
+        )
+    return d_values
+
+
+def _render_cloud(cx: float, cy: float, radius: float, seed: str) -> str:
+    puffs = ''.join(
+        f'<path d="{d}" fill="url(#cloudGradient)" opacity="0.88" />'
+        for d in _cloud_puffs_d(radius, seed)
+    )
+    return f'<g transform="translate({cx:.1f},{cy:.1f})">{puffs}</g>'
+
+
+def _cloud_positions(count: int) -> list[tuple[float, float]]:
+    """Deterministic (x, y) sky slot for each of `count` clouds.
+
+    Spread evenly across the width like the flower floor, with per-slot
+    jitter so a full sky of models doesn't read as a mechanical grid.
+    """
+    usable_width = VIEWBOX_WIDTH - CLOUD_MARGIN * 2
+    positions = []
+    for index in range(count):
+        rng = random.Random(f'ccgarden-cloud-slot:{index}')
+        x = CLOUD_MARGIN + usable_width * (
+            (index + rng.uniform(0.25, 0.75)) / count
+        )
+        y = CLOUD_Y_MIN + rng.uniform(0.0, CLOUD_Y_MAX - CLOUD_Y_MIN)
+        positions.append((x, y))
+    return positions
+
+
+def _render_clouds(models: list[ModelCloud]) -> str:
+    if not models:
+        return ''
+    positions = _cloud_positions(len(models))
+    elements = []
+    for (x, y), model_cloud in zip(positions, models, strict=True):
+        total_tokens = model_cloud.output_tokens + model_cloud.input_tokens
+        radius = _cloud_radius(total_tokens)
+        elements.append(
+            f'<g class="cloud">'
+            f'{_render_cloud(x, y, radius, model_cloud.model)}</g>'
         )
     return ''.join(elements)
 
@@ -716,6 +811,11 @@ LEGEND_ROWS = (
         ('one per whole ratio of', 'cache reads to writes'),
         'flower',
     ),
+    (
+        'Clouds',
+        ('one per model used;', 'bigger = more tokens'),
+        'cloud',
+    ),
 )
 
 
@@ -743,6 +843,8 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
         return _render_flower(
             cx, cy, 6.0, '#f27ab0', random.Random('legend-flower')
         )
+    if icon == 'cloud':
+        return _render_cloud(cx, cy, 7.0, 'legend-cloud')
     return (
         f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-15) scale(6)">'
         f'<path d="{LEAF_SHAPE_D}" fill="#5a9e5a" opacity="0.95" />'
@@ -798,7 +900,8 @@ def render_svg(garden: GardenData) -> str:
     )
 
     body = (
-        _render_trunk(base_half_width)
+        _render_clouds(garden.models)
+        + _render_trunk(base_half_width)
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
         + _render_flower_floor(flower_count)
@@ -1261,6 +1364,50 @@ def _render_timeline_leaves(
     return ''.join(elements)
 
 
+def _render_timeline_clouds(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    if not timeline.model_order:
+        return ''
+
+    positions = _cloud_positions(len(timeline.model_order))
+    elements = []
+    for (cx, cy), model in zip(positions, timeline.model_order, strict=True):
+        days = timeline.model_days[model]
+        final_tokens = days[-1].output_tokens + days[-1].input_tokens
+        final_radius = _cloud_radius(final_tokens)
+
+        # Grown as a share of the model's *final* radius, not the same
+        # absolute-tokens formula re-evaluated per day -- see the identical
+        # reasoning in `_render_timeline_branches_and_leaves`.
+        scale_values = []
+        for day_stat in days:
+            day_tokens = day_stat.output_tokens + day_stat.input_tokens
+            fraction = (
+                min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
+            )
+            day_radius = (
+                CLOUD_RADIUS_MIN + (final_radius - CLOUD_RADIUS_MIN) * fraction
+            )
+            scale_values.append(f'{day_radius / final_radius:.4f}')
+
+        animate = _animate_transform_tag(
+            'scale', scale_values, key_times, duration
+        )
+        puffs = ''.join(
+            f'<path d="{d}" fill="url(#cloudGradient)" opacity="0.88" />'
+            for d in _cloud_puffs_d(final_radius, model)
+        )
+        elements.append(
+            f'<g class="cloud" transform="translate({cx:.1f},{cy:.1f})">'
+            f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'</g>'
+        )
+    return ''.join(elements)
+
+
 def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     """The tree's final state, for the fallback when there's <2 days."""
     rings = [
@@ -1281,11 +1428,20 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         )
         for repo in timeline.branch_order
     ]
+    models = [
+        ModelCloud(
+            model=model,
+            output_tokens=timeline.model_days[model][-1].output_tokens,
+            input_tokens=timeline.model_days[model][-1].input_tokens,
+        )
+        for model in timeline.model_order
+    ]
     return GardenData(
         rings=rings,
         branches=branches,
         cache_read_tokens=timeline.cache_read_tokens,
         cache_write_tokens=timeline.cache_write_tokens,
+        models=models,
     )
 
 
@@ -1313,7 +1469,8 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     )
 
     body = (
-        _render_timeline_trunk(base_half_width_by_day, key_times, duration)
+        _render_timeline_clouds(timeline, key_times, duration)
+        + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
         + _render_timeline_rings(
             timeline, final_base_half_width, key_times, duration
         )

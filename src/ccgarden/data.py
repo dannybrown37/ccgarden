@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
@@ -24,11 +24,19 @@ class RepoBranch:
 
 
 @dataclass(frozen=True)
+class ModelCloud:
+    model: str
+    output_tokens: int
+    input_tokens: int
+
+
+@dataclass(frozen=True)
 class GardenData:
     rings: list[DayRing]
     branches: list[RepoBranch]
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    models: list[ModelCloud] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -45,6 +53,15 @@ class RepoBranchDay:
 
 
 @dataclass(frozen=True)
+class ModelUsageDay:
+    """A model's cumulative token totals as of one day."""
+
+    day: str
+    output_tokens: int
+    input_tokens: int
+
+
+@dataclass(frozen=True)
 class GardenTimeline:
     """Day-by-day cumulative history, ready to be replayed as a growth."""
 
@@ -55,6 +72,8 @@ class GardenTimeline:
     branch_days: dict[str, list[RepoBranchDay]]
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    model_order: list[str] = field(default_factory=list)
+    model_days: dict[str, list[ModelUsageDay]] = field(default_factory=dict)
 
 
 def load_garden_timeline(db_path: str) -> GardenTimeline:
@@ -94,6 +113,7 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cumulative_sessions.append(running_sessions)
 
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
+    model_order, model_days = _load_model_days(conn, days, day_index)
     cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
 
     return GardenTimeline(
@@ -104,6 +124,8 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         branch_days=branch_days,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        model_order=model_order,
+        model_days=model_days,
     )
 
 
@@ -184,11 +206,90 @@ def _cumulative_branch_days(
     return rows
 
 
+def _load_models(conn: sqlite3.Connection) -> list[ModelCloud]:
+    cursor = conn.execute(
+        """
+        SELECT model, SUM(output_tokens), SUM(input_tokens)
+        FROM daily_model_usage
+        GROUP BY model
+        HAVING SUM(output_tokens) + SUM(input_tokens) > 0
+        ORDER BY SUM(output_tokens) + SUM(input_tokens) DESC
+        """
+    )
+    return [
+        ModelCloud(model=row[0], output_tokens=row[1], input_tokens=row[2])
+        for row in cursor.fetchall()
+    ]
+
+
+def _load_model_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+) -> tuple[list[str], dict[str, list[ModelUsageDay]]]:
+    cursor = conn.execute(
+        'SELECT day, model, output_tokens, input_tokens '
+        'FROM daily_model_usage ORDER BY day ASC'
+    )
+
+    day_count = len(days)
+    deltas: dict[str, list[tuple[int, int] | None]] = {}
+    token_totals: dict[str, int] = {}
+
+    for day, model, output_tokens, input_tokens in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        deltas.setdefault(model, [None] * day_count)[index] = (
+            output_tokens,
+            input_tokens,
+        )
+        token_totals[model] = (
+            token_totals.get(model, 0) + output_tokens + input_tokens
+        )
+
+    # Models with no real token usage (e.g. a synthetic placeholder model
+    # with all-zero rows) shouldn't get a cloud of their own.
+    model_order = sorted(
+        (model for model in deltas if token_totals[model] > 0),
+        key=lambda model: token_totals[model],
+        reverse=True,
+    )
+
+    model_days = {
+        model: _cumulative_model_days(days, deltas[model])
+        for model in model_order
+    }
+    return model_order, model_days
+
+
+def _cumulative_model_days(
+    days: list[str],
+    deltas: list[tuple[int, int] | None],
+) -> list[ModelUsageDay]:
+    running_output = running_input = 0
+    rows = []
+    for day, delta in zip(days, deltas, strict=True):
+        if delta is not None:
+            output_tokens, input_tokens = delta
+            running_output += output_tokens
+            running_input += input_tokens
+        rows.append(
+            ModelUsageDay(
+                day=day,
+                output_tokens=running_output,
+                input_tokens=running_input,
+            )
+        )
+    return rows
+
+
 def load_garden_data(db_path: str) -> GardenData:
     conn = sqlite3.connect(db_path)
     try:
         rings = _load_rings(conn)
         branches = _load_branches(conn)
+        models = _load_models(conn)
         cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
     finally:
         conn.close()
@@ -197,6 +298,7 @@ def load_garden_data(db_path: str) -> GardenData:
         branches=branches,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        models=models,
     )
 
 
