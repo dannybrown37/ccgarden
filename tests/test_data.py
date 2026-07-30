@@ -61,7 +61,13 @@ def make_db(
 
 
 def totals_row(
-    day: str, sessions: int, lines_added: int, lines_removed: int
+    day: str,
+    sessions: int,
+    lines_added: int,
+    lines_removed: int,
+    *,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> tuple:
     return (
         day,
@@ -74,8 +80,8 @@ def totals_row(
         lines_removed,
         0,
         0,
-        0,
-        0,
+        cache_read_tokens,
+        cache_write_tokens,
         0.0,
         day,
     )
@@ -117,6 +123,37 @@ def test_load_garden_data_from_empty_db_returns_empty_lists(
 
     assert garden.rings == []
     assert garden.branches == []
+    assert garden.cache_read_tokens == 0
+    assert garden.cache_write_tokens == 0
+
+
+def test_load_garden_data_sums_cache_tokens_across_days(
+    tmp_path: Path,
+) -> None:
+    totals_rows = [
+        totals_row(
+            '2026-07-26',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            cache_read_tokens=300,
+            cache_write_tokens=100,
+        ),
+        totals_row(
+            '2026-07-27',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            cache_read_tokens=200,
+            cache_write_tokens=50,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=[])
+
+    garden = load_garden_data(db_path)
+
+    assert garden.cache_read_tokens == 500
+    assert garden.cache_write_tokens == 150
 
 
 @pytest.mark.parametrize(

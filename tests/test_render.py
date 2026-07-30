@@ -1,7 +1,11 @@
 import pytest
 
 from ccgarden.data import DayRing, GardenData, RepoBranch
-from ccgarden.render import LEAVES_PER_SESSION, render_svg
+from ccgarden.render import (
+    LEAVES_PER_SESSION,
+    _cache_efficiency_flower_count,
+    render_svg,
+)
 
 
 def ring(day: str, *, sessions: int = 1) -> DayRing:
@@ -86,3 +90,47 @@ def test_render_svg_leaf_positions_are_deterministic_across_renders() -> None:
     second = render_svg(garden)
 
     assert first == second
+
+
+@pytest.mark.parametrize(
+    ('cache_read', 'cache_write', 'expected'),
+    [
+        (0, 0, 0),
+        (100, 0, 0),
+        (199, 100, 2),
+        (260, 100, 3),
+        (1000, 100, 10),
+    ],
+)
+def test_cache_efficiency_flower_count_rounds_to_nearest_whole_ratio(
+    cache_read: int, cache_write: int, expected: int
+) -> None:
+    assert _cache_efficiency_flower_count(cache_read, cache_write) == expected
+
+
+def test_render_svg_draws_one_flower_per_whole_cache_efficiency_ratio() -> (
+    None
+):
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        cache_read_tokens=500,
+        cache_write_tokens=100,
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="flower"') == 5
+
+
+def test_render_svg_draws_no_flowers_without_cache_writes() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        cache_read_tokens=500,
+        cache_write_tokens=0,
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="flower"') == 0

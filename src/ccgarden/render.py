@@ -51,6 +51,11 @@ RING_STROKE_WIDTH_MIN = 0.75
 RING_STROKE_WIDTH_MAX = 3.5
 RING_SESSIONS_SATURATION = 60
 
+FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
+FLOWER_CENTER_COLOR = '#5a3d1a'
+FLOWER_RADIUS = 5.0
+FLOWER_MARGIN = 16.0
+
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
 TIMELINE_MAX_DURATION_S = 16.0
@@ -229,6 +234,68 @@ def _render_grass() -> str:
             f'{x + lean * 1.6},{y - height}" fill="none" '
             f'stroke="#2f5f2f" stroke-width="1.4" stroke-linecap="round" '
             f'opacity="0.4" />'
+        )
+    return ''.join(elements)
+
+
+def _cache_efficiency_flower_count(
+    cache_read_tokens: int, cache_write_tokens: int
+) -> int:
+    """Nearest whole multiple of cache reads per write -- one flower per x.
+
+    Cache efficiency (reads/write) is otherwise invisible anywhere in the
+    tree, unlike every other tracked stat; a garden-wide flower count gives
+    it a home without tying it to any single repo's branch or bush.
+    """
+    if cache_write_tokens <= 0:
+        return 0
+    return max(0, round(cache_read_tokens / cache_write_tokens))
+
+
+def _render_flower(
+    cx: float, cy: float, size: float, petal_color: str, rng: random.Random
+) -> str:
+    orbit = size * 0.55
+    petal_radius = size * 0.42
+    angle_offset = rng.uniform(0, 72)
+    petals = []
+    for i in range(5):
+        angle = math.radians(angle_offset + i * 72)
+        petal_x = cx + orbit * math.cos(angle)
+        petal_y = cy + orbit * math.sin(angle)
+        petals.append(
+            f'<circle cx="{petal_x:.1f}" cy="{petal_y:.1f}" '
+            f'r="{petal_radius:.2f}" fill="{petal_color}" opacity="0.92" />'
+        )
+    petals = ''.join(petals)
+    center = (
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{size * 0.28:.2f}" '
+        f'fill="{FLOWER_CENTER_COLOR}" opacity="0.95" />'
+    )
+    return petals + center
+
+
+def _render_flower_floor(count: int) -> str:
+    """A carpet of `count` flowers along the ground line.
+
+    Placed hugging GROUND_Y like the grass blades in `_render_grass`, so
+    they poke up above the legend panel drawn on top of them afterward
+    instead of being hidden underneath it.
+    """
+    if count <= 0:
+        return ''
+    rng = random.Random('ccgarden-flowers')
+    usable_width = VIEWBOX_WIDTH - FLOWER_MARGIN * 2
+    elements = []
+    for index in range(count):
+        x = FLOWER_MARGIN + usable_width * (
+            (index + rng.uniform(0.15, 0.85)) / count
+        )
+        y = GROUND_Y - rng.uniform(1.0, 9.0)
+        size = FLOWER_RADIUS * rng.uniform(0.8, 1.15)
+        color = rng.choice(FLOWER_COLORS)
+        elements.append(
+            f'<g class="flower">{_render_flower(x, y, size, color, rng)}</g>'
         )
     return ''.join(elements)
 
@@ -644,6 +711,11 @@ LEGEND_ROWS = (
         'branch',
     ),
     ('Leaves', ('one per session;', 'more = busier repo'), 'leaf'),
+    (
+        'Flowers',
+        ('one per whole ratio of', 'cache reads to writes'),
+        'flower',
+    ),
 )
 
 
@@ -666,6 +738,10 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
             f'{cx + 7:.1f},{cy - 7:.1f}" fill="none" '
             f'stroke="url(#trunkGradient)" stroke-width="3" '
             f'stroke-linecap="round" />'
+        )
+    if icon == 'flower':
+        return _render_flower(
+            cx, cy, 6.0, '#f27ab0', random.Random('legend-flower')
         )
     return (
         f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-15) scale(6)">'
@@ -717,11 +793,15 @@ def _render_legend() -> str:
 def render_svg(garden: GardenData) -> str:
     total_sessions = sum(day_ring.sessions for day_ring in garden.rings)
     base_half_width = _trunk_half_width(total_sessions)
+    flower_count = _cache_efficiency_flower_count(
+        garden.cache_read_tokens, garden.cache_write_tokens
+    )
 
     body = (
         _render_trunk(base_half_width)
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
+        + _render_flower_floor(flower_count)
         + _render_legend()
     )
 
@@ -1201,7 +1281,12 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         )
         for repo in timeline.branch_order
     ]
-    return GardenData(rings=rings, branches=branches)
+    return GardenData(
+        rings=rings,
+        branches=branches,
+        cache_read_tokens=timeline.cache_read_tokens,
+        cache_write_tokens=timeline.cache_write_tokens,
+    )
 
 
 def render_timeline_svg(timeline: GardenTimeline) -> str:
@@ -1223,6 +1308,9 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         timeline.cumulative_sessions
     )
     final_base_half_width = base_half_width_by_day[-1]
+    flower_count = _cache_efficiency_flower_count(
+        timeline.cache_read_tokens, timeline.cache_write_tokens
+    )
 
     body = (
         _render_timeline_trunk(base_half_width_by_day, key_times, duration)
@@ -1236,6 +1324,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
         )
+        + _render_flower_floor(flower_count)
         + _render_legend()
     )
 

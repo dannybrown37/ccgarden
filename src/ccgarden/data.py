@@ -27,6 +27,8 @@ class RepoBranch:
 class GardenData:
     rings: list[DayRing]
     branches: list[RepoBranch]
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class GardenTimeline:
     cumulative_sessions: list[int]
     branch_order: list[str]
     branch_days: dict[str, list[RepoBranchDay]]
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 def load_garden_timeline(db_path: str) -> GardenTimeline:
@@ -60,6 +64,19 @@ def load_garden_timeline(db_path: str) -> GardenTimeline:
     finally:
         conn.close()
     return timeline
+
+
+def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Garden-wide cache read/write token sums.
+
+    Feeds the cache-efficiency flower count -- how many times a cache write
+    has paid off, overall.
+    """
+    row = conn.execute(
+        'SELECT COALESCE(SUM(cache_read_tokens), 0), '
+        'COALESCE(SUM(cache_write_tokens), 0) FROM daily_totals'
+    ).fetchone()
+    return row[0], row[1]
 
 
 def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
@@ -77,6 +94,7 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cumulative_sessions.append(running_sessions)
 
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
+    cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
 
     return GardenTimeline(
         days=days,
@@ -84,6 +102,8 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cumulative_sessions=cumulative_sessions,
         branch_order=branch_order,
         branch_days=branch_days,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
     )
 
 
@@ -169,9 +189,15 @@ def load_garden_data(db_path: str) -> GardenData:
     try:
         rings = _load_rings(conn)
         branches = _load_branches(conn)
+        cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
     finally:
         conn.close()
-    return GardenData(rings=rings, branches=branches)
+    return GardenData(
+        rings=rings,
+        branches=branches,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
 
 
 def _load_rings(conn: sqlite3.Connection) -> list[DayRing]:
