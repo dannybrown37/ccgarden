@@ -32,6 +32,10 @@ BRANCH_WIDTH_MAX = 7.0
 BRANCH_TOKENS_SATURATION = 2_500_000
 LEAVES_PER_SESSION = 5
 LEAF_SATURATION_COUNT = 2000
+LEAF_TURNS_FLOOR = 0.0
+LEAF_TURNS_CEILING = 6.9
+LEAF_SIZE_MULTIPLIER_MIN = 0.75
+LEAF_SIZE_MULTIPLIER_MAX = 1.5
 CANOPY_MIN_LEAVES = 3
 CANOPY_RADIUS_MIN = 20.0
 CANOPY_RADIUS_MAX = 130.0
@@ -729,10 +733,16 @@ def _render_branches_and_leaves(
             bow=bow,
         )
         total_tokens = repo_branch.output_tokens + repo_branch.input_tokens
+        avg_turns = (
+            repo_branch.prompts / repo_branch.sessions
+            if repo_branch.sessions
+            else 0.0
+        )
         title = _title(
             f'{repo_branch.repo} — {repo_branch.sessions} sessions, '
             f'+{repo_branch.lines_added:,}/-{repo_branch.lines_removed:,} '
-            f'lines, {total_tokens:,} tokens, ${repo_branch.cost:,.2f}'
+            f'lines, {total_tokens:,} tokens, ${repo_branch.cost:,.2f}, '
+            f'{avg_turns:.1f} turns/session'
         )
         branch_path = (
             f'<path class="branch" data-repo="{repo_branch.repo}" '
@@ -786,6 +796,25 @@ def _canopy_radius(leaf_count: int) -> float:
     saturation = min(leaf_count, LEAF_SATURATION_COUNT)
     growth = math.sqrt(saturation / LEAF_SATURATION_COUNT)
     return CANOPY_RADIUS_MIN + (CANOPY_RADIUS_MAX - CANOPY_RADIUS_MIN) * growth
+
+
+def _leaf_size_multiplier(avg_turns_per_session: float) -> float:
+    """Leaf-size scale for a repo with this many turns/session on average.
+
+    Linear rather than the sqrt-saturation curve every other size formula
+    here uses, because turns-per-session lives in a narrow, already
+    human-scale range (roughly 1-15) instead of spanning the orders of
+    magnitude that tokens or session counts do -- a saturating curve would
+    flatten the real differences between repos into an almost-flat
+    multiplier.
+    """
+    span = LEAF_TURNS_CEILING - LEAF_TURNS_FLOOR
+    fraction = (avg_turns_per_session - LEAF_TURNS_FLOOR) / span
+    fraction = max(0.0, min(1.0, fraction))
+    return (
+        LEAF_SIZE_MULTIPLIER_MIN
+        + (LEAF_SIZE_MULTIPLIER_MAX - LEAF_SIZE_MULTIPLIER_MIN) * fraction
+    )
 
 
 def _foliage_girth_fraction(t: float) -> float:
@@ -911,6 +940,13 @@ def _render_leaves(
     rng = random.Random(repo_branch.repo)
     elements = []
 
+    avg_turns = (
+        repo_branch.prompts / repo_branch.sessions
+        if repo_branch.sessions
+        else 0.0
+    )
+    size_multiplier = _leaf_size_multiplier(avg_turns)
+
     dx, dy = end_x - origin_x, end_y - origin_y
     length = math.hypot(dx, dy) or 1.0
     ux, uy = dx / length, dy / length
@@ -953,7 +989,9 @@ def _render_leaves(
         cy = origin_y + t * dy
         leaf_x = cx + px * perp_offset + ux * along_offset
         leaf_y = cy + py * perp_offset + uy * along_offset
-        radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
+        radius = (
+            max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5) * size_multiplier
+        )
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
         elements.append(
@@ -981,7 +1019,11 @@ LEGEND_ROWS = (
         ('one per repo', 'longer = more lines;', 'thicker = more tokens'),
         'branch',
     ),
-    ('Leaves', ('one per session;', 'more = busier repo'), 'leaf'),
+    (
+        'Leaves',
+        ('one per session;', 'more = busier repo;', 'bigger = deeper turns'),
+        'leaf',
+    ),
     (
         'Flowers',
         ('one per whole ratio of', 'cache reads to writes'),
@@ -1414,10 +1456,16 @@ def _render_timeline_branches_and_leaves(
         animate = _animate_tag('d', d_values, key_times, duration)
         final_day = days[-1]
         final_day_tokens = final_day.output_tokens + final_day.input_tokens
+        final_avg_turns = (
+            final_day.prompts / final_day.sessions
+            if final_day.sessions
+            else 0.0
+        )
         title = _title(
             f'{repo} — {final_day.sessions} sessions, '
             f'+{final_day.lines_added:,}/-{final_day.lines_removed:,} '
-            f'lines, {final_day_tokens:,} tokens, ${final_day.cost:,.2f}'
+            f'lines, {final_day_tokens:,} tokens, ${final_day.cost:,.2f}, '
+            f'{final_avg_turns:.1f} turns/session'
         )
         branch_path = (
             f'<path class="branch" data-repo="{repo}" d="{d_values[-1]}" '
@@ -1440,7 +1488,7 @@ def _render_timeline_branches_and_leaves(
     return ''.join(elements)
 
 
-def _render_timeline_leaves(
+def _render_timeline_leaves(  # noqa: PLR0915
     repo: str,
     days: list[RepoBranchDay],
     origin_x: float,
@@ -1463,6 +1511,12 @@ def _render_timeline_leaves(
     leaf_count = days[-1].sessions * LEAVES_PER_SESSION
     if leaf_count == 0:
         return ''
+
+    final_day = days[-1]
+    avg_turns = (
+        final_day.prompts / final_day.sessions if final_day.sessions else 0.0
+    )
+    size_multiplier = _leaf_size_multiplier(avg_turns)
 
     elements = []
     has_canopy = leaf_count >= CANOPY_MIN_LEAVES
@@ -1527,7 +1581,9 @@ def _render_timeline_leaves(
         else:
             t = rng.uniform(FOLIAGE_START_FRACTION, FOLIAGE_TIP_OVERHANG)
             blob_angle = rng.uniform(0.0, 2 * math.pi)
-        radius = max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5)
+        radius = (
+            max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5) * size_multiplier
+        )
         angle = rng.uniform(0, 360)
         color = rng.choice(LEAF_COLORS)
 
