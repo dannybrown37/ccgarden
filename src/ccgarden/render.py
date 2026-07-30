@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import math
 import random
 from typing import TYPE_CHECKING
@@ -93,6 +94,22 @@ TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
 TIMELINE_MAX_DURATION_S = 16.0
 TIMELINE_MIN_DAYS_TO_ANIMATE = 2
+
+
+def _escape_xml(text: str) -> str:
+    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+
+def _title(text: str) -> str:
+    """A `<title>` child that browsers render as a native hover tooltip."""
+    return f'<title>{_escape_xml(text)}</title>'
+
+
+def _format_day(day: str) -> str:
+    try:
+        return datetime.date.fromisoformat(day).strftime('%b %-d, %Y')
+    except ValueError:
+        return day
 
 
 def _trunk_half_width(total_sessions: int) -> float:
@@ -319,7 +336,10 @@ def _render_flower(
 
 
 def _render_flowers_on_bushes(
-    count: int, bush_footprints: list[tuple[float, float]]
+    count: int,
+    bush_footprints: list[tuple[float, float]],
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
 ) -> str:
     """`count` flowers scattered across the given bush footprints.
 
@@ -330,6 +350,10 @@ def _render_flowers_on_bushes(
     """
     if count <= 0 or not bush_footprints:
         return ''
+    title = _title(
+        f'Cache efficiency — {cache_read_tokens:,} cache reads per '
+        f'{cache_write_tokens:,} cache writes'
+    )
     rng = random.Random('ccgarden-flowers')
     elements = []
     for index in range(count):
@@ -341,7 +365,8 @@ def _render_flowers_on_bushes(
         size = FLOWER_RADIUS * rng.uniform(0.6, 0.9)
         color = rng.choice(FLOWER_COLORS)
         elements.append(
-            f'<g class="flower">{_render_flower(x, y, size, color, rng)}</g>'
+            f'<g class="flower">{title}'
+            f'{_render_flower(x, y, size, color, rng)}</g>'
         )
     return ''.join(elements)
 
@@ -419,8 +444,9 @@ def _render_clouds(models: list[ModelCloud]) -> str:
     for (x, y), model_cloud in zip(positions, models, strict=True):
         total_tokens = model_cloud.output_tokens + model_cloud.input_tokens
         radius = _cloud_radius(total_tokens)
+        title = _title(f'{model_cloud.model} — {total_tokens:,} tokens')
         elements.append(
-            f'<g class="cloud">'
+            f'<g class="cloud">{title}'
             f'{_render_cloud(x, y, radius, model_cloud.model)}</g>'
         )
     return ''.join(elements)
@@ -519,6 +545,7 @@ def _render_bushes(tools: list[ToolBush]) -> str:
     return ''.join(
         (
             '<g class="bush">'
+            f'{_title(f"{tool_bush.tool} — used {tool_bush.count:,} times")}'
             f'{_render_bush(x, GROUND_Y, radius, tool_bush.tool)}</g>'
         )
         for (x, radius), tool_bush in zip(footprints, tools, strict=True)
@@ -580,10 +607,14 @@ def _render_rings(rings: list[DayRing], base_half_width: float) -> str:
         bow = half_width * 0.1
         stroke_width = _ring_stroke_width(day_ring.sessions)
         d = f'M {cx - half_width},{y} Q {cx},{y - bow} {cx + half_width},{y}'
+        title = _title(
+            f'{_format_day(day_ring.day)} — {day_ring.sessions} sessions, '
+            f'+{day_ring.lines_added:,}/-{day_ring.lines_removed:,} lines'
+        )
         elements.append(
             f'<path class="ring" d="{d}" fill="none" stroke="#3a2412" '
             f'stroke-width="{stroke_width}" stroke-linecap="round" '
-            f'opacity="0.22" />'
+            f'opacity="0.22">{title}</path>'
         )
     return ''.join(elements)
 
@@ -689,13 +720,20 @@ def _render_branches_and_leaves(
             tip_width=BRANCH_TIP_WIDTH,
             bow=bow,
         )
-        elements.append(
+        total_tokens = repo_branch.output_tokens + repo_branch.input_tokens
+        title = _title(
+            f'{repo_branch.repo} — {repo_branch.sessions} sessions, '
+            f'+{repo_branch.lines_added:,}/-{repo_branch.lines_removed:,} '
+            f'lines, {total_tokens:,} tokens, ${repo_branch.cost:,.2f}'
+        )
+        branch_path = (
             f'<path class="branch" data-repo="{repo_branch.repo}" '
             f'd="{shape_d}" fill="url(#trunkGradient)" '
             f'stroke="#3a2412" stroke-width="0.75" opacity="0.95" />'
         )
+        leaves = _render_leaves(repo_branch, origin_x, origin_y, end_x, end_y)
         elements.append(
-            _render_leaves(repo_branch, origin_x, origin_y, end_x, end_y)
+            f'<g class="repo-group">{title}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
 
@@ -1064,14 +1102,20 @@ def render_svg(garden: GardenData) -> str:
     )
 
     bush_footprints = _bush_footprints(garden.tools)
+    trunk_title = _title(f'Trunk — {total_sessions} total sessions')
 
     body = (
-        _render_clouds(garden.models)
-        + _render_trunk(base_half_width)
+        _render_clouds(garden.models) + f'<g class="trunk-group">{trunk_title}'
+        f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
         + _render_bushes(garden.tools)
-        + _render_flowers_on_bushes(flower_count, bush_footprints)
+        + _render_flowers_on_bushes(
+            flower_count,
+            bush_footprints,
+            garden.cache_read_tokens,
+            garden.cache_write_tokens,
+        )
         + _render_legend()
     )
 
@@ -1242,10 +1286,13 @@ def _render_timeline_rings(
         animate = _animate_tag(
             'stroke-width', width_values, key_times, duration
         )
+        title = _title(
+            f'{_format_day(timeline.days[index])} — {sessions} sessions'
+        )
         elements.append(
             f'<path class="ring" d="{d}" fill="none" stroke="#3a2412" '
             f'stroke-width="{target_width:.3f}" stroke-linecap="round" '
-            f'opacity="0.22">{animate}</path>'
+            f'opacity="0.22">{title}{animate}</path>'
         )
     return ''.join(elements)
 
@@ -1357,23 +1404,30 @@ def _render_timeline_branches_and_leaves(
             day_vectors.append((end_x - origin_x, end_y - origin_y))
 
         animate = _animate_tag('d', d_values, key_times, duration)
-        elements.append(
+        final_day = days[-1]
+        final_day_tokens = final_day.output_tokens + final_day.input_tokens
+        title = _title(
+            f'{repo} — {final_day.sessions} sessions, '
+            f'+{final_day.lines_added:,}/-{final_day.lines_removed:,} '
+            f'lines, {final_day_tokens:,} tokens, ${final_day.cost:,.2f}'
+        )
+        branch_path = (
             f'<path class="branch" data-repo="{repo}" d="{d_values[-1]}" '
             f'fill="url(#trunkGradient)" stroke="#3a2412" '
             f'stroke-width="0.75" opacity="0.95">{animate}</path>'
         )
-
+        leaves = _render_timeline_leaves(
+            repo,
+            days,
+            origin_x,
+            origin_y,
+            day_vectors,
+            final_length=final_length,
+            key_times=key_times,
+            duration=duration,
+        )
         elements.append(
-            _render_timeline_leaves(
-                repo,
-                days,
-                origin_x,
-                origin_y,
-                day_vectors,
-                final_length=final_length,
-                key_times=key_times,
-                duration=duration,
-            )
+            f'<g class="repo-group">{title}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
 
@@ -1567,9 +1621,10 @@ def _render_timeline_clouds(
             f'<path d="{d}" fill="url(#cloudGradient)" opacity="0.88" />'
             for d in _cloud_puffs_d(final_radius, model)
         )
+        title = _title(f'{model} — {final_tokens:,} tokens')
         elements.append(
             f'<g class="cloud" transform="translate({cx:.1f},{cy:.1f})">'
-            f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
             f'</g>'
         )
     return ''.join(elements)
@@ -1619,9 +1674,10 @@ def _render_timeline_bushes(
             f'<path d="{d}" fill="url(#bushGradient)" opacity="0.94" />'
             for d in _bush_puffs_d(final_radius, tool)
         )
+        title = _title(f'{tool} — used {days[-1].count:,} times')
         elements.append(
             f'<g class="bush" transform="translate({x:.1f},{GROUND_Y})">'
-            f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
             f'</g>'
         )
     return ''.join(elements)
@@ -1670,6 +1726,10 @@ def _render_timeline_flowers_on_bushes(
         )
     ]
 
+    title = _title(
+        f'Cache efficiency — {timeline.cache_read_tokens:,} cache reads per '
+        f'{timeline.cache_write_tokens:,} cache writes'
+    )
     rng = random.Random('ccgarden-flowers')
     elements = []
     for index in range(final_flower_count):
@@ -1713,7 +1773,7 @@ def _render_timeline_flowers_on_bushes(
             f'<g class="flower" '
             f'transform="translate({final_x:.1f},{final_y:.1f})" '
             f'opacity="1">'
-            f'{translate_animate}{opacity_animate}{flower}'
+            f'{title}{translate_animate}{opacity_animate}{flower}'
             f'</g>'
         )
     return ''.join(elements)
@@ -1780,10 +1840,15 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         timeline.cumulative_sessions
     )
     final_base_half_width = base_half_width_by_day[-1]
+    trunk_title = _title(
+        f'Trunk — {timeline.cumulative_sessions[-1]} total sessions'
+    )
 
     body = (
         _render_timeline_clouds(timeline, key_times, duration)
+        + f'<g class="trunk-group">{trunk_title}'
         + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
+        + '</g>'
         + _render_timeline_rings(
             timeline, final_base_half_width, key_times, duration
         )
