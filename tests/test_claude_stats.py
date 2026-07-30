@@ -970,6 +970,7 @@ def test_stats_as_dict_turn_duration_is_empty_without_turns() -> None:
 DAY = date(2026, 7, 26)
 DAY_REPLIES = 3
 DAY_OUTPUT_TOKENS = 100
+DAY_TOOL_COUNT = 4
 UPDATED_DAY_REPLIES = 9
 SAMPLE_COST_TOTAL = 1.23
 EXPECTED_ACTIVE_DAYS = 2
@@ -995,6 +996,7 @@ def _day_stats(**overrides: object) -> UsageStats:
         cache_read_tokens=10,
         cache_write_tokens=5,
     )
+    stats.tools['Read'] = DAY_TOOL_COUNT
     for key, value in overrides.items():
         setattr(stats, key, value)
     return stats
@@ -1027,6 +1029,7 @@ def test_ensure_schema_creates_tables() -> None:
         'daily_totals',
         'daily_model_usage',
         'daily_repo_usage',
+        'daily_tool_usage',
     } <= tables
 
 
@@ -1057,6 +1060,38 @@ def test_record_day_writes_per_model_row() -> None:
         (DAY.isoformat(), 'claude-opus-5'),
     ).fetchone()
     assert row == (DAY_OUTPUT_TOKENS,)
+
+
+def test_record_day_writes_per_tool_row() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    row = conn.execute(
+        'SELECT count FROM daily_tool_usage WHERE day = ? AND tool = ?',
+        (DAY.isoformat(), 'Read'),
+    ).fetchone()
+    assert row == (DAY_TOOL_COUNT,)
+
+
+def test_record_day_removes_stale_tool_rows_on_replace() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    first = _day_stats()
+    first.tools['Bash'] = 2
+    record_day(conn, DAY, first, cost=None)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    tools = {
+        row[0]
+        for row in conn.execute(
+            'SELECT tool FROM daily_tool_usage WHERE day = ?',
+            (DAY.isoformat(),),
+        )
+    }
+    assert tools == {'Read'}
 
 
 def test_record_day_skips_day_without_sessions() -> None:

@@ -4,7 +4,7 @@ import math
 import random
 from typing import TYPE_CHECKING
 
-from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch
+from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch, ToolBush
 
 if TYPE_CHECKING:
     from ccgarden.data import GardenTimeline, RepoBranchDay
@@ -69,6 +69,25 @@ CLOUD_PUFFS = (
     (0.55, 0.12, 0.68),
     (-0.18, 0.3, 0.55),
     (0.22, 0.3, 0.5),
+)
+
+# One bush per tool used, sized by how many times that tool was called.
+# Puffs are laid out relative to a (0, 0) ground-contact point (see
+# `_render_bush`), unlike clouds which are centered on their own midpoint.
+# Capped at MAX_BUSHES (mirroring claude_stats.TOP_TOOLS_SHOWN) since a
+# repo can easily touch a dozen-plus distinct tools -- more than that many
+# max-size bushes wouldn't fit the ground strip without wall-to-wall overlap.
+MAX_BUSHES = 10
+BUSH_MARGIN = 40.0
+BUSH_RADIUS_MIN = 12.0
+BUSH_RADIUS_MAX = 34.0
+BUSH_TOOL_COUNT_SATURATION = 600
+BUSH_PUFFS = (
+    (0.0, -0.55, 0.85),
+    (-0.62, -0.3, 0.62),
+    (0.62, -0.3, 0.62),
+    (-0.25, -0.55, 0.5),
+    (0.28, -0.55, 0.5),
 )
 
 TIMELINE_PER_DAY_SECONDS = 0.6
@@ -209,6 +228,11 @@ def _render_defs() -> str:
         '<stop offset="0%" stop-color="#ffffff" />'
         '<stop offset="60%" stop-color="#eef3f8" />'
         '<stop offset="100%" stop-color="#c7d5e4" />'
+        '</radialGradient>'
+        '<radialGradient id="bushGradient" cx="35%" cy="25%" r="75%">'
+        '<stop offset="0%" stop-color="#a9c95a" />'
+        '<stop offset="55%" stop-color="#6f8f3a" />'
+        '<stop offset="100%" stop-color="#3f5620" />'
         '</radialGradient>'
         '<filter id="softBlur" x="-50%" y="-50%" width="200%" height="200%">'
         '<feGaussianBlur stdDeviation="3" />'
@@ -391,6 +415,88 @@ def _render_clouds(models: list[ModelCloud]) -> str:
         elements.append(
             f'<g class="cloud">'
             f'{_render_cloud(x, y, radius, model_cloud.model)}</g>'
+        )
+    return ''.join(elements)
+
+
+def _bush_radius(tool_count: int) -> float:
+    """A tool's bush radius, growing quickly then leveling off.
+
+    Same sqrt-saturation shape as the other size formulas (see
+    `_cloud_radius`, `_canopy_radius`) so a rarely-used tool still gets a
+    visible bush instead of vanishing.
+    """
+    growth = math.sqrt(
+        min(tool_count, BUSH_TOOL_COUNT_SATURATION)
+        / BUSH_TOOL_COUNT_SATURATION
+    )
+    return BUSH_RADIUS_MIN + (BUSH_RADIUS_MAX - BUSH_RADIUS_MIN) * growth
+
+
+def _bush_puffs_d(radius: float, seed: str) -> list[str]:
+    """`d` values for each lumpy puff making up one bush, at this radius.
+
+    Puffs are laid out relative to (0, 0) sitting at the bush's ground
+    contact point, with every puff's lower edge at or below that line --
+    so a caller translating to (x, GROUND_Y) gets a shrub resting on the
+    grass, and scaling the whole group grows it up out of that same root
+    point instead of expanding symmetrically the way a floating cloud does.
+    """
+    rng = random.Random(seed)
+    d_values = []
+    for index, (dx_frac, dy_frac, r_frac) in enumerate(BUSH_PUFFS):
+        jitter = rng.uniform(0.92, 1.08)
+        puff_radius = radius * r_frac * jitter
+        d_values.append(
+            _blob_path(
+                dx_frac * radius,
+                dy_frac * radius,
+                puff_radius,
+                random.Random(f'{seed}:{index}'),
+                points=9,
+                jitter=0.22,
+            )
+        )
+    return d_values
+
+
+def _render_bush(cx: float, base_y: float, radius: float, seed: str) -> str:
+    puffs = ''.join(
+        f'<path d="{d}" fill="url(#bushGradient)" opacity="0.94" />'
+        for d in _bush_puffs_d(radius, seed)
+    )
+    return f'<g transform="translate({cx:.1f},{base_y:.1f})">{puffs}</g>'
+
+
+def _bush_x_positions(count: int) -> list[float]:
+    """Deterministic ground-line x slot for each of `count` bushes.
+
+    Spread evenly across the width like the flower floor and cloud slots,
+    with per-slot jitter so a full row of tools doesn't read as a
+    mechanical grid.
+    """
+    usable_width = VIEWBOX_WIDTH - BUSH_MARGIN * 2
+    positions = []
+    for index in range(count):
+        rng = random.Random(f'ccgarden-bush-slot:{index}')
+        x = BUSH_MARGIN + usable_width * (
+            (index + rng.uniform(0.2, 0.8)) / count
+        )
+        positions.append(x)
+    return positions
+
+
+def _render_bushes(tools: list[ToolBush]) -> str:
+    if not tools:
+        return ''
+    tools = tools[:MAX_BUSHES]
+    xs = _bush_x_positions(len(tools))
+    elements = []
+    for x, tool_bush in zip(xs, tools, strict=True):
+        radius = _bush_radius(tool_bush.count)
+        elements.append(
+            f'<g class="bush">'
+            f'{_render_bush(x, GROUND_Y, radius, tool_bush.tool)}</g>'
         )
     return ''.join(elements)
 
@@ -816,40 +922,74 @@ LEGEND_ROWS = (
         ('one per model used;', 'bigger = more tokens'),
         'cloud',
     ),
+    (
+        'Bushes',
+        ('one per tool used;', 'bigger = used more'),
+        'bush',
+    ),
 )
 
 
-def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
-    if icon == 'trunk':
-        return (
-            f'<rect x="{cx - 6:.1f}" y="{cy - 7:.1f}" width="12" height="14" '
-            f'rx="3" fill="url(#trunkGradient)" stroke="#3a2412" '
-            f'stroke-width="0.6" />'
-        )
-    if icon == 'ring':
-        return (
-            f'<path d="M{cx - 7:.1f},{cy + 3:.1f} Q{cx:.1f},{cy - 5:.1f} '
-            f'{cx + 7:.1f},{cy + 3:.1f}" fill="none" stroke="#3a2412" '
-            f'stroke-width="2.2" stroke-linecap="round" opacity="0.6" />'
-        )
-    if icon == 'branch':
-        return (
-            f'<path d="M{cx - 7:.1f},{cy + 7:.1f} Q{cx:.1f},{cy - 2:.1f} '
-            f'{cx + 7:.1f},{cy - 7:.1f}" fill="none" '
-            f'stroke="url(#trunkGradient)" stroke-width="3" '
-            f'stroke-linecap="round" />'
-        )
-    if icon == 'flower':
-        return _render_flower(
-            cx, cy, 6.0, '#f27ab0', random.Random('legend-flower')
-        )
-    if icon == 'cloud':
-        return _render_cloud(cx, cy, 7.0, 'legend-cloud')
+def _legend_icon_trunk(cx: float, cy: float) -> str:
+    return (
+        f'<rect x="{cx - 6:.1f}" y="{cy - 7:.1f}" width="12" height="14" '
+        f'rx="3" fill="url(#trunkGradient)" stroke="#3a2412" '
+        f'stroke-width="0.6" />'
+    )
+
+
+def _legend_icon_ring(cx: float, cy: float) -> str:
+    return (
+        f'<path d="M{cx - 7:.1f},{cy + 3:.1f} Q{cx:.1f},{cy - 5:.1f} '
+        f'{cx + 7:.1f},{cy + 3:.1f}" fill="none" stroke="#3a2412" '
+        f'stroke-width="2.2" stroke-linecap="round" opacity="0.6" />'
+    )
+
+
+def _legend_icon_branch(cx: float, cy: float) -> str:
+    return (
+        f'<path d="M{cx - 7:.1f},{cy + 7:.1f} Q{cx:.1f},{cy - 2:.1f} '
+        f'{cx + 7:.1f},{cy - 7:.1f}" fill="none" '
+        f'stroke="url(#trunkGradient)" stroke-width="3" '
+        f'stroke-linecap="round" />'
+    )
+
+
+def _legend_icon_leaf(cx: float, cy: float) -> str:
     return (
         f'<g transform="translate({cx:.1f},{cy:.1f}) rotate(-15) scale(6)">'
         f'<path d="{LEAF_SHAPE_D}" fill="#5a9e5a" opacity="0.95" />'
         f'</g>'
     )
+
+
+def _legend_icon_flower(cx: float, cy: float) -> str:
+    return _render_flower(
+        cx, cy, 6.0, '#f27ab0', random.Random('legend-flower')
+    )
+
+
+def _legend_icon_cloud(cx: float, cy: float) -> str:
+    return _render_cloud(cx, cy, 7.0, 'legend-cloud')
+
+
+def _legend_icon_bush(cx: float, cy: float) -> str:
+    return _render_bush(cx, cy + 5.0, 7.0, 'legend-bush')
+
+
+LEGEND_ICON_RENDERERS = {
+    'trunk': _legend_icon_trunk,
+    'ring': _legend_icon_ring,
+    'branch': _legend_icon_branch,
+    'leaf': _legend_icon_leaf,
+    'flower': _legend_icon_flower,
+    'cloud': _legend_icon_cloud,
+    'bush': _legend_icon_bush,
+}
+
+
+def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
+    return LEGEND_ICON_RENDERERS[icon](cx, cy)
 
 
 def _render_legend() -> str:
@@ -904,6 +1044,7 @@ def render_svg(garden: GardenData) -> str:
         + _render_trunk(base_half_width)
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
+        + _render_bushes(garden.tools)
         + _render_flower_floor(flower_count)
         + _render_legend()
     )
@@ -1408,6 +1549,50 @@ def _render_timeline_clouds(
     return ''.join(elements)
 
 
+def _render_timeline_bushes(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    if not timeline.tool_order:
+        return ''
+
+    tool_order = timeline.tool_order[:MAX_BUSHES]
+    xs = _bush_x_positions(len(tool_order))
+    elements = []
+    for x, tool in zip(xs, tool_order, strict=True):
+        days = timeline.tool_days[tool]
+        final_count = days[-1].count
+        final_radius = _bush_radius(final_count)
+
+        # Grown as a share of the tool's *final* radius, not the same
+        # absolute-count formula re-evaluated per day -- see the identical
+        # reasoning in `_render_timeline_branches_and_leaves`.
+        scale_values = []
+        for day_stat in days:
+            fraction = (
+                min(day_stat.count / final_count, 1.0) if final_count else 1.0
+            )
+            day_radius = (
+                BUSH_RADIUS_MIN + (final_radius - BUSH_RADIUS_MIN) * fraction
+            )
+            scale_values.append(f'{day_radius / final_radius:.4f}')
+
+        animate = _animate_transform_tag(
+            'scale', scale_values, key_times, duration
+        )
+        puffs = ''.join(
+            f'<path d="{d}" fill="url(#bushGradient)" opacity="0.94" />'
+            for d in _bush_puffs_d(final_radius, tool)
+        )
+        elements.append(
+            f'<g class="bush" transform="translate({x:.1f},{GROUND_Y})">'
+            f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'</g>'
+        )
+    return ''.join(elements)
+
+
 def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     """The tree's final state, for the fallback when there's <2 days."""
     rings = [
@@ -1436,12 +1621,17 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         )
         for model in timeline.model_order
     ]
+    tools = [
+        ToolBush(tool=tool, count=timeline.tool_days[tool][-1].count)
+        for tool in timeline.tool_order
+    ]
     return GardenData(
         rings=rings,
         branches=branches,
         cache_read_tokens=timeline.cache_read_tokens,
         cache_write_tokens=timeline.cache_write_tokens,
         models=models,
+        tools=tools,
     )
 
 
@@ -1481,6 +1671,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
         )
+        + _render_timeline_bushes(timeline, key_times, duration)
         + _render_flower_floor(flower_count)
         + _render_legend()
     )

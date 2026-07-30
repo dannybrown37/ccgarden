@@ -1,8 +1,10 @@
 import pytest
 
-from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch
+from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch, ToolBush
 from ccgarden.render import (
     LEAVES_PER_SESSION,
+    MAX_BUSHES,
+    _bush_radius,
     _cache_efficiency_flower_count,
     _cloud_radius,
     render_svg,
@@ -162,3 +164,36 @@ def test_render_svg_draws_no_clouds_without_models() -> None:
 
 def test_cloud_radius_grows_with_total_tokens() -> None:
     assert _cloud_radius(0) < _cloud_radius(1_000) < _cloud_radius(5_000_000)
+
+
+@pytest.mark.parametrize('tool_count', [1, 2, 4])
+def test_render_svg_draws_one_bush_per_tool(tool_count: int) -> None:
+    tools = [ToolBush(tool=f'tool-{i}', count=50) for i in range(tool_count)]
+    garden = GardenData(rings=[], branches=[], tools=tools)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="bush"') == tool_count
+
+
+def test_render_svg_draws_no_bushes_without_tools() -> None:
+    garden = GardenData(rings=[], branches=[], tools=[])
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="bush"') == 0
+
+
+def test_bush_radius_grows_with_tool_count() -> None:
+    assert _bush_radius(0) < _bush_radius(10) < _bush_radius(1_000)
+
+
+def test_render_svg_caps_bushes_at_max_bushes() -> None:
+    tools = [
+        ToolBush(tool=f'tool-{i}', count=50) for i in range(MAX_BUSHES + 5)
+    ]
+    garden = GardenData(rings=[], branches=[], tools=tools)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="bush"') == MAX_BUSHES

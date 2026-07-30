@@ -808,6 +808,13 @@ CREATE TABLE IF NOT EXISTS daily_model_usage (
     PRIMARY KEY (day, model)
 );
 
+CREATE TABLE IF NOT EXISTS daily_tool_usage (
+    day TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, tool)
+);
+
 CREATE TABLE IF NOT EXISTS daily_repo_usage (
     day TEXT NOT NULL,
     repo TEXT NOT NULL,
@@ -891,6 +898,13 @@ def record_day(
                 usage.cache_write_tokens,
                 model_cost,
             ),
+        )
+
+    conn.execute('DELETE FROM daily_tool_usage WHERE day = ?', (day_key,))
+    for tool, count in stats.tools.items():
+        conn.execute(
+            'INSERT INTO daily_tool_usage (day, tool, count) VALUES (?, ?, ?)',
+            (day_key, tool, count),
         )
 
     return True

@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from ccgarden.data import DayRing, ModelCloud, RepoBranch, load_garden_data
+from ccgarden.data import (
+    DayRing,
+    ModelCloud,
+    RepoBranch,
+    ToolBush,
+    load_garden_data,
+)
 
 SCHEMA = """
 CREATE TABLE daily_totals (
@@ -49,6 +55,13 @@ CREATE TABLE daily_model_usage (
     cost REAL,
     PRIMARY KEY (day, model)
 );
+
+CREATE TABLE daily_tool_usage (
+    day TEXT NOT NULL,
+    tool TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, tool)
+);
 """
 
 
@@ -57,6 +70,7 @@ def make_db(
     totals_rows: list[tuple],
     repo_rows: list[tuple],
     model_rows: list[tuple] | None = None,
+    tool_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -72,6 +86,10 @@ def make_db(
     conn.executemany(
         'INSERT INTO daily_model_usage VALUES (?,?,?,?,?,?,?)',
         model_rows or [],
+    )
+    conn.executemany(
+        'INSERT INTO daily_tool_usage VALUES (?,?,?)',
+        tool_rows or [],
     )
     conn.commit()
     conn.close()
@@ -97,6 +115,10 @@ def model_row(
         cache_write_tokens,
         cost,
     )
+
+
+def tool_row(day: str, tool: str, *, count: int = 0) -> tuple:
+    return (day, tool, count)
 
 
 def totals_row(
@@ -358,3 +380,47 @@ def test_load_models_excludes_models_with_no_token_usage(
     garden = load_garden_data(db_path)
 
     assert garden.models == []
+
+
+def test_load_tools_aggregates_same_tool_across_days(tmp_path: Path) -> None:
+    tool_rows = [
+        tool_row('2026-07-26', 'Read', count=5),
+        tool_row('2026-07-27', 'Read', count=7),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], tool_rows=tool_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.tools == [ToolBush(tool='Read', count=12)]
+
+
+def test_load_tools_sorts_by_count_descending(tmp_path: Path) -> None:
+    tool_rows = [
+        tool_row('2026-07-26', 'Grep', count=2),
+        tool_row('2026-07-26', 'Bash', count=50),
+        tool_row('2026-07-26', 'Read', count=10),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], tool_rows=tool_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [tool_bush.tool for tool_bush in garden.tools] == [
+        'Bash',
+        'Read',
+        'Grep',
+    ]
+
+
+def test_load_tools_excludes_tools_with_zero_count(tmp_path: Path) -> None:
+    tool_rows = [tool_row('2026-07-26', 'Read', count=0)]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], tool_rows=tool_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.tools == []

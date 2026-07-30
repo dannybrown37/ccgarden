@@ -31,12 +31,19 @@ class ModelCloud:
 
 
 @dataclass(frozen=True)
+class ToolBush:
+    tool: str
+    count: int
+
+
+@dataclass(frozen=True)
 class GardenData:
     rings: list[DayRing]
     branches: list[RepoBranch]
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     models: list[ModelCloud] = field(default_factory=list)
+    tools: list[ToolBush] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,14 @@ class ModelUsageDay:
 
 
 @dataclass(frozen=True)
+class ToolUsageDay:
+    """A tool's cumulative call count as of one day."""
+
+    day: str
+    count: int
+
+
+@dataclass(frozen=True)
 class GardenTimeline:
     """Day-by-day cumulative history, ready to be replayed as a growth."""
 
@@ -74,6 +89,8 @@ class GardenTimeline:
     cache_write_tokens: int = 0
     model_order: list[str] = field(default_factory=list)
     model_days: dict[str, list[ModelUsageDay]] = field(default_factory=dict)
+    tool_order: list[str] = field(default_factory=list)
+    tool_days: dict[str, list[ToolUsageDay]] = field(default_factory=dict)
 
 
 def load_garden_timeline(db_path: str) -> GardenTimeline:
@@ -114,6 +131,7 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
 
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
     model_order, model_days = _load_model_days(conn, days, day_index)
+    tool_order, tool_days = _load_tool_days(conn, days, day_index)
     cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
 
     return GardenTimeline(
@@ -126,6 +144,8 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cache_write_tokens=cache_write_tokens,
         model_order=model_order,
         model_days=model_days,
+        tool_order=tool_order,
+        tool_days=tool_days,
     )
 
 
@@ -284,12 +304,71 @@ def _cumulative_model_days(
     return rows
 
 
+def _load_tools(conn: sqlite3.Connection) -> list[ToolBush]:
+    cursor = conn.execute(
+        """
+        SELECT tool, SUM(count)
+        FROM daily_tool_usage
+        GROUP BY tool
+        HAVING SUM(count) > 0
+        ORDER BY SUM(count) DESC
+        """
+    )
+    return [ToolBush(tool=row[0], count=row[1]) for row in cursor.fetchall()]
+
+
+def _load_tool_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+) -> tuple[list[str], dict[str, list[ToolUsageDay]]]:
+    cursor = conn.execute(
+        'SELECT day, tool, count FROM daily_tool_usage ORDER BY day ASC'
+    )
+
+    day_count = len(days)
+    deltas: dict[str, list[int | None]] = {}
+    count_totals: dict[str, int] = {}
+
+    for day, tool, count in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        deltas.setdefault(tool, [None] * day_count)[index] = count
+        count_totals[tool] = count_totals.get(tool, 0) + count
+
+    tool_order = sorted(
+        (tool for tool in deltas if count_totals[tool] > 0),
+        key=lambda tool: count_totals[tool],
+        reverse=True,
+    )
+
+    tool_days = {
+        tool: _cumulative_tool_days(days, deltas[tool]) for tool in tool_order
+    }
+    return tool_order, tool_days
+
+
+def _cumulative_tool_days(
+    days: list[str],
+    deltas: list[int | None],
+) -> list[ToolUsageDay]:
+    running_count = 0
+    rows = []
+    for day, delta in zip(days, deltas, strict=True):
+        if delta is not None:
+            running_count += delta
+        rows.append(ToolUsageDay(day=day, count=running_count))
+    return rows
+
+
 def load_garden_data(db_path: str) -> GardenData:
     conn = sqlite3.connect(db_path)
     try:
         rings = _load_rings(conn)
         branches = _load_branches(conn)
         models = _load_models(conn)
+        tools = _load_tools(conn)
         cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
     finally:
         conn.close()
@@ -299,6 +378,7 @@ def load_garden_data(db_path: str) -> GardenData:
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         models=models,
+        tools=tools,
     )
 
 
