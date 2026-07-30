@@ -26,6 +26,9 @@ BRANCH_LINES_SATURATION = 6000
 BRANCH_LENGTH_EXPONENT = 0.7
 BRANCH_SPREAD_DEGREES = 55.0
 BRANCH_TIP_WIDTH = 1.6
+BRANCH_WIDTH_MIN = 2.2
+BRANCH_WIDTH_MAX = 7.0
+BRANCH_TOKENS_SATURATION = 2_500_000
 LEAVES_PER_SESSION = 5
 LEAF_SATURATION_COUNT = 2000
 CANOPY_MIN_LEAVES = 3
@@ -131,6 +134,23 @@ def _branch_length(lines_added: int) -> float:
     )
     growth = fraction**BRANCH_LENGTH_EXPONENT
     return BRANCH_LENGTH_MIN + (BRANCH_LENGTH_MAX - BRANCH_LENGTH_MIN) * growth
+
+
+def _branch_width(total_tokens: int) -> float:
+    """A branch's thickness for a repo with this many cumulative tokens.
+
+    Length already tracks lines added and leaf count already tracks
+    sessions, so thickness is free to carry a third signal: how much
+    Claude actually read and wrote on that repo (input + output tokens),
+    which can diverge a lot from lines-added for repos with long research
+    or review sessions that touch little code. Same sqrt-saturation shape
+    as the other size formulas so small totals still get lifted off the
+    floor instead of staying visually flat.
+    """
+    growth = math.sqrt(
+        min(total_tokens, BRANCH_TOKENS_SATURATION) / BRANCH_TOKENS_SATURATION
+    )
+    return BRANCH_WIDTH_MIN + (BRANCH_WIDTH_MAX - BRANCH_WIDTH_MIN) * growth
 
 
 def _half_width_at(y: float, base_half_width: float) -> float:
@@ -362,7 +382,9 @@ def _render_branches_and_leaves(
         end_x, end_y = _branch_endpoint(
             origin_x, origin_y, length, side, y_fraction
         )
-        base_width = min(2.2 + repo_branch.sessions * 0.22, 7.0)
+        base_width = _branch_width(
+            repo_branch.output_tokens + repo_branch.input_tokens
+        )
         curve_rng = random.Random(f'{repo_branch.repo}:curve')
         bow = length * 0.08 * side * (0.7 + 0.6 * curve_rng.random())
 
@@ -618,7 +640,7 @@ LEGEND_ROWS = (
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
     (
         'Branches',
-        ('one per repo', 'longer = more lines;', 'thicker = more sessions'),
+        ('one per repo', 'longer = more lines;', 'thicker = more tokens'),
         'branch',
     ),
     ('Leaves', ('one per session;', 'more = busier repo'), 'leaf'),
@@ -923,9 +945,9 @@ def _render_timeline_branches_and_leaves(
 
         days = timeline.branch_days[repo]
         final_lines_added = days[-1].lines_added
-        final_sessions = days[-1].sessions
+        final_tokens = days[-1].output_tokens + days[-1].input_tokens
         final_length = _branch_length(final_lines_added)
-        final_width = min(2.2 + final_sessions * 0.22, 7.0)
+        final_width = _branch_width(final_tokens)
 
         d_values = []
         day_vectors: list[tuple[float, float]] = []
@@ -955,10 +977,9 @@ def _render_timeline_branches_and_leaves(
                 if final_lines_added
                 else 1.0
             )
+            day_tokens = day_stat.output_tokens + day_stat.input_tokens
             width_fraction = (
-                min(day_stat.sessions / final_sessions, 1.0)
-                if final_sessions
-                else 1.0
+                min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
             )
             length = (
                 BRANCH_LENGTH_MIN
@@ -967,7 +988,10 @@ def _render_timeline_branches_and_leaves(
             end_x, end_y = _branch_endpoint(
                 origin_x, origin_y, length, side, y_fraction
             )
-            base_width = 2.2 + (final_width - 2.2) * width_fraction
+            base_width = (
+                BRANCH_WIDTH_MIN
+                + (final_width - BRANCH_WIDTH_MIN) * width_fraction
+            )
             bow = length * 0.08 * side * (0.7 + 0.6 * bow_factor)
             d_values.append(
                 _render_branch_shape(
