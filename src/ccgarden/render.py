@@ -23,6 +23,7 @@ BRANCH_ZONE_HEIGHT = 220
 BRANCH_LENGTH_MIN = 30.0
 BRANCH_LENGTH_MAX = 230.0
 BRANCH_LINES_SATURATION = 6000
+BRANCH_LENGTH_EXPONENT = 0.7
 BRANCH_SPREAD_DEGREES = 55.0
 BRANCH_TIP_WIDTH = 1.6
 LEAVES_PER_SESSION = 5
@@ -115,14 +116,20 @@ def _ring_stroke_width(sessions: int) -> float:
 def _branch_length(lines_added: int) -> float:
     """A branch's length for a repo with this many cumulative lines added.
 
-    Same saturation problem as the trunk and rings: a linear formula
-    capped out by ~1,333 lines added, so any repo worked on for more than
-    a few sessions maxed out the length and every branch looked the same
-    regardless of how much bigger one repo's diffs actually were.
+    A pure linear mapping reads as proportional but leaves every branch
+    looking stubby for realistic lines-added totals, since none of them
+    get near BRANCH_LINES_SATURATION; a pure sqrt curve fixes the
+    stubbiness but compresses the ratios between repos too much (a repo
+    with 17x the lines of another only ends up ~2.7x longer). Raising
+    the fraction to BRANCH_LENGTH_EXPONENT (between the two) is a happy
+    medium: smaller totals still get boosted off the floor, but relative
+    differences between repos stay much closer to their real ratio than
+    sqrt allows.
     """
-    growth = math.sqrt(
+    fraction = (
         min(lines_added, BRANCH_LINES_SATURATION) / BRANCH_LINES_SATURATION
     )
+    growth = fraction**BRANCH_LENGTH_EXPONENT
     return BRANCH_LENGTH_MIN + (BRANCH_LENGTH_MAX - BRANCH_LENGTH_MIN) * growth
 
 
@@ -609,61 +616,13 @@ LEGEND_PADDING = 10.0
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
-    ('Branches', ('one per repo; longer', '= more lines added'), 'branch'),
+    (
+        'Branches',
+        ('one per repo', 'longer = more lines;', 'thicker = more sessions'),
+        'branch',
+    ),
     ('Leaves', ('one per session;', 'more = busier repo'), 'leaf'),
 )
-BRANCH_SCALE_REFERENCE_LINES = (500, 2000, BRANCH_LINES_SATURATION)
-BRANCH_SCALE_THOUSAND = 1000
-MINI_BRANCH_LENGTH_MIN = 6.0
-MINI_BRANCH_LENGTH_MAX = 34.0
-
-
-def _mini_branch_scale_length(lines_added: int) -> float:
-    """A scaled-down branch length for the legend's reference ruler.
-
-    Mirrors `_branch_length`'s growth curve so the ruler's tick lengths
-    are actually proportional to what the tree draws, just shrunk to fit
-    a legend cell instead of the full canopy.
-    """
-    growth = math.sqrt(
-        min(lines_added, BRANCH_LINES_SATURATION) / BRANCH_LINES_SATURATION
-    )
-    return (
-        MINI_BRANCH_LENGTH_MIN
-        + (MINI_BRANCH_LENGTH_MAX - MINI_BRANCH_LENGTH_MIN) * growth
-    )
-
-
-def _render_branch_scale(text_x: float, top_y: float) -> str:
-    """A small tick-mark ruler mapping branch length to lines added.
-
-    Without this, the legend said "longer = more lines added" but gave no
-    sense of *how much* -- there was no way to read a branch's length back
-    into an approximate line count.
-    """
-    parts = []
-    for index, lines in enumerate(BRANCH_SCALE_REFERENCE_LINES):
-        y = top_y + index * 8
-        length = _mini_branch_scale_length(lines)
-        label = (
-            f'{lines // BRANCH_SCALE_THOUSAND}k'
-            if lines >= BRANCH_SCALE_THOUSAND
-            else str(lines)
-        )
-        if lines >= BRANCH_LINES_SATURATION:
-            label += '+'
-        parts.append(
-            f'<line x1="{text_x:.1f}" y1="{y:.1f}" '
-            f'x2="{text_x + length:.1f}" y2="{y:.1f}" '
-            f'stroke="#6b4226" stroke-width="2.4" '
-            f'stroke-linecap="round" />'
-        )
-        parts.append(
-            f'<text x="{text_x + length + 5:.1f}" y="{y + 2.6:.1f}" '
-            f'font-family="Georgia, serif" font-size="7.5" '
-            f'fill="#4a4a3a">{label} lines</text>'
-        )
-    return ''.join(parts)
 
 
 def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
@@ -702,10 +661,7 @@ def _render_legend() -> str:
     them, unlike a panel placed somewhere over the canopy.
     """
     column_width = LEGEND_WIDTH / len(LEGEND_ROWS)
-    # Anchored near the top of the (taller-than-content) box rather than
-    # vertically centered, so the branch row's reference ruler has room
-    # to sit below the icon/text without overflowing the box.
-    row_cy = LEGEND_Y + 17.0
+    row_cy = LEGEND_Y + LEGEND_HEIGHT / 2
     parts = [
         (
             f'<g class="legend">'
@@ -719,25 +675,19 @@ def _render_legend() -> str:
         col_x = LEGEND_X + column_width * index
         icon_cx = col_x + LEGEND_PADDING + 8
         text_x = col_x + LEGEND_PADDING + 20
-        desc_line1, desc_line2 = desc_lines
         parts.append(_render_legend_icon(icon, icon_cx, row_cy - 2))
         parts.append(
             f'<text x="{text_x:.1f}" y="{row_cy - 9:.1f}" '
             f'font-family="Georgia, serif" font-size="10" '
             f'font-weight="bold" fill="#2f3b23">{label}</text>'
         )
-        parts.append(
-            f'<text x="{text_x:.1f}" y="{row_cy + 2:.1f}" '
-            f'font-family="Georgia, serif" font-size="8.2" '
-            f'fill="#4a4a3a">{desc_line1}</text>'
-        )
-        parts.append(
-            f'<text x="{text_x:.1f}" y="{row_cy + 11:.1f}" '
-            f'font-family="Georgia, serif" font-size="8.2" '
-            f'fill="#4a4a3a">{desc_line2}</text>'
-        )
-        if icon == 'branch':
-            parts.append(_render_branch_scale(text_x, row_cy + 24))
+        for line_index, desc_line in enumerate(desc_lines):
+            line_y = row_cy + 2 + line_index * 9
+            parts.append(
+                f'<text x="{text_x:.1f}" y="{line_y:.1f}" '
+                f'font-family="Georgia, serif" font-size="8.2" '
+                f'fill="#4a4a3a">{desc_line}</text>'
+            )
     parts.append('</g>')
     return ''.join(parts)
 
