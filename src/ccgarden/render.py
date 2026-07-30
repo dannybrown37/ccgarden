@@ -95,6 +95,14 @@ TIMELINE_MIN_DURATION_S = 5.0
 TIMELINE_MAX_DURATION_S = 16.0
 TIMELINE_MIN_DAYS_TO_ANIMATE = 2
 
+# Extra strip below the legend, holding the scrubber that appears once the
+# initial timelapse finishes playing.
+SCRUBBER_HEIGHT = 40.0
+SCRUBBER_MARGIN = 4.0
+SCRUBBER_TOTAL_HEIGHT = SCRUBBER_HEIGHT + SCRUBBER_MARGIN * 2
+SCRUBBER_Y = VIEWBOX_HEIGHT + SCRUBBER_MARGIN
+TIMELINE_VIEWBOX_HEIGHT = VIEWBOX_HEIGHT + SCRUBBER_TOTAL_HEIGHT
+
 
 def _escape_xml(text: str) -> str:
     return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
@@ -1821,6 +1829,89 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     )
 
 
+def _render_scrubber(
+    timeline: GardenTimeline, key_times: list[float], duration: float
+) -> str:
+    """A ground-strip slider that seeks the timelapse's own SMIL clock.
+
+    Every `<animate>`/`<animateTransform>` the timeline renders shares this
+    same `key_times`/`duration` pair (see `render_timeline_svg`), so a single
+    document-time value fully determines every element's frame -- scrubbing
+    is just `svg.pauseAnimations()` once, then `svg.setCurrentTime(t)` per
+    drag, with no separate day-state to keep in sync. Stays hidden and
+    non-interactive until the initial playthrough finishes, per the request
+    to add the scrubber *after* the animation rather than replacing it.
+    """
+    day_count = len(timeline.days)
+    day_labels = [_format_day(day) for day in timeline.days]
+    key_times_js = '[' + ','.join(f'{t:.4f}' for t in key_times) + ']'
+    day_labels_js = (
+        '[' + ','.join(f'"{_escape_xml(label)}"' for label in day_labels) + ']'
+    )
+
+    panel_x = LEGEND_X
+    panel_width = LEGEND_WIDTH
+    ground_fill = (
+        f'<rect x="0" y="{VIEWBOX_HEIGHT:.1f}" width="{VIEWBOX_WIDTH:.1f}" '
+        f'height="{SCRUBBER_TOTAL_HEIGHT:.1f}" fill="#3f7a3f" />'
+    )
+    panel = (
+        f'<rect x="{panel_x:.1f}" y="{SCRUBBER_Y:.1f}" '
+        f'width="{panel_width:.1f}" height="{SCRUBBER_HEIGHT:.1f}" rx="8" '
+        f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" opacity="0.88" />'
+    )
+    foreign = (
+        f'<foreignObject x="{panel_x + 14:.1f}" y="{SCRUBBER_Y + 5:.1f}" '
+        f'width="{panel_width - 28:.1f}" height="{SCRUBBER_HEIGHT - 10:.1f}">'
+        '<div xmlns="http://www.w3.org/1999/xhtml" '
+        'style="font-family: Georgia, serif; color: #2f3b23; '
+        'display: flex; align-items: center; gap: 10px; height: 100%;">'
+        '<span style="font-size: 9px; opacity: 0.75; white-space: nowrap;">'
+        'Time travel</span>'
+        '<input id="ccgarden-scrubber-input" type="range" '
+        f'min="0" max="{day_count - 1}" value="{day_count - 1}" step="1" '
+        'style="flex: 1;" />'
+        '<span id="ccgarden-scrubber-label" '
+        'style="font-size: 11px; font-weight: bold; white-space: nowrap;">'
+        f'{_escape_xml(day_labels[-1])}</span>'
+        '</div>'
+        '</foreignObject>'
+    )
+    group = (
+        f'<g id="ccgarden-scrubber" '
+        f'style="opacity:0;pointer-events:none;transition:opacity 0.6s ease;">'
+        f'{panel}{foreign}</g>'
+    )
+    script = (
+        '<script><![CDATA[\n'
+        '(function () {\n'
+        '  var svg = document.documentElement;\n'
+        '  var group = document.getElementById("ccgarden-scrubber");\n'
+        '  var input = document.getElementById("ccgarden-scrubber-input");\n'
+        '  var label = document.getElementById("ccgarden-scrubber-label");\n'
+        f'  var duration = {duration:.4f};\n'
+        f'  var keyTimes = {key_times_js};\n'
+        f'  var dayLabels = {day_labels_js};\n'
+        '  var paused = false;\n'
+        '  function reveal() {\n'
+        '    group.style.opacity = "1";\n'
+        '    group.style.pointerEvents = "auto";\n'
+        '  }\n'
+        '  function seek(dayIndex) {\n'
+        '    if (!paused) { svg.pauseAnimations(); paused = true; }\n'
+        '    svg.setCurrentTime(keyTimes[dayIndex] * duration);\n'
+        '    label.textContent = dayLabels[dayIndex];\n'
+        '  }\n'
+        '  input.addEventListener("input", function () {\n'
+        '    seek(parseInt(input.value, 10));\n'
+        '  });\n'
+        '  window.setTimeout(reveal, duration * 1000 + 150);\n'
+        '})();\n'
+        ']]></script>'
+    )
+    return ground_fill + group + script
+
+
 def render_timeline_svg(timeline: GardenTimeline) -> str:
     """Render the tree with its real day-by-day history replayed as growth.
 
@@ -1862,12 +1953,13 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_bushes(timeline, key_times, duration)
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         + _render_legend()
+        + _render_scrubber(timeline, key_times, duration)
     )
 
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {VIEWBOX_WIDTH} {VIEWBOX_HEIGHT}" '
-        f'width="{VIEWBOX_WIDTH}" height="{VIEWBOX_HEIGHT}">'
+        f'viewBox="0 0 {VIEWBOX_WIDTH} {TIMELINE_VIEWBOX_HEIGHT:.1f}" '
+        f'width="{VIEWBOX_WIDTH}" height="{TIMELINE_VIEWBOX_HEIGHT:.1f}">'
         f'{_render_defs()}'
         f'{_render_background()}'
         f'{body}'
