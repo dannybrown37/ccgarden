@@ -1,14 +1,67 @@
+import re
+
 import pytest
 
-from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch, ToolBush
+from ccgarden.data import (
+    DayRing,
+    GardenData,
+    GardenTimeline,
+    ModelCloud,
+    RepoBranch,
+    ToolBush,
+    ToolUsageDay,
+)
 from ccgarden.render import (
     LEAVES_PER_SESSION,
     MAX_BUSHES,
     _bush_radius,
+    _bush_x_positions,
     _cache_efficiency_flower_count,
+    _cloud_positions,
     _cloud_radius,
     render_svg,
+    render_timeline_svg,
 )
+
+
+def timeline_with_tools_and_cache(
+    *,
+    tool_counts_by_day: dict[str, list[int]],
+    cache_read_by_day: list[int],
+    cache_write_by_day: list[int],
+) -> GardenTimeline:
+    day_count = len(cache_read_by_day)
+    days = [f'2026-07-{20 + i}' for i in range(day_count)]
+    tool_days = {
+        tool: [
+            ToolUsageDay(day=day, count=count)
+            for day, count in zip(days, counts, strict=True)
+        ]
+        for tool, counts in tool_counts_by_day.items()
+    }
+
+    cumulative_read = []
+    cumulative_write = []
+    running_read = running_write = 0
+    for read, write in zip(cache_read_by_day, cache_write_by_day, strict=True):
+        running_read += read
+        running_write += write
+        cumulative_read.append(running_read)
+        cumulative_write.append(running_write)
+
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1] * day_count,
+        cumulative_sessions=list(range(1, day_count + 1)),
+        branch_order=[],
+        branch_days={},
+        cache_read_tokens=cumulative_read[-1] if cumulative_read else 0,
+        cache_write_tokens=cumulative_write[-1] if cumulative_write else 0,
+        cumulative_cache_read=cumulative_read,
+        cumulative_cache_write=cumulative_write,
+        tool_order=list(tool_counts_by_day),
+        tool_days=tool_days,
+    )
 
 
 def ring(day: str, *, sessions: int = 1) -> DayRing:
@@ -117,6 +170,7 @@ def test_render_svg_draws_one_flower_per_whole_cache_efficiency_ratio() -> (
     garden = GardenData(
         rings=[],
         branches=[],
+        tools=[ToolBush(tool='Bash', count=50)],
         cache_read_tokens=500,
         cache_write_tokens=100,
     )
@@ -130,8 +184,23 @@ def test_render_svg_draws_no_flowers_without_cache_writes() -> None:
     garden = GardenData(
         rings=[],
         branches=[],
+        tools=[ToolBush(tool='Bash', count=50)],
         cache_read_tokens=500,
         cache_write_tokens=0,
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="flower"') == 0
+
+
+def test_render_svg_draws_no_flowers_without_bushes() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        tools=[],
+        cache_read_tokens=500,
+        cache_write_tokens=100,
     )
 
     svg = render_svg(garden)
@@ -152,6 +221,29 @@ def test_render_svg_draws_one_cloud_per_model(model_count: int) -> None:
     svg = render_svg(garden)
 
     assert svg.count('class="cloud"') == model_count
+
+
+def test_bush_x_positions_are_scattered_not_sorted_left_to_right() -> None:
+    # Tools are always passed in biggest-first order, so if slots were
+    # handed out in that same order the largest bush would always land
+    # leftmost -- positions must be shuffled instead.
+    positions = _bush_x_positions(6)
+
+    assert positions != sorted(positions)
+
+
+def test_bush_x_positions_are_deterministic_across_calls() -> None:
+    assert _bush_x_positions(6) == _bush_x_positions(6)
+
+
+def test_cloud_positions_are_scattered_not_sorted_left_to_right() -> None:
+    positions = _cloud_positions(6)
+
+    assert positions != sorted(positions)
+
+
+def test_cloud_positions_are_deterministic_across_calls() -> None:
+    assert _cloud_positions(6) == _cloud_positions(6)
 
 
 def test_render_svg_draws_no_clouds_without_models() -> None:
@@ -197,3 +289,72 @@ def test_render_svg_caps_bushes_at_max_bushes() -> None:
     svg = render_svg(garden)
 
     assert svg.count('class="bush"') == MAX_BUSHES
+
+
+def _flower_blocks(svg: str) -> list[str]:
+    return re.findall(r'<g class="flower".*?</g>', svg, re.DOTALL)
+
+
+def _animate_values(block: str, attribute: str) -> list[str]:
+    match = re.search(
+        rf'attributeName="{attribute}"[^>]*values="([^"]*)"', block
+    )
+    assert match is not None
+    return match.group(1).split(';')
+
+
+def test_render_timeline_svg_draws_no_flowers_without_bushes() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={},
+        cache_read_by_day=[100, 200],
+        cache_write_by_day=[10, 20],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert svg.count('class="flower"') == 0
+
+
+def test_render_timeline_svg_flowers_track_bush_growth_not_final_size() -> (
+    None
+):
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [0, 600]},
+        cache_read_by_day=[100, 100],
+        cache_write_by_day=[0, 20],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    blocks = _flower_blocks(svg)
+    assert blocks
+    translate_values = _animate_values(blocks[0], 'transform')
+    first_y = float(translate_values[0].split(',')[1])
+    final_y = float(translate_values[-1].split(',')[1])
+
+    # The bush starts at its minimum radius and grows to its full size, so
+    # a flower riding it should sit much lower on day one than on the final
+    # day -- not already up at its resting height from the start.
+    assert abs(final_y - first_y) > 5
+
+
+def test_render_timeline_svg_flowers_fade_in_as_cache_efficiency_grows() -> (
+    None
+):
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [50, 50, 50, 50]},
+        cache_read_by_day=[0, 20, 40, 60],
+        cache_write_by_day=[10, 10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert svg.count('class="flower"') == 3
+    blocks = _flower_blocks(svg)
+    first_flower_opacity = _animate_values(blocks[0], 'opacity')
+
+    # The cache-efficiency ratio only reaches 1 on day two, so the first
+    # flower shouldn't be visible on day one -- it should fade in partway
+    # through the timeline instead of existing from the very first frame.
+    assert first_flower_opacity[0] == '0'
+    assert '1' in first_flower_opacity

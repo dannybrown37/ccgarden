@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch, ToolBush
 
 if TYPE_CHECKING:
-    from ccgarden.data import GardenTimeline, RepoBranchDay
+    from ccgarden.data import GardenTimeline, RepoBranchDay, ToolUsageDay
 
 VIEWBOX_WIDTH = 800
 VIEWBOX_HEIGHT = 800
@@ -54,7 +54,6 @@ RING_SESSIONS_SATURATION = 60
 FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
 FLOWER_CENTER_COLOR = '#5a3d1a'
 FLOWER_RADIUS = 5.0
-FLOWER_MARGIN = 16.0
 
 # One cloud per model used, sized by how many tokens that model produced.
 CLOUD_MARGIN = 50.0
@@ -319,24 +318,27 @@ def _render_flower(
     return petals + center
 
 
-def _render_flower_floor(count: int) -> str:
-    """A carpet of `count` flowers along the ground line.
+def _render_flowers_on_bushes(
+    count: int, bush_footprints: list[tuple[float, float]]
+) -> str:
+    """`count` flowers scattered across the given bush footprints.
 
-    Placed hugging GROUND_Y like the grass blades in `_render_grass`, so
-    they poke up above the legend panel drawn on top of them afterward
-    instead of being hidden underneath it.
+    Cache efficiency has no bush or branch of its own to live on, so its
+    flowers ride along on the tool bushes instead -- round-robining
+    through them so they spread across every bush rather than piling onto
+    one. With no bushes there's nowhere to plant them, so nothing renders.
     """
-    if count <= 0:
+    if count <= 0 or not bush_footprints:
         return ''
     rng = random.Random('ccgarden-flowers')
-    usable_width = VIEWBOX_WIDTH - FLOWER_MARGIN * 2
     elements = []
     for index in range(count):
-        x = FLOWER_MARGIN + usable_width * (
-            (index + rng.uniform(0.15, 0.85)) / count
-        )
-        y = GROUND_Y - rng.uniform(1.0, 9.0)
-        size = FLOWER_RADIUS * rng.uniform(0.8, 1.15)
+        bush_x, bush_radius = bush_footprints[index % len(bush_footprints)]
+        angle = rng.uniform(0, 2 * math.pi)
+        dist = bush_radius * rng.uniform(0.0, 0.7)
+        x = bush_x + dist * math.cos(angle)
+        y = GROUND_Y - bush_radius * 0.6 + dist * math.sin(angle) * 0.6
+        size = FLOWER_RADIUS * rng.uniform(0.6, 0.9)
         color = rng.choice(FLOWER_COLORS)
         elements.append(
             f'<g class="flower">{_render_flower(x, y, size, color, rng)}</g>'
@@ -391,6 +393,10 @@ def _cloud_positions(count: int) -> list[tuple[float, float]]:
 
     Spread evenly across the width like the flower floor, with per-slot
     jitter so a full sky of models doesn't read as a mechanical grid.
+    Shuffled before returning so slot order doesn't line up with the
+    caller's (biggest-model-first) list order -- otherwise every render
+    reads as a strict big-to-small gradient across the sky instead of a
+    scattered distribution of sizes.
     """
     usable_width = VIEWBOX_WIDTH - CLOUD_MARGIN * 2
     positions = []
@@ -401,6 +407,7 @@ def _cloud_positions(count: int) -> list[tuple[float, float]]:
         )
         y = CLOUD_Y_MIN + rng.uniform(0.0, CLOUD_Y_MAX - CLOUD_Y_MIN)
         positions.append((x, y))
+    random.Random('ccgarden-cloud-order').shuffle(positions)
     return positions
 
 
@@ -473,7 +480,10 @@ def _bush_x_positions(count: int) -> list[float]:
 
     Spread evenly across the width like the flower floor and cloud slots,
     with per-slot jitter so a full row of tools doesn't read as a
-    mechanical grid.
+    mechanical grid. Shuffled before returning for the same reason as
+    `_cloud_positions` -- the caller's list is sorted biggest-tool-first,
+    and zipping it straight against slots in order would always put the
+    biggest bush leftmost and the smallest rightmost.
     """
     usable_width = VIEWBOX_WIDTH - BUSH_MARGIN * 2
     positions = []
@@ -483,22 +493,36 @@ def _bush_x_positions(count: int) -> list[float]:
             (index + rng.uniform(0.2, 0.8)) / count
         )
         positions.append(x)
+    random.Random('ccgarden-bush-order').shuffle(positions)
     return positions
 
 
-def _render_bushes(tools: list[ToolBush]) -> str:
-    if not tools:
-        return ''
+def _bush_footprints(tools: list[ToolBush]) -> list[tuple[float, float]]:
+    """(x, radius) ground-line footprint for each bush that will be drawn.
+
+    Shared with the flower placement in `render_svg`/`render_timeline_svg`
+    so flowers only ever land inside a bush that's actually rendered.
+    """
     tools = tools[:MAX_BUSHES]
+    if not tools:
+        return []
     xs = _bush_x_positions(len(tools))
-    elements = []
-    for x, tool_bush in zip(xs, tools, strict=True):
-        radius = _bush_radius(tool_bush.count)
-        elements.append(
-            f'<g class="bush">'
+    return [
+        (x, _bush_radius(tool_bush.count))
+        for x, tool_bush in zip(xs, tools, strict=True)
+    ]
+
+
+def _render_bushes(tools: list[ToolBush]) -> str:
+    tools = tools[:MAX_BUSHES]
+    footprints = _bush_footprints(tools)
+    return ''.join(
+        (
+            '<g class="bush">'
             f'{_render_bush(x, GROUND_Y, radius, tool_bush.tool)}</g>'
         )
-    return ''.join(elements)
+        for (x, radius), tool_bush in zip(footprints, tools, strict=True)
+    )
 
 
 def _render_trunk(base_half_width: float) -> str:
@@ -1039,13 +1063,15 @@ def render_svg(garden: GardenData) -> str:
         garden.cache_read_tokens, garden.cache_write_tokens
     )
 
+    bush_footprints = _bush_footprints(garden.tools)
+
     body = (
         _render_clouds(garden.models)
         + _render_trunk(base_half_width)
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
         + _render_bushes(garden.tools)
-        + _render_flower_floor(flower_count)
+        + _render_flowers_on_bushes(flower_count, bush_footprints)
         + _render_legend()
     )
 
@@ -1549,6 +1575,26 @@ def _render_timeline_clouds(
     return ''.join(elements)
 
 
+def _bush_day_radii(
+    days: list[ToolUsageDay], final_radius: float
+) -> list[float]:
+    """Per-day bush radius, grown as a share of the tool's *final* radius.
+
+    Not the same absolute-count formula re-evaluated per day -- see the
+    identical reasoning in `_render_timeline_branches_and_leaves`.
+    """
+    final_count = days[-1].count
+    radii = []
+    for day_stat in days:
+        fraction = (
+            min(day_stat.count / final_count, 1.0) if final_count else 1.0
+        )
+        radii.append(
+            BUSH_RADIUS_MIN + (final_radius - BUSH_RADIUS_MIN) * fraction
+        )
+    return radii
+
+
 def _render_timeline_bushes(
     timeline: GardenTimeline,
     key_times: list[float],
@@ -1562,22 +1608,10 @@ def _render_timeline_bushes(
     elements = []
     for x, tool in zip(xs, tool_order, strict=True):
         days = timeline.tool_days[tool]
-        final_count = days[-1].count
-        final_radius = _bush_radius(final_count)
+        final_radius = _bush_radius(days[-1].count)
+        day_radii = _bush_day_radii(days, final_radius)
 
-        # Grown as a share of the tool's *final* radius, not the same
-        # absolute-count formula re-evaluated per day -- see the identical
-        # reasoning in `_render_timeline_branches_and_leaves`.
-        scale_values = []
-        for day_stat in days:
-            fraction = (
-                min(day_stat.count / final_count, 1.0) if final_count else 1.0
-            )
-            day_radius = (
-                BUSH_RADIUS_MIN + (final_radius - BUSH_RADIUS_MIN) * fraction
-            )
-            scale_values.append(f'{day_radius / final_radius:.4f}')
-
+        scale_values = [f'{r / final_radius:.4f}' for r in day_radii]
         animate = _animate_transform_tag(
             'scale', scale_values, key_times, duration
         )
@@ -1588,6 +1622,98 @@ def _render_timeline_bushes(
         elements.append(
             f'<g class="bush" transform="translate({x:.1f},{GROUND_Y})">'
             f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'</g>'
+        )
+    return ''.join(elements)
+
+
+def _render_timeline_flowers_on_bushes(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    """Flowers riding each bush's growth, fading in as cache efficiency grows.
+
+    Mirrors `_render_timeline_leaves`: a flower's height above the ground
+    tracks its bush's radius *on that day*, not the bush's eventual size,
+    so it doesn't start already floating above a bush that hasn't grown
+    that tall yet. It also fades in on the day the running cache-read/
+    write ratio first reaches its index, the same birth_index approach
+    leaves use for a count that grows over the timeline.
+    """
+    final_flower_count = _cache_efficiency_flower_count(
+        timeline.cache_read_tokens, timeline.cache_write_tokens
+    )
+    tool_order = timeline.tool_order[:MAX_BUSHES]
+    day_count = len(timeline.days)
+    if (
+        final_flower_count <= 0
+        or not tool_order
+        or len(timeline.cumulative_cache_read) != day_count
+        or len(timeline.cumulative_cache_write) != day_count
+    ):
+        return ''
+
+    xs = _bush_x_positions(len(tool_order))
+    bush_day_radii = []
+    for tool in tool_order:
+        days = timeline.tool_days[tool]
+        final_radius = _bush_radius(days[-1].count)
+        bush_day_radii.append(_bush_day_radii(days, final_radius))
+
+    day_flower_counts = [
+        _cache_efficiency_flower_count(read, write)
+        for read, write in zip(
+            timeline.cumulative_cache_read,
+            timeline.cumulative_cache_write,
+            strict=True,
+        )
+    ]
+
+    rng = random.Random('ccgarden-flowers')
+    elements = []
+    for index in range(final_flower_count):
+        bush_index = index % len(tool_order)
+        bush_x = xs[bush_index]
+        day_radii = bush_day_radii[bush_index]
+
+        angle = rng.uniform(0, 2 * math.pi)
+        dist_frac = rng.uniform(0.0, 0.7)
+        size = FLOWER_RADIUS * rng.uniform(0.6, 0.9)
+        color = rng.choice(FLOWER_COLORS)
+
+        positions = [
+            (
+                bush_x + day_radius * dist_frac * math.cos(angle),
+                GROUND_Y
+                - day_radius * 0.6
+                + day_radius * dist_frac * math.sin(angle) * 0.6,
+            )
+            for day_radius in day_radii
+        ]
+
+        final_x, final_y = positions[-1]
+        translate_values = [f'{x:.1f},{y:.1f}' for x, y in positions]
+        translate_animate = _animate_transform_tag(
+            'translate', translate_values, key_times, duration
+        )
+
+        birth_index = next(
+            (i for i, count in enumerate(day_flower_counts) if count > index),
+            day_count - 1,
+        )
+        opacity_values = [
+            '1' if i >= birth_index else '0' for i in range(day_count)
+        ]
+        opacity_animate = _animate_tag(
+            'opacity', opacity_values, key_times, duration
+        )
+        flower = _render_flower(0, 0, size, color, rng)
+        elements.append(
+            f'<g class="flower" '
+            f'transform="translate({final_x:.1f},{final_y:.1f})" '
+            f'opacity="1">'
+            f'{translate_animate}{opacity_animate}{flower}'
             f'</g>'
         )
     return ''.join(elements)
@@ -1654,9 +1780,6 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         timeline.cumulative_sessions
     )
     final_base_half_width = base_half_width_by_day[-1]
-    flower_count = _cache_efficiency_flower_count(
-        timeline.cache_read_tokens, timeline.cache_write_tokens
-    )
 
     body = (
         _render_timeline_clouds(timeline, key_times, duration)
@@ -1672,7 +1795,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             duration,
         )
         + _render_timeline_bushes(timeline, key_times, duration)
-        + _render_flower_floor(flower_count)
+        + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         + _render_legend()
     )
 

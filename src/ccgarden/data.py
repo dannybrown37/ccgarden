@@ -87,6 +87,8 @@ class GardenTimeline:
     branch_days: dict[str, list[RepoBranchDay]]
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    cumulative_cache_read: list[int] = field(default_factory=list)
+    cumulative_cache_write: list[int] = field(default_factory=list)
     model_order: list[str] = field(default_factory=list)
     model_days: dict[str, list[ModelUsageDay]] = field(default_factory=dict)
     tool_order: list[str] = field(default_factory=list)
@@ -117,17 +119,24 @@ def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
 
 def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
     day_rows = conn.execute(
-        'SELECT day, sessions FROM daily_totals ORDER BY day ASC'
+        'SELECT day, sessions, cache_read_tokens, cache_write_tokens '
+        'FROM daily_totals ORDER BY day ASC'
     ).fetchall()
-    days = [day for day, _ in day_rows]
-    daily_sessions = [sessions for _, sessions in day_rows]
+    days = [row[0] for row in day_rows]
+    daily_sessions = [row[1] for row in day_rows]
     day_index = {day: index for index, day in enumerate(days)}
 
     cumulative_sessions = []
-    running_sessions = 0
-    for sessions in daily_sessions:
+    cumulative_cache_read = []
+    cumulative_cache_write = []
+    running_sessions = running_cache_read = running_cache_write = 0
+    for _, sessions, cache_read, cache_write in day_rows:
         running_sessions += sessions
+        running_cache_read += cache_read
+        running_cache_write += cache_write
         cumulative_sessions.append(running_sessions)
+        cumulative_cache_read.append(running_cache_read)
+        cumulative_cache_write.append(running_cache_write)
 
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
     model_order, model_days = _load_model_days(conn, days, day_index)
@@ -142,6 +151,8 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         branch_days=branch_days,
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
+        cumulative_cache_read=cumulative_cache_read,
+        cumulative_cache_write=cumulative_cache_write,
         model_order=model_order,
         model_days=model_days,
         tool_order=tool_order,

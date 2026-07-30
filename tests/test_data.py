@@ -9,6 +9,7 @@ from ccgarden.data import (
     RepoBranch,
     ToolBush,
     load_garden_data,
+    load_garden_timeline,
 )
 
 SCHEMA = """
@@ -413,6 +414,35 @@ def test_load_tools_sorts_by_count_descending(tmp_path: Path) -> None:
         'Read',
         'Grep',
     ]
+
+
+def test_load_garden_timeline_tracks_cumulative_cache_tokens_per_day(
+    tmp_path: Path,
+) -> None:
+    totals_rows = [
+        totals_row(
+            '2026-07-26',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            cache_read_tokens=300,
+            cache_write_tokens=100,
+        ),
+        totals_row(
+            '2026-07-27',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            cache_read_tokens=200,
+            cache_write_tokens=50,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=[])
+
+    timeline = load_garden_timeline(db_path)
+
+    assert timeline.cumulative_cache_read == [300, 500]
+    assert timeline.cumulative_cache_write == [100, 150]
 
 
 def test_load_tools_excludes_tools_with_zero_count(tmp_path: Path) -> None:
