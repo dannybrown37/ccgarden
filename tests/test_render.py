@@ -14,6 +14,7 @@ from ccgarden.data import (
 from ccgarden.render import (
     LEAVES_PER_SESSION,
     MAX_BUSHES,
+    TIMELINE_VIEWBOX_HEIGHT,
     _bush_radius,
     _bush_x_positions,
     _cache_efficiency_flower_count,
@@ -358,3 +359,61 @@ def test_render_timeline_svg_flowers_fade_in_as_cache_efficiency_grows() -> (
     # through the timeline instead of existing from the very first frame.
     assert first_flower_opacity[0] == '0'
     assert '1' in first_flower_opacity
+
+
+def test_render_svg_includes_tap_tooltip_layer() -> None:
+    garden = GardenData(
+        rings=[], branches=[], tools=[ToolBush(tool='Bash', count=50)]
+    )
+
+    svg = render_svg(garden)
+
+    assert 'id="ccgarden-tooltip"' in svg
+    assert 'id="ccgarden-tooltip-text"' in svg
+
+
+def test_render_timeline_svg_includes_tap_tooltip_layer() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'id="ccgarden-tooltip"' in svg
+    # The tooltip has to paint over the garden, so it must be the last
+    # thing in the document -- an earlier layer would be drawn under the
+    # bushes and clouds it describes.
+    assert svg.index('id="ccgarden-tooltip"') > svg.index('class="bush"')
+
+
+def test_tap_tooltip_ignores_the_scrubber_subtree() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    # Tapping the time-travel slider must keep scrubbing rather than
+    # popping a tooltip over the control the tap was aimed at.
+    walk_up = svg.split('function labelFor')[1].split('function ')[0]
+    assert 'node.id === "ccgarden-scrubber"' in walk_up
+    assert 'return null' in walk_up
+
+
+def test_tap_tooltip_clamps_to_the_timeline_viewbox_height() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    # The timeline SVG is taller than the static one (it carries the
+    # scrubber strip); clamping against the short height would push
+    # tooltips off the bottom of the garden.
+    assert f'var viewHeight = {TIMELINE_VIEWBOX_HEIGHT:.1f};' in svg

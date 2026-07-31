@@ -128,6 +128,10 @@ BUSH_PUFFS = (
     (0.28, -0.55, 0.5),
 )
 
+TOOLTIP_PAD = 8.0
+TOOLTIP_FONT_SIZE = 13.0
+TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
+
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
 TIMELINE_MAX_DURATION_S = 16.0
@@ -1465,6 +1469,7 @@ def render_svg(garden: GardenData) -> str:
             garden.cache_write_tokens,
         )
         + _render_legend()
+        + _render_tap_tooltip(VIEWBOX_HEIGHT)
     )
 
     return (
@@ -2301,6 +2306,95 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     )
 
 
+def _render_tap_tooltip(view_height: float) -> str:
+    """A tap-activated stand-in for `<title>`, which never fires on touch.
+
+    Browsers only surface a native `<title>` on hover, so on a phone every
+    shape in the garden is silent. This draws the same text as real SVG
+    content instead, and it has to live inside this document rather than
+    the host page because the site embeds the garden through `<object>`,
+    which nothing in the page's own DOM can draw over.
+    """
+    box = (
+        f'<rect id="ccgarden-tooltip-box" x="0" y="0" width="10" '
+        f'height="{TOOLTIP_HEIGHT:.1f}" rx="6" fill="#fbfbf3" '
+        f'stroke="#3a2412" stroke-width="1" opacity="0.95" />'
+    )
+    text = (
+        f'<text id="ccgarden-tooltip-text" x="{TOOLTIP_PAD:.1f}" '
+        f'y="{TOOLTIP_PAD + TOOLTIP_FONT_SIZE * 0.8:.1f}" '
+        f'font-family="Georgia, serif" '
+        f'font-size="{TOOLTIP_FONT_SIZE:.1f}" fill="#2f3b23"></text>'
+    )
+    group = (
+        f'<g id="ccgarden-tooltip" opacity="0" '
+        f'style="pointer-events:none;">{box}{text}</g>'
+    )
+    script = (
+        '<script><![CDATA[\n'
+        '(function () {\n'
+        '  var svg = document.documentElement;\n'
+        '  var group = document.getElementById("ccgarden-tooltip");\n'
+        '  var box = document.getElementById("ccgarden-tooltip-box");\n'
+        '  var text = document.getElementById("ccgarden-tooltip-text");\n'
+        f'  var pad = {TOOLTIP_PAD:.1f};\n'
+        f'  var boxHeight = {TOOLTIP_HEIGHT:.1f};\n'
+        f'  var viewWidth = {VIEWBOX_WIDTH:.1f};\n'
+        f'  var viewHeight = {view_height:.1f};\n'
+        '  function labelFor(node) {\n'
+        '    while (node && node !== svg) {\n'
+        '      if (node.id === "ccgarden-scrubber") { return null; }\n'
+        '      var kids = node.childNodes || [];\n'
+        '      for (var i = 0; i < kids.length; i++) {\n'
+        '        if (kids[i].nodeName === "title") {\n'
+        '          return kids[i].textContent;\n'
+        '        }\n'
+        '      }\n'
+        '      node = node.parentNode;\n'
+        '    }\n'
+        '    return null;\n'
+        '  }\n'
+        '  function toUserSpace(event) {\n'
+        '    var ctm = svg.getScreenCTM();\n'
+        '    if (!ctm) { return null; }\n'
+        '    var point = svg.createSVGPoint();\n'
+        '    point.x = event.clientX;\n'
+        '    point.y = event.clientY;\n'
+        '    return point.matrixTransform(ctm.inverse());\n'
+        '  }\n'
+        '  function hide() { group.setAttribute("opacity", "0"); }\n'
+        '  function show(label, at) {\n'
+        '    text.textContent = label;\n'
+        '    var width = text.getComputedTextLength() + pad * 2;\n'
+        '    box.setAttribute("width", width.toFixed(1));\n'
+        '    var x = at.x - width / 2;\n'
+        '    var y = at.y - boxHeight - 14;\n'
+        '    if (x < 4) { x = 4; }\n'
+        '    if (x + width > viewWidth - 4) {\n'
+        '      x = viewWidth - 4 - width;\n'
+        '    }\n'
+        '    if (y < 4) { y = at.y + 18; }\n'
+        '    if (y + boxHeight > viewHeight - 4) {\n'
+        '      y = viewHeight - 4 - boxHeight;\n'
+        '    }\n'
+        '    group.setAttribute(\n'
+        '      "transform",\n'
+        '      "translate(" + x.toFixed(1) + "," + y.toFixed(1) + ")"\n'
+        '    );\n'
+        '    group.setAttribute("opacity", "1");\n'
+        '  }\n'
+        '  svg.addEventListener("pointerdown", function (event) {\n'
+        '    if (event.pointerType === "mouse") { return; }\n'
+        '    var label = labelFor(event.target);\n'
+        '    var at = label ? toUserSpace(event) : null;\n'
+        '    if (at) { show(label, at); } else { hide(); }\n'
+        '  });\n'
+        '})();\n'
+        ']]></script>'
+    )
+    return group + script
+
+
 def _render_scrubber(
     timeline: GardenTimeline, key_times: list[float], duration: float
 ) -> str:
@@ -2427,6 +2521,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         + _render_legend()
         + _render_scrubber(timeline, key_times, duration)
+        + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT)
     )
 
     return (
