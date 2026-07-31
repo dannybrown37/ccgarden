@@ -180,6 +180,8 @@ def totals_row(
     lines_added: int,
     lines_removed: int,
     *,
+    output_tokens: int = 0,
+    input_tokens: int = 0,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
 ) -> tuple:
@@ -192,8 +194,8 @@ def totals_row(
         0,
         lines_added,
         lines_removed,
-        0,
-        0,
+        output_tokens,
+        input_tokens,
         cache_read_tokens,
         cache_write_tokens,
         0.0,
@@ -268,6 +270,38 @@ def test_load_garden_data_sums_cache_tokens_across_days(
 
     assert garden.cache_read_tokens == 500
     assert garden.cache_write_tokens == 150
+
+
+def test_load_garden_data_sums_total_tokens_across_days(
+    tmp_path: Path,
+) -> None:
+    totals_rows = [
+        totals_row(
+            '2026-07-26',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            output_tokens=40,
+            input_tokens=10,
+            cache_read_tokens=300,
+            cache_write_tokens=100,
+        ),
+        totals_row(
+            '2026-07-27',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            output_tokens=20,
+            input_tokens=5,
+            cache_read_tokens=200,
+            cache_write_tokens=50,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=[])
+
+    garden = load_garden_data(db_path)
+
+    assert garden.total_tokens == 725
 
 
 @pytest.mark.parametrize(
@@ -495,6 +529,38 @@ def test_load_garden_timeline_tracks_cumulative_cache_tokens_per_day(
 
     assert timeline.cumulative_cache_read == [300, 500]
     assert timeline.cumulative_cache_write == [100, 150]
+
+
+def test_load_garden_timeline_tracks_cumulative_total_tokens_per_day(
+    tmp_path: Path,
+) -> None:
+    totals_rows = [
+        totals_row(
+            '2026-07-26',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            output_tokens=40,
+            input_tokens=10,
+            cache_read_tokens=300,
+            cache_write_tokens=100,
+        ),
+        totals_row(
+            '2026-07-27',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            output_tokens=20,
+            input_tokens=5,
+            cache_read_tokens=200,
+            cache_write_tokens=50,
+        ),
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=[])
+
+    timeline = load_garden_timeline(db_path)
+
+    assert timeline.cumulative_total_tokens == [450, 725]
 
 
 def test_load_tools_excludes_tools_with_zero_count(tmp_path: Path) -> None:

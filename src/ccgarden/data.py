@@ -53,6 +53,7 @@ class GardenData:
     tools: list[ToolBush] = field(default_factory=list)
     efforts: list[EffortBush] = field(default_factory=list)
     model_efforts: list[ModelCloud] = field(default_factory=list)
+    total_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -107,6 +108,7 @@ class GardenTimeline:
     cache_write_tokens: int = 0
     cumulative_cache_read: list[int] = field(default_factory=list)
     cumulative_cache_write: list[int] = field(default_factory=list)
+    cumulative_total_tokens: list[int] = field(default_factory=list)
     model_order: list[str] = field(default_factory=list)
     model_days: dict[str, list[ModelUsageDay]] = field(default_factory=dict)
     model_effort_order: list[str] = field(default_factory=list)
@@ -141,9 +143,26 @@ def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
     return row[0], row[1]
 
 
+def _load_total_tokens(conn: sqlite3.Connection) -> int:
+    """Garden-wide sum of every token counted anywhere.
+
+    Includes output, input, cache read, and cache write. Feeds the
+    sun -- the one shape that represents the whole garden's total
+    "energy" rather than any single branch/model/tool's share of it.
+    """
+    row = conn.execute(
+        'SELECT COALESCE(SUM(output_tokens), 0) '
+        '+ COALESCE(SUM(input_tokens), 0) '
+        '+ COALESCE(SUM(cache_read_tokens), 0) '
+        '+ COALESCE(SUM(cache_write_tokens), 0) FROM daily_totals'
+    ).fetchone()
+    return row[0]
+
+
 def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
     day_rows = conn.execute(
-        'SELECT day, sessions, cache_read_tokens, cache_write_tokens '
+        'SELECT day, sessions, cache_read_tokens, cache_write_tokens, '
+        'output_tokens, input_tokens '
         'FROM daily_totals ORDER BY day ASC'
     ).fetchall()
     days = [row[0] for row in day_rows]
@@ -153,14 +172,27 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
     cumulative_sessions = []
     cumulative_cache_read = []
     cumulative_cache_write = []
+    cumulative_total_tokens = []
     running_sessions = running_cache_read = running_cache_write = 0
-    for _, sessions, cache_read, cache_write in day_rows:
+    running_total_tokens = 0
+    for (
+        _,
+        sessions,
+        cache_read,
+        cache_write,
+        output_tokens,
+        input_tokens,
+    ) in day_rows:
         running_sessions += sessions
         running_cache_read += cache_read
         running_cache_write += cache_write
+        running_total_tokens += (
+            output_tokens + input_tokens + cache_read + cache_write
+        )
         cumulative_sessions.append(running_sessions)
         cumulative_cache_read.append(running_cache_read)
         cumulative_cache_write.append(running_cache_write)
+        cumulative_total_tokens.append(running_total_tokens)
 
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
     model_order, model_days = _load_model_days(conn, days, day_index)
@@ -181,6 +213,7 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cache_write_tokens=cache_write_tokens,
         cumulative_cache_read=cumulative_cache_read,
         cumulative_cache_write=cumulative_cache_write,
+        cumulative_total_tokens=cumulative_total_tokens,
         model_order=model_order,
         model_days=model_days,
         tool_order=tool_order,
@@ -545,6 +578,7 @@ def load_garden_data(db_path: str) -> GardenData:
         efforts = _load_efforts(conn)
         model_efforts = _load_model_effort_clouds(conn)
         cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
+        total_tokens = _load_total_tokens(conn)
     finally:
         conn.close()
     return GardenData(
@@ -556,6 +590,7 @@ def load_garden_data(db_path: str) -> GardenData:
         tools=tools,
         efforts=efforts,
         model_efforts=model_efforts,
+        total_tokens=total_tokens,
     )
 
 

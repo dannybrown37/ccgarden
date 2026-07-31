@@ -88,6 +88,26 @@ CLOUD_EFFORT_DARKNESS = {
 CLOUD_GRADIENT_STOPS = ('#ffffff', '#eef3f8', '#c7d5e4')
 CLOUD_STORM_STOPS = ('#4d5566', '#333c4d', '#1c222e')
 
+# The single sun, sized and positioned by the garden's all-in token total
+# (every output/input/cache-read/cache-write token counted anywhere) --
+# the one shape standing in for the whole garden's total "energy" rather
+# than any one branch/model/tool's share of it. It rises from a low,
+# barely-there position near the horizon at zero tokens up to its full
+# height and brightness at the saturation point, echoing an actual
+# sunrise into the dusk-blue sky gradient in `_render_defs`. Drawn first
+# so clouds float in front of it, as they would in front of a real sun.
+SUN_RADIUS_MIN = 26.0
+SUN_RADIUS_MAX = 68.0
+SUN_TOKENS_SATURATION = 200_000_000
+SUN_X_START = 130.0
+SUN_Y_START = 640.0
+SUN_X_END = 660.0
+SUN_Y_END = 95.0
+SUN_RAY_COUNT = 12
+SUN_GRADIENT_STOPS = ('#fffbe6', '#ffd76a', '#ff9f45')
+SUN_HALO_COLOR = '#fff3c4'
+SUN_RAY_COLOR = '#ffdb8a'
+
 # One bush per tool used, sized by how many times that tool was called.
 # Puffs are laid out relative to a (0, 0) ground-contact point (see
 # `_render_bush`), unlike clouds which are centered on their own midpoint.
@@ -269,6 +289,17 @@ def _render_defs() -> str:
         '<stop offset="100%" stop-color="#2f5f2f" />'
         '</radialGradient>'
         f'{_cloud_gradient_defs()}'
+        '<radialGradient id="sunGradient" cx="50%" cy="50%" r="50%">'
+        f'<stop offset="0%" stop-color="{SUN_GRADIENT_STOPS[0]}" />'
+        f'<stop offset="55%" stop-color="{SUN_GRADIENT_STOPS[1]}" />'
+        f'<stop offset="100%" stop-color="{SUN_GRADIENT_STOPS[2]}" />'
+        '</radialGradient>'
+        '<radialGradient id="sunHaloGradient" cx="50%" cy="50%" r="50%">'
+        f'<stop offset="0%" stop-color="{SUN_HALO_COLOR}" '
+        'stop-opacity="0.55" />'
+        f'<stop offset="100%" stop-color="{SUN_HALO_COLOR}" '
+        'stop-opacity="0" />'
+        '</radialGradient>'
         '<radialGradient id="bushGradient" cx="35%" cy="25%" r="75%">'
         '<stop offset="0%" stop-color="#a9c95a" />'
         '<stop offset="55%" stop-color="#6f8f3a" />'
@@ -535,6 +566,69 @@ def _render_clouds(models: list[ModelCloud]) -> str:
             f'{_render_cloud(x, y, radius, model_cloud.model, effort)}</g>'
         )
     return ''.join(elements)
+
+
+def _sun_growth(total_tokens: int) -> float:
+    """0..1 share of the way to `SUN_TOKENS_SATURATION`, sqrt-eased.
+
+    Same sqrt-saturation shape as the other size formulas (see
+    `_cloud_radius`, `_bush_radius`) -- there's only ever one sun, so
+    unlike those per-category shapes there's no risk of it flattening
+    several entries together, just the usual "small totals still read as
+    something" floor.
+    """
+    return math.sqrt(
+        min(total_tokens, SUN_TOKENS_SATURATION) / SUN_TOKENS_SATURATION
+    )
+
+
+def _sun_radius(total_tokens: int) -> float:
+    growth = _sun_growth(total_tokens)
+    return SUN_RADIUS_MIN + (SUN_RADIUS_MAX - SUN_RADIUS_MIN) * growth
+
+
+def _sun_position(total_tokens: int) -> tuple[float, float]:
+    """Where the sun sits.
+
+    Rises from a low horizon point toward its zenith as the garden's
+    total token count grows toward saturation.
+    """
+    growth = _sun_growth(total_tokens)
+    x = SUN_X_START + (SUN_X_END - SUN_X_START) * growth
+    y = SUN_Y_START + (SUN_Y_END - SUN_Y_START) * growth
+    return x, y
+
+
+def _sun_rays_d(radius: float) -> list[str]:
+    """`d` values for each ray line radiating out from the sun's center."""
+    inner = radius * 1.12
+    outer = inner + radius * 0.55
+    d_values = []
+    for index in range(SUN_RAY_COUNT):
+        angle = 2 * math.pi * index / SUN_RAY_COUNT
+        x1 = inner * math.cos(angle)
+        y1 = inner * math.sin(angle)
+        x2 = outer * math.cos(angle)
+        y2 = outer * math.sin(angle)
+        d_values.append(f'M{x1:.2f},{y1:.2f} L{x2:.2f},{y2:.2f}')
+    return d_values
+
+
+def _render_sun(cx: float, cy: float, radius: float) -> str:
+    halo_radius = radius * 1.9
+    rays = ''.join(
+        f'<path d="{d}" stroke="{SUN_RAY_COLOR}" '
+        f'stroke-width="{max(radius * 0.12, 2.5):.2f}" '
+        f'stroke-linecap="round" opacity="0.7" />'
+        for d in _sun_rays_d(radius)
+    )
+    return (
+        f'<g transform="translate({cx:.1f},{cy:.1f})">'
+        f'<circle r="{halo_radius:.2f}" fill="url(#sunHaloGradient)" />'
+        f'{rays}'
+        f'<circle r="{radius:.2f}" fill="url(#sunGradient)" />'
+        f'</g>'
+    )
 
 
 def _bush_radius(tool_count: int) -> float:
@@ -1228,6 +1322,11 @@ LEGEND_ROWS = (
         ('one per tool used;', 'bigger = used more'),
         'bush',
     ),
+    (
+        'Sun',
+        ('rises + grows with', 'total tokens (all-in)'),
+        'sun',
+    ),
 )
 
 
@@ -1278,6 +1377,10 @@ def _legend_icon_bush(cx: float, cy: float) -> str:
     return _render_bush(cx, cy + 5.0, 7.0, 'legend-bush')
 
 
+def _legend_icon_sun(cx: float, cy: float) -> str:
+    return _render_sun(cx, cy, 6.0)
+
+
 LEGEND_ICON_RENDERERS = {
     'trunk': _legend_icon_trunk,
     'ring': _legend_icon_ring,
@@ -1286,6 +1389,7 @@ LEGEND_ICON_RENDERERS = {
     'flower': _legend_icon_flower,
     'cloud': _legend_icon_cloud,
     'bush': _legend_icon_bush,
+    'sun': _legend_icon_sun,
 }
 
 
@@ -1342,9 +1446,13 @@ def render_svg(garden: GardenData) -> str:
 
     bush_footprints = _bush_footprints(garden.tools)
     trunk_title = _title(f'Trunk — {total_sessions} total sessions')
+    sun_x, sun_y = _sun_position(garden.total_tokens)
+    sun_title = _title(f'Sun — {garden.total_tokens:,} tokens (all-in)')
 
     body = (
-        _render_clouds(garden.model_efforts)
+        f'<g class="sun">{sun_title}'
+        f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}</g>'
+        + _render_clouds(garden.model_efforts)
         + f'<g class="trunk-group">{trunk_title}'
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
@@ -1900,6 +2008,55 @@ def _render_timeline_leaves(  # noqa: PLR0915
     return ''.join(elements)
 
 
+def _sun_day_values(
+    days_tokens: list[int], final_tokens: int
+) -> list[tuple[float, float, float]]:
+    """Per-day (x, y, radius), grown as a share of the sun's *final* state.
+
+    Not the same absolute-tokens formula re-evaluated per day -- see the
+    identical reasoning in `_render_timeline_branches_and_leaves`.
+    """
+    final_x, final_y = _sun_position(final_tokens)
+    final_radius = _sun_radius(final_tokens)
+    values = []
+    for day_tokens in days_tokens:
+        fraction = min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
+        x = SUN_X_START + (final_x - SUN_X_START) * fraction
+        y = SUN_Y_START + (final_y - SUN_Y_START) * fraction
+        radius = SUN_RADIUS_MIN + (final_radius - SUN_RADIUS_MIN) * fraction
+        values.append((x, y, radius))
+    return values
+
+
+def _render_timeline_sun(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    cumulative = timeline.cumulative_total_tokens
+    final_tokens = cumulative[-1] if cumulative else 0
+    day_values = _sun_day_values(cumulative or [final_tokens], final_tokens)
+    final_x, final_y, final_radius = day_values[-1]
+
+    translate_values = [f'{x:.2f},{y:.2f}' for x, y, _ in day_values]
+    scale_values = [f'{r / final_radius:.4f}' for _, _, r in day_values]
+    translate_animate = _animate_transform_tag(
+        'translate', translate_values, key_times, duration
+    )
+    scale_animate = _animate_transform_tag(
+        'scale', scale_values, key_times, duration
+    )
+    title = _title(f'Sun — {final_tokens:,} tokens (all-in)')
+    sun_shape = _render_sun(0, 0, final_radius)
+    return (
+        f'<g class="sun" '
+        f'transform="translate({final_x:.1f},{final_y:.1f})">'
+        f'{title}{translate_animate}'
+        f'<g transform="scale(1)">{scale_animate}{sun_shape}</g>'
+        f'</g>'
+    )
+
+
 def _render_timeline_clouds(
     timeline: GardenTimeline,
     key_times: list[float],
@@ -2136,6 +2293,11 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         cache_write_tokens=timeline.cache_write_tokens,
         model_efforts=model_efforts,
         tools=tools,
+        total_tokens=(
+            timeline.cumulative_total_tokens[-1]
+            if timeline.cumulative_total_tokens
+            else 0
+        ),
     )
 
 
@@ -2246,7 +2408,8 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     )
 
     body = (
-        _render_timeline_clouds(timeline, key_times, duration)
+        _render_timeline_sun(timeline, key_times, duration)
+        + _render_timeline_clouds(timeline, key_times, duration)
         + f'<g class="trunk-group">{trunk_title}'
         + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
         + '</g>'
