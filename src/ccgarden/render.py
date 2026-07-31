@@ -1265,7 +1265,8 @@ def render_svg(garden: GardenData) -> str:
     trunk_title = _title(f'Trunk — {total_sessions} total sessions')
 
     body = (
-        _render_clouds(garden.models) + f'<g class="trunk-group">{trunk_title}'
+        _render_clouds(garden.model_efforts)
+        + f'<g class="trunk-group">{trunk_title}'
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
@@ -1825,13 +1826,15 @@ def _render_timeline_clouds(
     key_times: list[float],
     duration: float,
 ) -> str:
-    if not timeline.model_order:
+    if not timeline.model_effort_order:
         return ''
 
-    positions = _cloud_positions(len(timeline.model_order))
+    positions = _cloud_positions(len(timeline.model_effort_order))
     elements = []
-    for (cx, cy), model in zip(positions, timeline.model_order, strict=True):
-        days = timeline.model_days[model]
+    for (cx, cy), model in zip(
+        positions, timeline.model_effort_order, strict=True
+    ):
+        days = timeline.model_effort_days[model]
         final_tokens = days[-1].output_tokens + days[-1].input_tokens
         final_radius = _cloud_radius(final_tokens)
 
@@ -2034,13 +2037,13 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         )
         for repo in timeline.branch_order
     ]
-    models = [
+    model_efforts = [
         ModelCloud(
-            model=model,
-            output_tokens=timeline.model_days[model][-1].output_tokens,
-            input_tokens=timeline.model_days[model][-1].input_tokens,
+            model=label,
+            output_tokens=timeline.model_effort_days[label][-1].output_tokens,
+            input_tokens=timeline.model_effort_days[label][-1].input_tokens,
         )
-        for model in timeline.model_order
+        for label in timeline.model_effort_order
     ]
     tools = [
         ToolBush(tool=tool, count=timeline.tool_days[tool][-1].count)
@@ -2051,7 +2054,7 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         branches=branches,
         cache_read_tokens=timeline.cache_read_tokens,
         cache_write_tokens=timeline.cache_write_tokens,
-        models=models,
+        model_efforts=model_efforts,
         tools=tools,
     )
 

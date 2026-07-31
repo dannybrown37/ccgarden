@@ -191,6 +191,52 @@ def test_tallies_models_tools_and_thinking_blocks(tmp_path: Path) -> None:
     assert stats.models['claude-haiku-4-5-20251001'] == 1
 
 
+def test_tallies_effort_levels(tmp_path: Path) -> None:
+    _write_log(
+        tmp_path,
+        [
+            _assistant(effort='high'),
+            _assistant(effort='high'),
+            _assistant(effort='low'),
+            _assistant(),
+        ],
+    )
+
+    stats = collect_stats([tmp_path])
+
+    assert stats.efforts['high'] == 2
+    assert stats.efforts['low'] == 1
+    assert sum(stats.efforts.values()) == 3
+
+
+def test_tallies_model_effort_pairings_distinctly(tmp_path: Path) -> None:
+    _write_log(
+        tmp_path,
+        [
+            _assistant(
+                effort='high',
+                message={'model': 'claude-sonnet-5', 'usage': {}},
+            ),
+            _assistant(
+                effort='medium',
+                message={'model': 'claude-sonnet-5', 'usage': {}},
+            ),
+            _assistant(
+                effort='high',
+                message={'model': 'claude-opus-5', 'usage': {}},
+            ),
+            _assistant(message={'model': 'claude-haiku-4-5', 'usage': {}}),
+        ],
+    )
+
+    stats = collect_stats([tmp_path])
+
+    assert stats.model_effort_counts['claude-sonnet-5 (high)'] == 1
+    assert stats.model_effort_counts['claude-sonnet-5 (medium)'] == 1
+    assert stats.model_effort_counts['claude-opus-5 (high)'] == 1
+    assert stats.model_effort_counts['claude-haiku-4-5'] == 1
+
+
 def test_groups_output_tokens_by_day(tmp_path: Path) -> None:
     _write_log(
         tmp_path,
@@ -295,6 +341,10 @@ def _stats_with_full_report_data() -> UsageStats:
             {'claude-opus-5': 3, 'claude-haiku-4-5-20251001': 2},
         ),
         tools=Counter({'Bash': 4, 'Read': 2}),
+        efforts=Counter({'high': 3, 'low': 2}),
+        model_effort_counts=Counter(
+            {'claude-opus-5 (high)': 3, 'claude-haiku-4-5 (low)': 2},
+        ),
         first_seen=datetime.fromisoformat(STAMP.replace('Z', '+00:00')),
         last_seen=datetime.fromisoformat(STAMP.replace('Z', '+00:00')),
     )
@@ -332,24 +382,46 @@ def test_format_report_columns_totals_and_tokens_when_wide() -> None:
     assert _lines_mentioning_both(report, 'sessions', 'tokens out')
 
 
-def test_format_report_stacks_models_and_tools_when_narrow() -> None:
+def test_format_report_stacks_models_and_efforts_when_narrow() -> None:
     report = format_report(
         _stats_with_full_report_data(),
         width=NARROW_WIDTH,
         color=False,
     )
 
-    assert not _lines_mentioning_both(report, 'model mix', 'top tools')
+    assert not _lines_mentioning_both(report, 'model mix', 'effort mix')
 
 
-def test_format_report_columns_models_and_tools_when_wide() -> None:
+def test_format_report_columns_models_and_efforts_when_wide() -> None:
     report = format_report(
         _stats_with_full_report_data(),
         width=WIDE_WIDTH,
         color=False,
     )
 
-    assert _lines_mentioning_both(report, 'model mix', 'top tools')
+    assert _lines_mentioning_both(report, 'model mix', 'effort mix')
+
+
+def test_format_report_includes_top_tools_section() -> None:
+    report = format_report(
+        _stats_with_full_report_data(),
+        width=WIDE_WIDTH,
+        color=False,
+    )
+
+    assert 'top tools' in report
+
+
+def test_format_report_shows_model_effort_pairings() -> None:
+    report = format_report(
+        _stats_with_full_report_data(),
+        width=WIDE_WIDTH,
+        color=False,
+    )
+
+    assert 'model x effort mix' in report
+    assert 'claude-opus-5 (high)' in report
+    assert 'claude-haiku-4-5 (low)' in report
 
 
 def test_format_report_includes_ansi_codes_when_color_enabled() -> None:
@@ -971,6 +1043,7 @@ DAY = date(2026, 7, 26)
 DAY_REPLIES = 3
 DAY_OUTPUT_TOKENS = 100
 DAY_TOOL_COUNT = 4
+DAY_EFFORT_COUNT = 3
 UPDATED_DAY_REPLIES = 9
 SAMPLE_COST_TOTAL = 1.23
 EXPECTED_ACTIVE_DAYS = 2
@@ -997,6 +1070,7 @@ def _day_stats(**overrides: object) -> UsageStats:
         cache_write_tokens=5,
     )
     stats.tools['Read'] = DAY_TOOL_COUNT
+    stats.efforts['high'] = DAY_EFFORT_COUNT
     for key, value in overrides.items():
         setattr(stats, key, value)
     return stats
@@ -1030,6 +1104,7 @@ def test_ensure_schema_creates_tables() -> None:
         'daily_model_usage',
         'daily_repo_usage',
         'daily_tool_usage',
+        'daily_effort_usage',
     } <= tables
 
 
@@ -1092,6 +1167,38 @@ def test_record_day_removes_stale_tool_rows_on_replace() -> None:
         )
     }
     assert tools == {'Read'}
+
+
+def test_record_day_writes_per_effort_row() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    row = conn.execute(
+        'SELECT count FROM daily_effort_usage WHERE day = ? AND effort = ?',
+        (DAY.isoformat(), 'high'),
+    ).fetchone()
+    assert row == (DAY_EFFORT_COUNT,)
+
+
+def test_record_day_removes_stale_effort_rows_on_replace() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    first = _day_stats()
+    first.efforts['low'] = 2
+    record_day(conn, DAY, first, cost=None)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    efforts = {
+        row[0]
+        for row in conn.execute(
+            'SELECT effort FROM daily_effort_usage WHERE day = ?',
+            (DAY.isoformat(),),
+        )
+    }
+    assert efforts == {'high'}
 
 
 def test_record_day_skips_day_without_sessions() -> None:

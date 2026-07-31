@@ -35,9 +35,11 @@ def _open_in_browser(path: Path) -> None:
 
 
 def main() -> None:
+    # print_report also records today's snapshot -- must run before the
+    # timeline is loaded, or the garden it renders is one day stale.
+    print_report([DEFAULT_LOG_ROOT], db_path=DEFAULT_DB_PATH)
     timeline = load_garden_timeline(str(DEFAULT_DB_PATH))
     svg = render_timeline_svg(timeline)
     DEFAULT_OUTPUT_PATH.write_text(svg)
     _open_in_browser(DEFAULT_OUTPUT_PATH)
     print(f'wrote {DEFAULT_OUTPUT_PATH}')
-    print_report([DEFAULT_LOG_ROOT], db_path=DEFAULT_DB_PATH)

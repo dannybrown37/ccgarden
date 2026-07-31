@@ -38,6 +38,12 @@ class ToolBush:
 
 
 @dataclass(frozen=True)
+class EffortBush:
+    effort: str
+    count: int
+
+
+@dataclass(frozen=True)
 class GardenData:
     rings: list[DayRing]
     branches: list[RepoBranch]
@@ -45,6 +51,8 @@ class GardenData:
     cache_write_tokens: int = 0
     models: list[ModelCloud] = field(default_factory=list)
     tools: list[ToolBush] = field(default_factory=list)
+    efforts: list[EffortBush] = field(default_factory=list)
+    model_efforts: list[ModelCloud] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,14 @@ class ToolUsageDay:
 
 
 @dataclass(frozen=True)
+class EffortUsageDay:
+    """An effort level's cumulative reply count as of one day."""
+
+    day: str
+    count: int
+
+
+@dataclass(frozen=True)
 class GardenTimeline:
     """Day-by-day cumulative history, ready to be replayed as a growth."""
 
@@ -93,8 +109,14 @@ class GardenTimeline:
     cumulative_cache_write: list[int] = field(default_factory=list)
     model_order: list[str] = field(default_factory=list)
     model_days: dict[str, list[ModelUsageDay]] = field(default_factory=dict)
+    model_effort_order: list[str] = field(default_factory=list)
+    model_effort_days: dict[str, list[ModelUsageDay]] = field(
+        default_factory=dict
+    )
     tool_order: list[str] = field(default_factory=list)
     tool_days: dict[str, list[ToolUsageDay]] = field(default_factory=dict)
+    effort_order: list[str] = field(default_factory=list)
+    effort_days: dict[str, list[EffortUsageDay]] = field(default_factory=dict)
 
 
 def load_garden_timeline(db_path: str) -> GardenTimeline:
@@ -143,6 +165,10 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
     branch_order, branch_days = _load_branch_days(conn, days, day_index)
     model_order, model_days = _load_model_days(conn, days, day_index)
     tool_order, tool_days = _load_tool_days(conn, days, day_index)
+    effort_order, effort_days = _load_effort_days(conn, days, day_index)
+    model_effort_order, model_effort_days = _load_model_effort_days(
+        conn, days, day_index
+    )
     cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
 
     return GardenTimeline(
@@ -159,6 +185,10 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         model_days=model_days,
         tool_order=tool_order,
         tool_days=tool_days,
+        effort_order=effort_order,
+        effort_days=effort_days,
+        model_effort_order=model_effort_order,
+        model_effort_days=model_effort_days,
     )
 
 
@@ -389,6 +419,122 @@ def _cumulative_tool_days(
     return rows
 
 
+def _load_model_effort_clouds(conn: sqlite3.Connection) -> list[ModelCloud]:
+    cursor = conn.execute(
+        """
+        SELECT model_effort, SUM(output_tokens), SUM(input_tokens)
+        FROM daily_model_effort_usage
+        GROUP BY model_effort
+        HAVING SUM(output_tokens) + SUM(input_tokens) > 0
+        ORDER BY SUM(output_tokens) + SUM(input_tokens) DESC
+        """
+    )
+    return [
+        ModelCloud(model=row[0], output_tokens=row[1], input_tokens=row[2])
+        for row in cursor.fetchall()
+    ]
+
+
+def _load_model_effort_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+) -> tuple[list[str], dict[str, list[ModelUsageDay]]]:
+    cursor = conn.execute(
+        'SELECT day, model_effort, output_tokens, input_tokens '
+        'FROM daily_model_effort_usage ORDER BY day ASC'
+    )
+
+    day_count = len(days)
+    deltas: dict[str, list[tuple[int, int] | None]] = {}
+    token_totals: dict[str, int] = {}
+
+    for day, label, output_tokens, input_tokens in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        deltas.setdefault(label, [None] * day_count)[index] = (
+            output_tokens,
+            input_tokens,
+        )
+        token_totals[label] = (
+            token_totals.get(label, 0) + output_tokens + input_tokens
+        )
+
+    label_order = sorted(
+        (label for label in deltas if token_totals[label] > 0),
+        key=lambda label: token_totals[label],
+        reverse=True,
+    )
+
+    label_days = {
+        label: _cumulative_model_days(days, deltas[label])
+        for label in label_order
+    }
+    return label_order, label_days
+
+
+def _load_effort_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+) -> tuple[list[str], dict[str, list[EffortUsageDay]]]:
+    cursor = conn.execute(
+        'SELECT day, effort, count FROM daily_effort_usage ORDER BY day ASC'
+    )
+
+    day_count = len(days)
+    deltas: dict[str, list[int | None]] = {}
+    count_totals: dict[str, int] = {}
+
+    for day, effort, count in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        deltas.setdefault(effort, [None] * day_count)[index] = count
+        count_totals[effort] = count_totals.get(effort, 0) + count
+
+    effort_order = sorted(
+        (effort for effort in deltas if count_totals[effort] > 0),
+        key=lambda effort: count_totals[effort],
+        reverse=True,
+    )
+
+    effort_days = {
+        effort: _cumulative_effort_days(days, deltas[effort])
+        for effort in effort_order
+    }
+    return effort_order, effort_days
+
+
+def _cumulative_effort_days(
+    days: list[str],
+    deltas: list[int | None],
+) -> list[EffortUsageDay]:
+    running_count = 0
+    rows = []
+    for day, delta in zip(days, deltas, strict=True):
+        if delta is not None:
+            running_count += delta
+        rows.append(EffortUsageDay(day=day, count=running_count))
+    return rows
+
+
+def _load_efforts(conn: sqlite3.Connection) -> list[EffortBush]:
+    cursor = conn.execute(
+        """
+        SELECT effort, SUM(count)
+        FROM daily_effort_usage
+        GROUP BY effort
+        HAVING SUM(count) > 0
+        ORDER BY SUM(count) DESC
+        """
+    )
+    return [
+        EffortBush(effort=row[0], count=row[1]) for row in cursor.fetchall()
+    ]
+
+
 def load_garden_data(db_path: str) -> GardenData:
     conn = sqlite3.connect(db_path)
     try:
@@ -396,6 +542,8 @@ def load_garden_data(db_path: str) -> GardenData:
         branches = _load_branches(conn)
         models = _load_models(conn)
         tools = _load_tools(conn)
+        efforts = _load_efforts(conn)
+        model_efforts = _load_model_effort_clouds(conn)
         cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
     finally:
         conn.close()
@@ -406,6 +554,8 @@ def load_garden_data(db_path: str) -> GardenData:
         cache_write_tokens=cache_write_tokens,
         models=models,
         tools=tools,
+        efforts=efforts,
+        model_efforts=model_efforts,
     )
 
 

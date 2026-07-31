@@ -216,7 +216,7 @@ def test_render_svg_draws_one_cloud_per_model(model_count: int) -> None:
         )
         for i in range(model_count)
     ]
-    garden = GardenData(rings=[], branches=[], models=models)
+    garden = GardenData(rings=[], branches=[], model_efforts=models)
 
     svg = render_svg(garden)
 

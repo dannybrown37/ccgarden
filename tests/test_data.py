@@ -5,6 +5,7 @@ import pytest
 
 from ccgarden.data import (
     DayRing,
+    EffortBush,
     ModelCloud,
     RepoBranch,
     ToolBush,
@@ -63,6 +64,23 @@ CREATE TABLE daily_tool_usage (
     count INTEGER NOT NULL,
     PRIMARY KEY (day, tool)
 );
+
+CREATE TABLE daily_effort_usage (
+    day TEXT NOT NULL,
+    effort TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, effort)
+);
+
+CREATE TABLE daily_model_effort_usage (
+    day TEXT NOT NULL,
+    model_effort TEXT NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    PRIMARY KEY (day, model_effort)
+);
 """
 
 
@@ -70,8 +88,11 @@ def make_db(
     tmp_path: Path,
     totals_rows: list[tuple],
     repo_rows: list[tuple],
+    *,
     model_rows: list[tuple] | None = None,
     tool_rows: list[tuple] | None = None,
+    effort_rows: list[tuple] | None = None,
+    model_effort_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -91,6 +112,14 @@ def make_db(
     conn.executemany(
         'INSERT INTO daily_tool_usage VALUES (?,?,?)',
         tool_rows or [],
+    )
+    conn.executemany(
+        'INSERT INTO daily_effort_usage VALUES (?,?,?)',
+        effort_rows or [],
+    )
+    conn.executemany(
+        'INSERT INTO daily_model_effort_usage VALUES (?,?,?,?,?,?)',
+        model_effort_rows or [],
     )
     conn.commit()
     conn.close()
@@ -120,6 +149,29 @@ def model_row(
 
 def tool_row(day: str, tool: str, *, count: int = 0) -> tuple:
     return (day, tool, count)
+
+
+def model_effort_row(
+    day: str,
+    model_effort: str,
+    *,
+    output_tokens: int = 0,
+    input_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> tuple:
+    return (
+        day,
+        model_effort,
+        output_tokens,
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+    )
+
+
+def effort_row(day: str, effort: str, *, count: int = 0) -> tuple:
+    return (day, effort, count)
 
 
 def totals_row(
@@ -454,3 +506,124 @@ def test_load_tools_excludes_tools_with_zero_count(tmp_path: Path) -> None:
     garden = load_garden_data(db_path)
 
     assert garden.tools == []
+
+
+def test_load_efforts_aggregates_same_effort_across_days(
+    tmp_path: Path,
+) -> None:
+    effort_rows = [
+        effort_row('2026-07-26', 'high', count=5),
+        effort_row('2026-07-27', 'high', count=7),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], effort_rows=effort_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.efforts == [EffortBush(effort='high', count=12)]
+
+
+def test_load_efforts_sorts_by_count_descending(tmp_path: Path) -> None:
+    effort_rows = [
+        effort_row('2026-07-26', 'low', count=2),
+        effort_row('2026-07-26', 'high', count=50),
+        effort_row('2026-07-26', 'medium', count=10),
+    ]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], effort_rows=effort_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [effort_bush.effort for effort_bush in garden.efforts] == [
+        'high',
+        'medium',
+        'low',
+    ]
+
+
+def test_load_efforts_excludes_efforts_with_zero_count(
+    tmp_path: Path,
+) -> None:
+    effort_rows = [effort_row('2026-07-26', 'high', count=0)]
+    db_path = make_db(
+        tmp_path, totals_rows=[], repo_rows=[], effort_rows=effort_rows
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.efforts == []
+
+
+def test_load_model_efforts_aggregates_same_pairing_across_days(
+    tmp_path: Path,
+) -> None:
+    model_effort_rows = [
+        model_effort_row(
+            '2026-07-26', 'claude-sonnet-5 (high)', output_tokens=200
+        ),
+        model_effort_row(
+            '2026-07-27', 'claude-sonnet-5 (high)', output_tokens=100
+        ),
+    ]
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[],
+        repo_rows=[],
+        model_effort_rows=model_effort_rows,
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.model_efforts == [
+        ModelCloud(
+            model='claude-sonnet-5 (high)', output_tokens=300, input_tokens=0
+        )
+    ]
+
+
+def test_load_model_efforts_sorts_by_total_tokens_descending(
+    tmp_path: Path,
+) -> None:
+    model_effort_rows = [
+        model_effort_row(
+            '2026-07-26', 'claude-haiku (medium)', output_tokens=10
+        ),
+        model_effort_row(
+            '2026-07-26', 'claude-opus-5 (high)', output_tokens=500
+        ),
+        model_effort_row(
+            '2026-07-26', 'claude-sonnet-5 (low)', output_tokens=100
+        ),
+    ]
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[],
+        repo_rows=[],
+        model_effort_rows=model_effort_rows,
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [cloud.model for cloud in garden.model_efforts] == [
+        'claude-opus-5 (high)',
+        'claude-sonnet-5 (low)',
+        'claude-haiku (medium)',
+    ]
+
+
+def test_load_model_efforts_excludes_pairings_with_no_token_usage(
+    tmp_path: Path,
+) -> None:
+    model_effort_rows = [model_effort_row('2026-07-26', 'claude-opus-5')]
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[],
+        repo_rows=[],
+        model_effort_rows=model_effort_rows,
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.model_efforts == []

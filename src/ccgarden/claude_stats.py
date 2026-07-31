@@ -127,7 +127,10 @@ class UsageStats:
     longest_prompt_chars: int = 0
     models: Counter = field(default_factory=Counter)
     tools: Counter = field(default_factory=Counter)
+    efforts: Counter = field(default_factory=Counter)
+    model_effort_counts: Counter = field(default_factory=Counter)
     model_usage: dict[str, ModelUsage] = field(default_factory=dict)
+    model_effort_usage: dict[str, ModelUsage] = field(default_factory=dict)
     output_tokens_by_day: dict[date, int] = field(default_factory=dict)
     wall_durations_ms: list[int] = field(default_factory=list)
     model_durations_ms: list[float] = field(default_factory=list)
@@ -313,6 +316,11 @@ def in_window(
     return not (until and day > until)
 
 
+def model_effort_label(model: str, effort: str | None) -> str:
+    """Combine model and reasoning effort into one cloud label."""
+    return f'{model} ({effort})' if effort else model
+
+
 def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
     message = record.get('message', {})
     stats.replies += 1
@@ -337,6 +345,21 @@ def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
         model_usage.input_tokens += input_
         model_usage.cache_read_tokens += cache_read
         model_usage.cache_write_tokens += cache_write
+
+    effort = record.get('effort')
+    if effort:
+        stats.efforts[effort] += 1
+
+    if model:
+        combo_label = model_effort_label(model, effort)
+        stats.model_effort_counts[combo_label] += 1
+        combo_usage = stats.model_effort_usage.setdefault(
+            combo_label, ModelUsage()
+        )
+        combo_usage.output_tokens += output
+        combo_usage.input_tokens += input_
+        combo_usage.cache_read_tokens += cache_read
+        combo_usage.cache_write_tokens += cache_write
 
     if day is not None and output:
         stats.output_tokens_by_day[day] = (
@@ -591,6 +614,13 @@ def merge_model_usage(merged: UsageStats, part: UsageStats) -> None:
         target.cache_read_tokens += usage.cache_read_tokens
         target.cache_write_tokens += usage.cache_write_tokens
 
+    for label, usage in part.model_effort_usage.items():
+        target = merged.model_effort_usage.setdefault(label, ModelUsage())
+        target.output_tokens += usage.output_tokens
+        target.input_tokens += usage.input_tokens
+        target.cache_read_tokens += usage.cache_read_tokens
+        target.cache_write_tokens += usage.cache_write_tokens
+
 
 def merge_durations(merged: UsageStats, part: UsageStats) -> None:
     merged.wall_durations_ms.extend(part.wall_durations_ms)
@@ -625,6 +655,8 @@ def merge_counts(merged: UsageStats, part: UsageStats) -> None:
     )
     merged.models.update(part.models)
     merged.tools.update(part.tools)
+    merged.efforts.update(part.efforts)
+    merged.model_effort_counts.update(part.model_effort_counts)
     for day, tokens in part.output_tokens_by_day.items():
         merged.output_tokens_by_day[day] = (
             merged.output_tokens_by_day.get(day, 0) + tokens
@@ -815,6 +847,23 @@ CREATE TABLE IF NOT EXISTS daily_tool_usage (
     PRIMARY KEY (day, tool)
 );
 
+CREATE TABLE IF NOT EXISTS daily_effort_usage (
+    day TEXT NOT NULL,
+    effort TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, effort)
+);
+
+CREATE TABLE IF NOT EXISTS daily_model_effort_usage (
+    day TEXT NOT NULL,
+    model_effort TEXT NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    PRIMARY KEY (day, model_effort)
+);
+
 CREATE TABLE IF NOT EXISTS daily_repo_usage (
     day TEXT NOT NULL,
     repo TEXT NOT NULL,
@@ -905,6 +954,35 @@ def record_day(
         conn.execute(
             'INSERT INTO daily_tool_usage (day, tool, count) VALUES (?, ?, ?)',
             (day_key, tool, count),
+        )
+
+    conn.execute('DELETE FROM daily_effort_usage WHERE day = ?', (day_key,))
+    for effort, count in stats.efforts.items():
+        conn.execute(
+            'INSERT INTO daily_effort_usage (day, effort, count) '
+            'VALUES (?, ?, ?)',
+            (day_key, effort, count),
+        )
+
+    conn.execute(
+        'DELETE FROM daily_model_effort_usage WHERE day = ?', (day_key,)
+    )
+    for label, usage in stats.model_effort_usage.items():
+        conn.execute(
+            """
+            INSERT INTO daily_model_effort_usage (
+                day, model_effort, output_tokens, input_tokens,
+                cache_read_tokens, cache_write_tokens
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                day_key,
+                label,
+                usage.output_tokens,
+                usage.input_tokens,
+                usage.cache_read_tokens,
+                usage.cache_write_tokens,
+            ),
         )
 
     return True
@@ -1439,10 +1517,19 @@ def ranked_lines(heading: str, counts: Counter, limit: int) -> list[str]:
     ]
 
 
-def model_and_tool_lines(stats: UsageStats) -> tuple[list[str], list[str]]:
+def model_and_effort_lines(stats: UsageStats) -> tuple[list[str], list[str]]:
     return (
         ranked_lines('  model mix', stats.models, len(stats.models)),
-        ranked_lines('  top tools', stats.tools, TOP_TOOLS_SHOWN),
+        ranked_lines('  effort mix', stats.efforts, len(stats.efforts)),
+    )
+
+
+def model_effort_mix_lines(stats: UsageStats) -> list[str]:
+    """Pairings actually used, e.g. sonnet-high vs sonnet-medium."""
+    return ranked_lines(
+        '  model x effort mix',
+        stats.model_effort_counts,
+        len(stats.model_effort_counts),
     )
 
 
@@ -1507,10 +1594,18 @@ def format_report(
         color=color,
     )
 
-    model_lines, tool_lines = model_and_tool_lines(stats)
-    if model_lines or tool_lines:
-        merged = merge_side_by_side(model_lines, tool_lines, width)
+    model_lines, effort_lines = model_and_effort_lines(stats)
+    if model_lines or effort_lines:
+        merged = merge_side_by_side(model_lines, effort_lines, width)
         append_section(lines, merged, color=color)
+
+    append_section(lines, model_effort_mix_lines(stats), color=color)
+
+    append_section(
+        lines,
+        ranked_lines('  top tools', stats.tools, TOP_TOOLS_SHOWN),
+        color=color,
+    )
 
     if stats.longest_prompt_chars:
         lines.append('')
@@ -1581,6 +1676,8 @@ def repo_as_dict(repo: RepoReport) -> dict:
         'cost': cost_as_dict(repo.cost),
         'models': dict(stats.models.most_common()),
         'tools': dict(stats.tools.most_common()),
+        'efforts': dict(stats.efforts.most_common()),
+        'model_effort_mix': dict(stats.model_effort_counts.most_common()),
     }
 
 
@@ -1617,6 +1714,8 @@ def stats_as_dict(
         'repos': [repo_as_dict(repo) for repo in repos or []],
         'models': dict(stats.models.most_common()),
         'tools': dict(stats.tools.most_common()),
+        'efforts': dict(stats.efforts.most_common()),
+        'model_effort_mix': dict(stats.model_effort_counts.most_common()),
         'longest_prompt_chars': stats.longest_prompt_chars,
         'output_tokens_by_day': {
             day.isoformat(): value
