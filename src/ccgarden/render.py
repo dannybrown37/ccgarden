@@ -241,7 +241,9 @@ def _render_defs() -> str:
         '<stop offset="0%" stop-color="#74b25e" />'
         '<stop offset="100%" stop-color="#3f7a3f" />'
         '</linearGradient>'
-        '<linearGradient id="trunkGradient" x1="0%" y1="0%" x2="100%" y2="0%">'
+        '<linearGradient id="trunkGradient" gradientUnits="userSpaceOnUse" '
+        f'x1="{TRUNK_CENTER_X - TRUNK_BASE_HALF_WIDTH_MAX}" y1="0" '
+        f'x2="{TRUNK_CENTER_X + TRUNK_BASE_HALF_WIDTH_MAX}" y2="0">'
         '<stop offset="0%" stop-color="#4a2e1a" />'
         '<stop offset="45%" stop-color="#7a4a26" />'
         '<stop offset="70%" stop-color="#6b4226" />'
@@ -649,6 +651,46 @@ def _branch_endpoint(
     return end_x, end_y
 
 
+def _branch_shape_points(
+    origin_x: float,
+    origin_y: float,
+    end_x: float,
+    end_y: float,
+    *,
+    base_width: float,
+    tip_width: float,
+    bow: float,
+    root_overlap: float = 0.0,
+) -> dict[str, tuple[float, float]]:
+    """The six control/corner points of a tapered branch quad.
+
+    `root_overlap` pulls the base back past `origin` along the branch's
+    own axis, burying it a little deeper in whatever it grows out of
+    (the trunk) so there's no sliver of background visible at the seam.
+    """
+    dx = end_x - origin_x
+    dy = end_y - origin_y
+    length = math.hypot(dx, dy) or 1.0
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+
+    root_x = origin_x - ux * root_overlap
+    root_y = origin_y - uy * root_overlap
+
+    mid_x = (origin_x + end_x) / 2 + px * bow
+    mid_y = (origin_y + end_y) / 2 + py * bow
+    avg_width = (base_width + tip_width) / 2
+
+    return {
+        'base_left': (root_x + px * base_width, root_y + py * base_width),
+        'base_right': (root_x - px * base_width, root_y - py * base_width),
+        'tip_left': (end_x + px * tip_width, end_y + py * tip_width),
+        'tip_right': (end_x - px * tip_width, end_y - py * tip_width),
+        'ctrl_left': (mid_x + px * avg_width, mid_y + py * avg_width),
+        'ctrl_right': (mid_x - px * avg_width, mid_y - py * avg_width),
+    }
+
+
 def _render_branch_shape(
     origin_x: float,
     origin_y: float,
@@ -658,30 +700,82 @@ def _render_branch_shape(
     base_width: float,
     tip_width: float,
     bow: float,
+    root_overlap: float = 0.0,
 ) -> str:
-    dx = end_x - origin_x
-    dy = end_y - origin_y
-    length = math.hypot(dx, dy) or 1.0
-    ux, uy = dx / length, dy / length
-    px, py = -uy, ux
-
-    mid_x = (origin_x + end_x) / 2 + px * bow
-    mid_y = (origin_y + end_y) / 2 + py * bow
-    avg_width = (base_width + tip_width) / 2
-
-    base_left = (origin_x + px * base_width, origin_y + py * base_width)
-    base_right = (origin_x - px * base_width, origin_y - py * base_width)
-    tip_left = (end_x + px * tip_width, end_y + py * tip_width)
-    tip_right = (end_x - px * tip_width, end_y - py * tip_width)
-    ctrl_left = (mid_x + px * avg_width, mid_y + py * avg_width)
-    ctrl_right = (mid_x - px * avg_width, mid_y - py * avg_width)
-
+    p = _branch_shape_points(
+        origin_x,
+        origin_y,
+        end_x,
+        end_y,
+        base_width=base_width,
+        tip_width=tip_width,
+        bow=bow,
+        root_overlap=root_overlap,
+    )
     return (
-        f'M {base_left[0]},{base_left[1]} '
-        f'Q {ctrl_left[0]},{ctrl_left[1]} {tip_left[0]},{tip_left[1]} '
-        f'L {tip_right[0]},{tip_right[1]} '
-        f'Q {ctrl_right[0]},{ctrl_right[1]} {base_right[0]},{base_right[1]} '
+        f'M {p["base_left"][0]},{p["base_left"][1]} '
+        f'Q {p["ctrl_left"][0]},{p["ctrl_left"][1]} '
+        f'{p["tip_left"][0]},{p["tip_left"][1]} '
+        f'L {p["tip_right"][0]},{p["tip_right"][1]} '
+        f'Q {p["ctrl_right"][0]},{p["ctrl_right"][1]} '
+        f'{p["base_right"][0]},{p["base_right"][1]} '
         f'Z'
+    )
+
+
+def _render_branch_outline(
+    origin_x: float,
+    origin_y: float,
+    end_x: float,
+    end_y: float,
+    *,
+    base_width: float,
+    tip_width: float,
+    bow: float,
+    root_overlap: float = 0.0,
+) -> str:
+    """The branch's outer edge only, open at the base.
+
+    Used for stroking: closing the path across the base would draw a
+    hard straight line right where the branch is meant to melt into the
+    trunk, which is exactly the seam we're trying to hide.
+    """
+    p = _branch_shape_points(
+        origin_x,
+        origin_y,
+        end_x,
+        end_y,
+        base_width=base_width,
+        tip_width=tip_width,
+        bow=bow,
+        root_overlap=root_overlap,
+    )
+    return (
+        f'M {p["base_left"][0]},{p["base_left"][1]} '
+        f'Q {p["ctrl_left"][0]},{p["ctrl_left"][1]} '
+        f'{p["tip_left"][0]},{p["tip_left"][1]} '
+        f'L {p["tip_right"][0]},{p["tip_right"][1]} '
+        f'Q {p["ctrl_right"][0]},{p["ctrl_right"][1]} '
+        f'{p["base_right"][0]},{p["base_right"][1]}'
+    )
+
+
+def _render_branch_collar(
+    origin_x: float, origin_y: float, base_width: float, seed: str
+) -> str:
+    """A soft, blurred bark knuckle where a branch meets the trunk.
+
+    Real branch unions bulge outward and blend gradually into the trunk's
+    bark rather than butting up against it at a hard edge. A blurred,
+    irregular blob roughly the branch's own width -- drawn under the
+    branch fill -- fakes that transition cheaply.
+    """
+    radius = max(base_width * 2.2, 6.0)
+    rng = random.Random(f'{seed}:collar')
+    blob_d = _blob_path(origin_x, origin_y, radius, rng, points=7, jitter=0.3)
+    return (
+        f'<path class="branch-collar" d="{blob_d}" '
+        f'fill="url(#trunkGradient)" opacity="0.9" filter="url(#softBlur)" />'
     )
 
 
@@ -722,6 +816,7 @@ def _render_branches_and_leaves(
         )
         curve_rng = random.Random(f'{repo_branch.repo}:curve')
         bow = length * 0.08 * side * (0.7 + 0.6 * curve_rng.random())
+        root_overlap = base_width * 0.9
 
         shape_d = _render_branch_shape(
             origin_x,
@@ -731,6 +826,17 @@ def _render_branches_and_leaves(
             base_width=base_width,
             tip_width=BRANCH_TIP_WIDTH,
             bow=bow,
+            root_overlap=root_overlap,
+        )
+        outline_d = _render_branch_outline(
+            origin_x,
+            origin_y,
+            end_x,
+            end_y,
+            base_width=base_width,
+            tip_width=BRANCH_TIP_WIDTH,
+            bow=bow,
+            root_overlap=root_overlap,
         )
         total_tokens = repo_branch.output_tokens + repo_branch.input_tokens
         avg_turns = (
@@ -744,14 +850,18 @@ def _render_branches_and_leaves(
             f'lines, {total_tokens:,} tokens, ${repo_branch.cost:,.2f}, '
             f'{avg_turns:.1f} turns/session'
         )
+        collar = _render_branch_collar(
+            origin_x, origin_y, base_width, repo_branch.repo
+        )
         branch_path = (
             f'<path class="branch" data-repo="{repo_branch.repo}" '
-            f'd="{shape_d}" fill="url(#trunkGradient)" '
-            f'stroke="#3a2412" stroke-width="0.75" opacity="0.95" />'
+            f'd="{shape_d}" fill="url(#trunkGradient)" opacity="0.95" />'
+            f'<path d="{outline_d}" fill="none" stroke="#3a2412" '
+            f'stroke-width="0.75" stroke-linecap="round" opacity="0.95" />'
         )
         leaves = _render_leaves(repo_branch, origin_x, origin_y, end_x, end_y)
         elements.append(
-            f'<g class="repo-group">{title}{branch_path}{leaves}</g>'
+            f'<g class="repo-group">{title}{collar}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
 
@@ -1396,7 +1506,10 @@ def _render_timeline_branches_and_leaves(
         final_length = _branch_length(final_lines_added)
         final_width = _branch_width(final_tokens)
 
+        collar_rng_seed = f'{repo}:collar'
         d_values = []
+        outline_d_values = []
+        collar_d_values = []
         day_vectors: list[tuple[float, float]] = []
         for day_stat in days:
             if day_stat.sessions == 0:
@@ -1409,6 +1522,27 @@ def _render_timeline_branches_and_leaves(
                         base_width=0.0,
                         tip_width=0.0,
                         bow=0.0,
+                    )
+                )
+                outline_d_values.append(
+                    _render_branch_outline(
+                        origin_x,
+                        origin_y,
+                        origin_x,
+                        origin_y,
+                        base_width=0.0,
+                        tip_width=0.0,
+                        bow=0.0,
+                    )
+                )
+                collar_d_values.append(
+                    _blob_path(
+                        origin_x,
+                        origin_y,
+                        0.01,
+                        random.Random(collar_rng_seed),
+                        points=7,
+                        jitter=0.3,
                     )
                 )
                 day_vectors.append((0.0, 0.0))
@@ -1440,6 +1574,7 @@ def _render_timeline_branches_and_leaves(
                 + (final_width - BRANCH_WIDTH_MIN) * width_fraction
             )
             bow = length * 0.08 * side * (0.7 + 0.6 * bow_factor)
+            root_overlap = base_width * 0.9
             d_values.append(
                 _render_branch_shape(
                     origin_x,
@@ -1449,11 +1584,40 @@ def _render_timeline_branches_and_leaves(
                     base_width=base_width,
                     tip_width=BRANCH_TIP_WIDTH,
                     bow=bow,
+                    root_overlap=root_overlap,
+                )
+            )
+            outline_d_values.append(
+                _render_branch_outline(
+                    origin_x,
+                    origin_y,
+                    end_x,
+                    end_y,
+                    base_width=base_width,
+                    tip_width=BRANCH_TIP_WIDTH,
+                    bow=bow,
+                    root_overlap=root_overlap,
+                )
+            )
+            collar_d_values.append(
+                _blob_path(
+                    origin_x,
+                    origin_y,
+                    max(base_width * 2.2, 6.0),
+                    random.Random(collar_rng_seed),
+                    points=7,
+                    jitter=0.3,
                 )
             )
             day_vectors.append((end_x - origin_x, end_y - origin_y))
 
         animate = _animate_tag('d', d_values, key_times, duration)
+        outline_animate = _animate_tag(
+            'd', outline_d_values, key_times, duration
+        )
+        collar_animate = _animate_tag(
+            'd', collar_d_values, key_times, duration
+        )
         final_day = days[-1]
         final_day_tokens = final_day.output_tokens + final_day.input_tokens
         final_avg_turns = (
@@ -1467,10 +1631,17 @@ def _render_timeline_branches_and_leaves(
             f'lines, {final_day_tokens:,} tokens, ${final_day.cost:,.2f}, '
             f'{final_avg_turns:.1f} turns/session'
         )
+        collar = (
+            f'<path class="branch-collar" d="{collar_d_values[-1]}" '
+            f'fill="url(#trunkGradient)" opacity="0.9" '
+            f'filter="url(#softBlur)">{collar_animate}</path>'
+        )
         branch_path = (
             f'<path class="branch" data-repo="{repo}" d="{d_values[-1]}" '
-            f'fill="url(#trunkGradient)" stroke="#3a2412" '
-            f'stroke-width="0.75" opacity="0.95">{animate}</path>'
+            f'fill="url(#trunkGradient)" opacity="0.95">{animate}</path>'
+            f'<path d="{outline_d_values[-1]}" fill="none" '
+            f'stroke="#3a2412" stroke-width="0.75" stroke-linecap="round" '
+            f'opacity="0.95">{outline_animate}</path>'
         )
         leaves = _render_timeline_leaves(
             repo,
@@ -1483,7 +1654,7 @@ def _render_timeline_branches_and_leaves(
             duration=duration,
         )
         elements.append(
-            f'<g class="repo-group">{title}{branch_path}{leaves}</g>'
+            f'<g class="repo-group">{title}{collar}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
 
