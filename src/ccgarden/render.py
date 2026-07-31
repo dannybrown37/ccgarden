@@ -98,7 +98,8 @@ MAX_BUSHES = 10
 BUSH_MARGIN = 40.0
 BUSH_RADIUS_MIN = 12.0
 BUSH_RADIUS_MAX = 34.0
-BUSH_TOOL_COUNT_SATURATION = 600
+BUSH_TOOL_COUNT_SATURATION = 3000
+BUSH_GROWTH_EXPONENT = 0.65
 BUSH_PUFFS = (
     (0.0, -0.55, 0.85),
     (-0.62, -0.3, 0.62),
@@ -537,16 +538,20 @@ def _render_clouds(models: list[ModelCloud]) -> str:
 
 
 def _bush_radius(tool_count: int) -> float:
-    """A tool's bush radius, growing quickly then leveling off.
+    """A tool's bush radius, growing toward a cap without fully flattening.
 
-    Same sqrt-saturation shape as the other size formulas (see
-    `_cloud_radius`, `_canopy_radius`) so a rarely-used tool still gets a
-    visible bush instead of vanishing.
+    Tool call counts are far more top-heavy than day-level totals (one
+    tool -- typically Bash -- often outnumbers the next-most-used tool by
+    3x or more), so this uses a gentler, more-linear curve than the plain
+    sqrt-saturation shape in `_cloud_radius`/`_canopy_radius`: a fractional
+    exponent above 0.5 lets the heaviest hitters actually look heavier,
+    while still giving a rarely-used tool a visible bush instead of
+    vanishing.
     """
-    growth = math.sqrt(
+    growth = (
         min(tool_count, BUSH_TOOL_COUNT_SATURATION)
         / BUSH_TOOL_COUNT_SATURATION
-    )
+    ) ** BUSH_GROWTH_EXPONENT
     return BUSH_RADIUS_MIN + (BUSH_RADIUS_MAX - BUSH_RADIUS_MIN) * growth
 
 
