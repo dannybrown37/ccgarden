@@ -1,3 +1,4 @@
+import argparse
 import subprocess
 import webbrowser
 from pathlib import Path
@@ -34,12 +35,27 @@ def _open_in_browser(path: Path) -> None:
         webbrowser.open(path.as_uri())
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog='ccgarden',
+        description='Grow a garden from local Claude Code session history.',
+    )
+    parser.add_argument(
+        '--no-open',
+        action='store_true',
+        help='write the SVG without opening it in a browser',
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
     # print_report also records today's snapshot -- must run before the
     # timeline is loaded, or the garden it renders is one day stale.
     print_report([DEFAULT_LOG_ROOT], db_path=DEFAULT_DB_PATH)
     timeline = load_garden_timeline(str(DEFAULT_DB_PATH))
     svg = render_timeline_svg(timeline)
     DEFAULT_OUTPUT_PATH.write_text(svg)
-    _open_in_browser(DEFAULT_OUTPUT_PATH)
+    if not args.no_open:
+        _open_in_browser(DEFAULT_OUTPUT_PATH)
     print(f'wrote {DEFAULT_OUTPUT_PATH}')

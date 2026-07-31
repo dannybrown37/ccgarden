@@ -75,6 +75,19 @@ CLOUD_PUFFS = (
     (0.22, 0.3, 0.5),
 )
 
+# A cloud's reasoning-effort level darkens it toward a storm-cloud grey, so
+# heavier-thinking model/effort combos read visually "heavier" in the sky.
+# Unrecognized or absent effort falls back to 0.0 -- the original pale cloud.
+CLOUD_EFFORT_DARKNESS = {
+    'low': 0.15,
+    'medium': 0.4,
+    'high': 0.65,
+    'xhigh': 0.85,
+    'max': 1.0,
+}
+CLOUD_GRADIENT_STOPS = ('#ffffff', '#eef3f8', '#c7d5e4')
+CLOUD_STORM_STOPS = ('#4d5566', '#333c4d', '#1c222e')
+
 # One bush per tool used, sized by how many times that tool was called.
 # Puffs are laid out relative to a (0, 0) ground-contact point (see
 # `_render_bush`), unlike clouds which are centered on their own midpoint.
@@ -254,11 +267,7 @@ def _render_defs() -> str:
         '<stop offset="55%" stop-color="#5a9e5a" />'
         '<stop offset="100%" stop-color="#2f5f2f" />'
         '</radialGradient>'
-        '<radialGradient id="cloudGradient" cx="35%" cy="30%" r="75%">'
-        '<stop offset="0%" stop-color="#ffffff" />'
-        '<stop offset="60%" stop-color="#eef3f8" />'
-        '<stop offset="100%" stop-color="#c7d5e4" />'
-        '</radialGradient>'
+        f'{_cloud_gradient_defs()}'
         '<radialGradient id="bushGradient" cx="35%" cy="25%" r="75%">'
         '<stop offset="0%" stop-color="#a9c95a" />'
         '<stop offset="55%" stop-color="#6f8f3a" />'
@@ -385,6 +394,63 @@ def _render_flowers_on_bushes(
     return ''.join(elements)
 
 
+def _lerp_hex(start: str, end: str, fraction: float) -> str:
+    """Blend two `#rrggbb` colors, `fraction` of the way from start to end."""
+    start_rgb = (int(start[i : i + 2], 16) for i in (1, 3, 5))
+    end_rgb = (int(end[i : i + 2], 16) for i in (1, 3, 5))
+    channels = (
+        round(s + (e - s) * fraction)
+        for s, e in zip(start_rgb, end_rgb, strict=True)
+    )
+    return '#{:02x}{:02x}{:02x}'.format(*channels)
+
+
+def _cloud_gradient_id(effort: str | None) -> str:
+    """Gradient id for a cloud at this reasoning-effort level.
+
+    Unrecognized or absent effort maps to the original pale `cloudGradient`.
+    """
+    if effort not in CLOUD_EFFORT_DARKNESS:
+        return 'cloudGradient'
+    return f'cloudGradient-{effort}'
+
+
+def _cloud_gradient_defs() -> str:
+    """One radial gradient per effort darkness level, plus the base cloud."""
+    defs = []
+    for gradient_id, darkness in (
+        ('cloudGradient', 0.0),
+        *(
+            (f'cloudGradient-{effort}', darkness)
+            for effort, darkness in CLOUD_EFFORT_DARKNESS.items()
+        ),
+    ):
+        stops = tuple(
+            _lerp_hex(pale, storm, darkness)
+            for pale, storm in zip(
+                CLOUD_GRADIENT_STOPS, CLOUD_STORM_STOPS, strict=True
+            )
+        )
+        defs.append(
+            f'<radialGradient id="{gradient_id}" cx="35%" cy="30%" r="75%">'
+            f'<stop offset="0%" stop-color="{stops[0]}" />'
+            f'<stop offset="60%" stop-color="{stops[1]}" />'
+            f'<stop offset="100%" stop-color="{stops[2]}" />'
+            '</radialGradient>'
+        )
+    return ''.join(defs)
+
+
+def _effort_from_cloud_label(label: str) -> str | None:
+    """Pull the effort out of a `model_effort_label` combo.
+
+    E.g. `sonnet (high)` -> `high`; returns None for a bare model name.
+    """
+    if label.endswith(')') and '(' in label:
+        return label.rsplit('(', 1)[1][:-1]
+    return None
+
+
 def _cloud_radius(total_tokens: int) -> float:
     """A model's cloud radius, growing quickly then leveling off.
 
@@ -419,9 +485,12 @@ def _cloud_puffs_d(radius: float, seed: str) -> list[str]:
     return d_values
 
 
-def _render_cloud(cx: float, cy: float, radius: float, seed: str) -> str:
+def _render_cloud(
+    cx: float, cy: float, radius: float, seed: str, effort: str | None = None
+) -> str:
+    gradient_id = _cloud_gradient_id(effort)
     puffs = ''.join(
-        f'<path d="{d}" fill="url(#cloudGradient)" opacity="0.88" />'
+        f'<path d="{d}" fill="url(#{gradient_id})" opacity="0.88" />'
         for d in _cloud_puffs_d(radius, seed)
     )
     return f'<g transform="translate({cx:.1f},{cy:.1f})">{puffs}</g>'
@@ -458,10 +527,11 @@ def _render_clouds(models: list[ModelCloud]) -> str:
     for (x, y), model_cloud in zip(positions, models, strict=True):
         total_tokens = model_cloud.output_tokens + model_cloud.input_tokens
         radius = _cloud_radius(total_tokens)
+        effort = _effort_from_cloud_label(model_cloud.model)
         title = _title(f'{model_cloud.model} — {total_tokens:,} tokens')
         elements.append(
             f'<g class="cloud">{title}'
-            f'{_render_cloud(x, y, radius, model_cloud.model)}</g>'
+            f'{_render_cloud(x, y, radius, model_cloud.model, effort)}</g>'
         )
     return ''.join(elements)
 
@@ -1141,7 +1211,11 @@ LEGEND_ROWS = (
     ),
     (
         'Clouds',
-        ('one per model used;', 'bigger = more tokens'),
+        (
+            'one per model + effort;',
+            'bigger = more tokens;',
+            'darker = more effort',
+        ),
         'cloud',
     ),
     (
@@ -1855,8 +1929,9 @@ def _render_timeline_clouds(
         animate = _animate_transform_tag(
             'scale', scale_values, key_times, duration
         )
+        gradient_id = _cloud_gradient_id(_effort_from_cloud_label(model))
         puffs = ''.join(
-            f'<path d="{d}" fill="url(#cloudGradient)" opacity="0.88" />'
+            f'<path d="{d}" fill="url(#{gradient_id})" opacity="0.88" />'
             for d in _cloud_puffs_d(final_radius, model)
         )
         title = _title(f'{model} — {final_tokens:,} tokens')
