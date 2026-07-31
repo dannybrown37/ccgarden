@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import math
 import random
 from typing import TYPE_CHECKING
@@ -153,6 +154,20 @@ def _escape_xml(text: str) -> str:
 def _title(text: str) -> str:
     """A `<title>` child that browsers render as a native hover tooltip."""
     return f'<title>{_escape_xml(text)}</title>'
+
+
+def _tt_attr(day_labels: list[str]) -> str:
+    """A `data-tt` attribute: one tooltip string per day, JSON-encoded.
+
+    A static `<title>` can't track which day the timeline animation is
+    currently showing, so `_render_tap_tooltip` reads this instead for any
+    element whose stats grow over the timeline -- picking the entry that
+    matches the SMIL clock's current position rather than always the last.
+    """
+    encoded = _escape_xml(json.dumps(day_labels, ensure_ascii=False)).replace(
+        "'", '&apos;'
+    )
+    return f"data-tt='{encoded}'"
 
 
 def _format_day(day: str) -> str:
@@ -1811,19 +1826,22 @@ def _render_timeline_branches_and_leaves(
         collar_animate = _animate_tag(
             'd', collar_d_values, key_times, duration
         )
-        final_day = days[-1]
-        final_day_tokens = final_day.output_tokens + final_day.input_tokens
-        final_avg_turns = (
-            final_day.prompts / final_day.sessions
-            if final_day.sessions
-            else 0.0
-        )
-        title = _title(
-            f'{repo} — {final_day.sessions} sessions, '
-            f'+{final_day.lines_added:,}/-{final_day.lines_removed:,} '
-            f'lines, {final_day_tokens:,} tokens, ${final_day.cost:,.2f}, '
-            f'{final_avg_turns:.1f} turns/session'
-        )
+        day_labels = []
+        for day_stat in days:
+            day_tokens = day_stat.output_tokens + day_stat.input_tokens
+            avg_turns = (
+                day_stat.prompts / day_stat.sessions
+                if day_stat.sessions
+                else 0.0
+            )
+            day_labels.append(
+                f'{repo} — {day_stat.sessions} sessions, '
+                f'+{day_stat.lines_added:,}/-{day_stat.lines_removed:,} '
+                f'lines, {day_tokens:,} tokens, ${day_stat.cost:,.2f}, '
+                f'{avg_turns:.1f} turns/session'
+            )
+        title = _title(day_labels[-1])
+        tt = _tt_attr(day_labels)
         collar = (
             f'<path class="branch-collar" d="{collar_d_values[-1]}" '
             f'fill="url(#trunkGradient)" opacity="0.9" '
@@ -1847,7 +1865,8 @@ def _render_timeline_branches_and_leaves(
             duration=duration,
         )
         elements.append(
-            f'<g class="repo-group">{title}{collar}{branch_path}{leaves}</g>'
+            f'<g class="repo-group" {tt}>'
+            f'{title}{collar}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
 
@@ -2040,7 +2059,8 @@ def _render_timeline_sun(
 ) -> str:
     cumulative = timeline.cumulative_total_tokens
     final_tokens = cumulative[-1] if cumulative else 0
-    day_values = _sun_day_values(cumulative or [final_tokens], final_tokens)
+    day_tokens = cumulative or [final_tokens]
+    day_values = _sun_day_values(day_tokens, final_tokens)
     final_x, final_y, final_radius = day_values[-1]
 
     translate_values = [f'{x:.2f},{y:.2f}' for x, y, _ in day_values]
@@ -2051,10 +2071,12 @@ def _render_timeline_sun(
     scale_animate = _animate_transform_tag(
         'scale', scale_values, key_times, duration
     )
-    title = _title(f'Sun — {final_tokens:,} tokens (all-in)')
+    day_labels = [f'Sun — {tokens:,} tokens (all-in)' for tokens in day_tokens]
+    title = _title(day_labels[-1])
+    tt = _tt_attr(day_labels)
     sun_shape = _render_sun(0, 0, final_radius)
     return (
-        f'<g class="sun" '
+        f'<g class="sun" {tt} '
         f'transform="translate({final_x:.1f},{final_y:.1f})">'
         f'{title}{translate_animate}'
         f'<g transform="scale(1)">{scale_animate}{sun_shape}</g>'
@@ -2101,9 +2123,15 @@ def _render_timeline_clouds(
             f'<path d="{d}" fill="url(#{gradient_id})" opacity="0.88" />'
             for d in _cloud_puffs_d(final_radius, model)
         )
-        title = _title(f'{model} — {final_tokens:,} tokens')
+        day_labels = [
+            f'{model} — {day_stat.output_tokens + day_stat.input_tokens:,} '
+            f'tokens'
+            for day_stat in days
+        ]
+        title = _title(day_labels[-1])
+        tt = _tt_attr(day_labels)
         elements.append(
-            f'<g class="cloud" transform="translate({cx:.1f},{cy:.1f})">'
+            f'<g class="cloud" {tt} transform="translate({cx:.1f},{cy:.1f})">'
             f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
             f'</g>'
         )
@@ -2154,9 +2182,14 @@ def _render_timeline_bushes(
             f'<path d="{d}" fill="url(#bushGradient)" opacity="0.94" />'
             for d in _bush_puffs_d(final_radius, tool)
         )
-        title = _title(f'{tool} — used {days[-1].count:,} times')
+        day_labels = [
+            f'{tool} — used {day_stat.count:,} times' for day_stat in days
+        ]
+        title = _title(day_labels[-1])
+        tt = _tt_attr(day_labels)
         elements.append(
-            f'<g class="bush" transform="translate({x:.1f},{GROUND_Y})">'
+            f'<g class="bush" {tt} '
+            f'transform="translate({x:.1f},{GROUND_Y})">'
             f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
             f'</g>'
         )
@@ -2206,10 +2239,16 @@ def _render_timeline_flowers_on_bushes(
         )
     ]
 
-    title = _title(
-        f'Cache efficiency — {timeline.cache_read_tokens:,} cache reads per '
-        f'{timeline.cache_write_tokens:,} cache writes'
-    )
+    day_labels = [
+        f'Cache efficiency — {read:,} cache reads per {write:,} cache writes'
+        for read, write in zip(
+            timeline.cumulative_cache_read,
+            timeline.cumulative_cache_write,
+            strict=True,
+        )
+    ]
+    title = _title(day_labels[-1])
+    tt = _tt_attr(day_labels)
     rng = random.Random('ccgarden-flowers')
     elements = []
     for index in range(final_flower_count):
@@ -2253,10 +2292,10 @@ def _render_timeline_flowers_on_bushes(
             f'<g class="flower" '
             f'transform="translate({final_x:.1f},{final_y:.1f})" '
             f'opacity="1">'
-            f'{title}{translate_animate}{opacity_animate}{flower}'
+            f'{translate_animate}{opacity_animate}{flower}'
             f'</g>'
         )
-    return ''.join(elements)
+    return f'<g class="flowers" {tt}>{title}{"".join(elements)}</g>'
 
 
 def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
@@ -2306,7 +2345,11 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     )
 
 
-def _render_tap_tooltip(view_height: float) -> str:
+def _render_tap_tooltip(
+    view_height: float,
+    key_times: list[float] | None = None,
+    duration: float = 0.0,
+) -> str:
     """A tap-activated stand-in for `<title>`, which never fires on touch.
 
     Browsers only surface a native `<title>` on hover, so on a phone every
@@ -2314,7 +2357,17 @@ def _render_tap_tooltip(view_height: float) -> str:
     content instead, and it has to live inside this document rather than
     the host page because the site embeds the garden through `<object>`,
     which nothing in the page's own DOM can draw over.
+
+    On the timeline, a shape's stats keep growing after it's drawn (a
+    branch mid-animation is not yet at its final session count), so a
+    static `<title>` set once to the final day is wrong for most of the
+    replay. Elements that grow carry a `data-tt` attribute instead (see
+    `_tt_attr`) -- one label per day -- and this reads the SMIL clock via
+    `getCurrentTime()` to pick the label matching what's on screen right
+    now, for both the tap gesture and (since native `<title>` can't do
+    this at all) mouse hover.
     """
+    key_times = key_times or [0.0]
     box = (
         f'<rect id="ccgarden-tooltip-box" x="0" y="0" width="10" '
         f'height="{TOOLTIP_HEIGHT:.1f}" rx="6" fill="#fbfbf3" '
@@ -2341,13 +2394,35 @@ def _render_tap_tooltip(view_height: float) -> str:
         f'  var boxHeight = {TOOLTIP_HEIGHT:.1f};\n'
         f'  var viewWidth = {VIEWBOX_WIDTH:.1f};\n'
         f'  var viewHeight = {view_height:.1f};\n'
-        '  function labelFor(node) {\n'
+        f'  var keyTimes = [{",".join(f"{t:.4f}" for t in key_times)}];\n'
+        f'  var duration = {duration:.4f};\n'
+        '  function currentDayIndex() {\n'
+        '    var t = svg.getCurrentTime();\n'
+        '    if (duration <= 0 || t >= duration) {\n'
+        '      return keyTimes.length - 1;\n'
+        '    }\n'
+        '    var frac = t / duration;\n'
+        '    var idx = 0;\n'
+        '    for (var i = 0; i < keyTimes.length; i++) {\n'
+        '      if (keyTimes[i] <= frac + 1e-6) { idx = i; } else { break; }\n'
+        '    }\n'
+        '    return idx;\n'
+        '  }\n'
+        '  function findTooltip(node) {\n'
         '    while (node && node !== svg) {\n'
         '      if (node.id === "ccgarden-scrubber") { return null; }\n'
+        '      var days = node.getAttribute\n'
+        '        ? node.getAttribute("data-tt")\n'
+        '        : null;\n'
+        '      if (days) {\n'
+        '        var list = JSON.parse(days);\n'
+        '        var idx = Math.min(currentDayIndex(), list.length - 1);\n'
+        '        return { label: list[idx], dynamic: true };\n'
+        '      }\n'
         '      var kids = node.childNodes || [];\n'
         '      for (var i = 0; i < kids.length; i++) {\n'
         '        if (kids[i].nodeName === "title") {\n'
-        '          return kids[i].textContent;\n'
+        '          return { label: kids[i].textContent, dynamic: false };\n'
         '        }\n'
         '      }\n'
         '      node = node.parentNode;\n'
@@ -2383,12 +2458,31 @@ def _render_tap_tooltip(view_height: float) -> str:
         '    );\n'
         '    group.setAttribute("opacity", "1");\n'
         '  }\n'
+        '  var dynamicNodes = svg.querySelectorAll("[data-tt]");\n'
+        '  for (var d = 0; d < dynamicNodes.length; d++) {\n'
+        '    var dKids = dynamicNodes[d].childNodes;\n'
+        '    for (var k = dKids.length - 1; k >= 0; k--) {\n'
+        '      if (dKids[k].nodeName === "title") {\n'
+        '        dynamicNodes[d].removeChild(dKids[k]);\n'
+        '      }\n'
+        '    }\n'
+        '  }\n'
         '  svg.addEventListener("pointerdown", function (event) {\n'
         '    if (event.pointerType === "mouse") { return; }\n'
-        '    var label = labelFor(event.target);\n'
-        '    var at = label ? toUserSpace(event) : null;\n'
-        '    if (at) { show(label, at); } else { hide(); }\n'
+        '    var found = findTooltip(event.target);\n'
+        '    var at = found ? toUserSpace(event) : null;\n'
+        '    if (at) { show(found.label, at); } else { hide(); }\n'
         '  });\n'
+        '  svg.addEventListener("pointermove", function (event) {\n'
+        '    if (event.pointerType !== "mouse") { return; }\n'
+        '    var found = findTooltip(event.target);\n'
+        '    if (found && found.dynamic) {\n'
+        '      show(found.label, toUserSpace(event));\n'
+        '    } else {\n'
+        '      hide();\n'
+        '    }\n'
+        '  });\n'
+        '  svg.addEventListener("pointerleave", hide);\n'
         '})();\n'
         ']]></script>'
     )
@@ -2497,14 +2591,17 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         timeline.cumulative_sessions
     )
     final_base_half_width = base_half_width_by_day[-1]
-    trunk_title = _title(
-        f'Trunk — {timeline.cumulative_sessions[-1]} total sessions'
-    )
+    trunk_day_labels = [
+        f'Trunk — {sessions} total sessions'
+        for sessions in timeline.cumulative_sessions
+    ]
+    trunk_title = _title(trunk_day_labels[-1])
+    trunk_tt = _tt_attr(trunk_day_labels)
 
     body = (
         _render_timeline_sun(timeline, key_times, duration)
         + _render_timeline_clouds(timeline, key_times, duration)
-        + f'<g class="trunk-group">{trunk_title}'
+        + f'<g class="trunk-group" {trunk_tt}>{trunk_title}'
         + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
         + '</g>'
         + _render_timeline_rings(
@@ -2521,7 +2618,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         + _render_legend()
         + _render_scrubber(timeline, key_times, duration)
-        + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT)
+        + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)
     )
 
     return (

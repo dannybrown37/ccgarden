@@ -399,7 +399,7 @@ def test_tap_tooltip_ignores_the_scrubber_subtree() -> None:
 
     # Tapping the time-travel slider must keep scrubbing rather than
     # popping a tooltip over the control the tap was aimed at.
-    walk_up = svg.split('function labelFor')[1].split('function ')[0]
+    walk_up = svg.split('function findTooltip')[1].split('function ')[0]
     assert 'node.id === "ccgarden-scrubber"' in walk_up
     assert 'return null' in walk_up
 
@@ -417,3 +417,76 @@ def test_tap_tooltip_clamps_to_the_timeline_viewbox_height() -> None:
     # scrubber strip); clamping against the short height would push
     # tooltips off the bottom of the garden.
     assert f'var viewHeight = {TIMELINE_VIEWBOX_HEIGHT:.1f};' in svg
+
+
+def test_render_timeline_svg_bush_carries_per_day_tooltip_data() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    bush_group = svg.split('class="bush"')[1].split('</g>')[0]
+    assert 'Bash — used 10 times' in bush_group
+    assert 'Bash — used 20 times' in bush_group
+    assert 'Bash — used 30 times' in bush_group
+
+
+def test_render_timeline_svg_trunk_carries_per_day_session_totals() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    trunk_group = svg.split('class="trunk-group"')[1].split('</g>')[0]
+    assert 'Trunk — 1 total sessions' in trunk_group
+    assert 'Trunk — 2 total sessions' in trunk_group
+    assert 'Trunk — 3 total sessions' in trunk_group
+
+
+def test_render_timeline_svg_cache_flowers_carry_per_day_ratios() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[10, 10, 10],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    flowers_group = svg.split('class="flowers"')[1].split('>', 1)[0]
+    assert '10 cache reads per 10 cache writes' in flowers_group
+    assert '20 cache reads per 20 cache writes' in flowers_group
+    assert '30 cache reads per 30 cache writes' in flowers_group
+
+
+def test_tap_tooltip_reads_day_index_from_the_smil_clock() -> None:
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [10, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[10, 10, 10],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'function currentDayIndex' in svg
+    assert 'svg.getCurrentTime()' in svg
+    # Dynamic (per-day) elements must win over a static <title>, and mouse
+    # hover -- not just touch -- has to pick it up, since a native
+    # `<title>` can never be kept in sync with the scrub position.
+    assert 'found.dynamic' in svg
+    assert 'pointermove' in svg
+
+
+def test_static_garden_tap_tooltip_has_no_day_sync_data() -> None:
+    garden = GardenData(
+        rings=[], branches=[], tools=[ToolBush(tool='Bash', count=50)]
+    )
+
+    svg = render_svg(garden)
+
+    assert "data-tt='" not in svg
