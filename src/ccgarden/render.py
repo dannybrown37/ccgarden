@@ -1343,7 +1343,7 @@ LEGEND_ROWS = (
     ),
     (
         'Sun',
-        ('rises + grows with', 'total tokens (all-in)'),
+        ('rises + grows w/', 'total all-in tokens'),
         'sun',
     ),
 )
