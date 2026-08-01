@@ -2482,7 +2482,12 @@ def _render_tap_tooltip(
         '      hide();\n'
         '    }\n'
         '  });\n'
-        '  svg.addEventListener("pointerleave", hide);\n'
+        '  // A touch pointer "leaves" the moment the finger lifts, which\n'
+        '  // would undo the tap we just handled -- only a cursor exit.\n'
+        '  svg.addEventListener("pointerleave", function (event) {\n'
+        '    if (event.pointerType !== "mouse") { return; }\n'
+        '    hide();\n'
+        '  });\n'
         '})();\n'
         ']]></script>'
     )
