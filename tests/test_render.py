@@ -7,19 +7,26 @@ from ccgarden.data import (
     GardenData,
     GardenTimeline,
     ModelCloud,
+    ModelUsageDay,
     RepoBranch,
     ToolBush,
     ToolUsageDay,
 )
 from ccgarden.render import (
+    CLOUD_TOKENS_SATURATION,
     LEAVES_PER_SESSION,
     MAX_BUSHES,
+    SUN_HALO_RADIUS_FACTOR,
+    SUN_TOKENS_SATURATION,
     TIMELINE_VIEWBOX_HEIGHT,
+    VIEWBOX_HEIGHT,
+    VIEWBOX_WIDTH,
     _bush_radius,
     _bush_x_positions,
     _cache_efficiency_flower_count,
     _cloud_positions,
     _cloud_radius,
+    _sun_radius,
     render_svg,
     render_timeline_svg,
 )
@@ -490,3 +497,171 @@ def test_static_garden_tap_tooltip_has_no_day_sync_data() -> None:
     svg = render_svg(garden)
 
     assert "data-tt='" not in svg
+
+
+def sky_group_extent(
+    svg: str, class_name: str
+) -> tuple[float, float, float, float]:
+    """(min_x, min_y, max_x, max_y) of every point in `class_name` groups.
+
+    Each sky group is a `<g class="..." transform="translate(cx,cy)">` wrapping
+    shapes whose own coordinates are relative to that origin, so the group's
+    translate has to be added back on to get viewBox-space extents.
+    """
+    min_x = min_y = float('inf')
+    max_x = max_y = float('-inf')
+    groups = re.findall(
+        rf'<g class="{class_name}".*?</g></g>', svg, flags=re.DOTALL
+    )
+    assert groups, f'no {class_name} groups found in svg'
+    for group in groups:
+        offsets = re.findall(
+            r'transform="translate\((-?[\d.]+),(-?[\d.]+)\)"', group
+        )
+        assert offsets, f'{class_name} group has no translate'
+        origin_x, origin_y = (float(v) for v in offsets[0])
+
+        points = []
+        for path_d in re.findall(r' d="([^"]+)"', group):
+            coords = re.findall(r'(-?[\d.]+),(-?[\d.]+)', path_d)
+            points.extend((float(x), float(y)) for x, y in coords)
+        # `<circle r="...">` (the sun's disc and halo) carries no explicit
+        # center, so it sits on the group origin and reaches `r` each way.
+        for radius in re.findall(r'<circle r="([\d.]+)"', group):
+            r = float(radius)
+            points.extend([(-r, -r), (r, r)])
+        assert points, f'{class_name} group has no drawable points'
+
+        for x, y in points:
+            min_x = min(min_x, origin_x + x)
+            max_x = max(max_x, origin_x + x)
+            min_y = min(min_y, origin_y + y)
+            max_y = max(max_y, origin_y + y)
+    return min_x, min_y, max_x, max_y
+
+
+def saturated_garden(model_count: int) -> GardenData:
+    """A garden whose sun and every cloud are at their maximum size."""
+    models = [
+        ModelCloud(
+            model=f'claude-opus-5[{effort}]',
+            output_tokens=CLOUD_TOKENS_SATURATION,
+            input_tokens=CLOUD_TOKENS_SATURATION,
+        )
+        for effort in ('max', 'xhigh', 'high', 'medium', 'low')[:model_count]
+    ]
+    return GardenData(
+        rings=[],
+        branches=[],
+        model_efforts=models,
+        total_tokens=SUN_TOKENS_SATURATION,
+    )
+
+
+@pytest.mark.parametrize('model_count', [1, 2, 3, 4, 5])
+def test_max_size_clouds_stay_inside_the_viewbox(model_count: int) -> None:
+    svg = render_svg(saturated_garden(model_count))
+
+    min_x, min_y, max_x, max_y = sky_group_extent(svg, 'cloud')
+
+    assert min_x >= 0
+    assert min_y >= 0
+    assert max_x <= VIEWBOX_WIDTH
+    assert max_y <= VIEWBOX_HEIGHT
+
+
+def test_max_size_sun_stays_inside_the_viewbox() -> None:
+    svg = render_svg(saturated_garden(1))
+
+    min_x, min_y, max_x, max_y = sky_group_extent(svg, 'sun')
+
+    assert min_x >= 0
+    assert min_y >= 0
+    assert max_x <= VIEWBOX_WIDTH
+    assert max_y <= VIEWBOX_HEIGHT
+
+
+def test_small_clouds_keep_their_original_scattered_positions() -> None:
+    # The clamp must only pull in shapes that would actually overflow --
+    # a small cloud sits well inside every edge, so its slot is untouched.
+    expected = _cloud_positions(4)
+    small = [
+        ModelCloud(model=f'model-{i}', output_tokens=1_000, input_tokens=1_000)
+        for i in range(4)
+    ]
+
+    svg = render_svg(GardenData(rings=[], branches=[], model_efforts=small))
+
+    translates = re.findall(
+        r'<g class="cloud">.*?'
+        r'<g transform="translate\((-?[\d.]+),(-?[\d.]+)\)"',
+        svg,
+    )
+    actual = [(float(x), float(y)) for x, y in translates]
+    assert actual == [(round(x, 1), round(y, 1)) for x, y in expected]
+
+
+def saturated_timeline(model_count: int) -> GardenTimeline:
+    """A timeline growing to a maximum-size sun and maximum-size clouds."""
+    days = ['2026-07-20', '2026-07-21', '2026-07-22']
+    models = [
+        f'claude-opus-5[{effort}]'
+        for effort in ('max', 'xhigh', 'high', 'medium', 'low')[:model_count]
+    ]
+    shares = (0.1, 0.5, 1.0)
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1] * len(days),
+        cumulative_sessions=[1, 2, 3],
+        branch_order=[],
+        branch_days={},
+        cumulative_total_tokens=[
+            int(SUN_TOKENS_SATURATION * share) for share in shares
+        ],
+        model_effort_order=models,
+        model_effort_days={
+            model: [
+                ModelUsageDay(
+                    day=day,
+                    output_tokens=int(CLOUD_TOKENS_SATURATION * share),
+                    input_tokens=int(CLOUD_TOKENS_SATURATION * share),
+                )
+                for day, share in zip(days, shares, strict=True)
+            ]
+            for model in models
+        },
+    )
+
+
+@pytest.mark.parametrize('model_count', [1, 3, 5])
+def test_timeline_clouds_stay_inside_the_viewbox(model_count: int) -> None:
+    svg = render_timeline_svg(saturated_timeline(model_count))
+
+    min_x, min_y, max_x, max_y = sky_group_extent(svg, 'cloud')
+
+    assert min_x >= 0
+    assert min_y >= 0
+    assert max_x <= VIEWBOX_WIDTH
+    assert max_y <= TIMELINE_VIEWBOX_HEIGHT
+
+
+def test_timeline_sun_stays_inside_the_viewbox_on_every_frame() -> None:
+    # The sun's animated positions are separate `values` on the group's
+    # translate, so every keyframe -- not just the final one -- has to fit.
+    svg = render_timeline_svg(saturated_timeline(1))
+
+    sun_group = re.search(r'<g class="sun".*?</g></g>', svg, re.DOTALL)
+    assert sun_group is not None
+    final_radius = _sun_radius(SUN_TOKENS_SATURATION)
+
+    translate_values = re.search(
+        r'type="translate"[^>]*values="([^"]+)"', sun_group.group(0)
+    )
+    assert translate_values is not None
+    for frame in translate_values.group(1).split(';'):
+        x, y = (float(v) for v in frame.strip().split(','))
+        # Worst case is the last frame, where the sun is at full size.
+        halo = final_radius * SUN_HALO_RADIUS_FACTOR
+        assert x - halo >= 0
+        assert x + halo <= VIEWBOX_WIDTH
+        assert y - halo >= 0

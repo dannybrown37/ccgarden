@@ -75,6 +75,12 @@ CLOUD_PUFFS = (
     (-0.18, 0.3, 0.55),
     (0.22, 0.3, 0.5),
 )
+# Each puff is scaled by a random size jitter, then `_blob_path` wobbles each
+# of its vertices by up to a further shape jitter. A cloud therefore reaches
+# well past its nominal radius -- roughly 1.4x -- which is what
+# `_cloud_extent` turns into the margins that keep it inside the viewBox.
+CLOUD_PUFF_SIZE_JITTER = (0.92, 1.08)
+CLOUD_PUFF_SHAPE_JITTER = 0.16
 
 # A cloud's reasoning-effort level darkens it toward a storm-cloud grey, so
 # heavier-thinking model/effort combos read visually "heavier" in the sky.
@@ -105,6 +111,9 @@ SUN_Y_START = 640.0
 SUN_X_END = 660.0
 SUN_Y_END = 95.0
 SUN_RAY_COUNT = 12
+# The halo is the sun's widest part -- wider than the rays -- so it sets how
+# much clearance `_sun_position` has to keep from the top and sides.
+SUN_HALO_RADIUS_FACTOR = 1.9
 SUN_GRADIENT_STOPS = ('#fffbe6', '#ffd76a', '#ff9f45')
 SUN_HALO_COLOR = '#fff3c4'
 SUN_RAY_COLOR = '#ffdb8a'
@@ -521,7 +530,7 @@ def _cloud_puffs_d(radius: float, seed: str) -> list[str]:
     rng = random.Random(seed)
     d_values = []
     for index, (dx_frac, dy_frac, r_frac) in enumerate(CLOUD_PUFFS):
-        jitter = rng.uniform(0.92, 1.08)
+        jitter = rng.uniform(*CLOUD_PUFF_SIZE_JITTER)
         puff_radius = radius * r_frac * jitter
         d_values.append(
             _blob_path(
@@ -530,10 +539,44 @@ def _cloud_puffs_d(radius: float, seed: str) -> list[str]:
                 puff_radius,
                 random.Random(f'{seed}:{index}'),
                 points=8,
-                jitter=0.16,
+                jitter=CLOUD_PUFF_SHAPE_JITTER,
             )
         )
     return d_values
+
+
+def _cloud_extent() -> tuple[float, float, float]:
+    """How far a radius-1 cloud reaches (left/right, up, down) from center.
+
+    Derived from `CLOUD_PUFFS` and the two jitters rather than hardcoded, so
+    retuning the puff layout can't silently reintroduce clouds that hang off
+    the edge of the sky. Both jitters are taken at their worst case: a
+    `_blob_path` curve stays inside the hull of its jittered vertices, so
+    these are upper bounds on the drawn shape.
+    """
+    max_puff_scale = CLOUD_PUFF_SIZE_JITTER[1] * (1 + CLOUD_PUFF_SHAPE_JITTER)
+    half_width = up = down = 0.0
+    for dx_frac, dy_frac, r_frac in CLOUD_PUFFS:
+        reach = r_frac * max_puff_scale
+        half_width = max(half_width, abs(dx_frac) + reach)
+        up = max(up, reach - dy_frac)
+        down = max(down, reach + dy_frac)
+    return half_width, up, down
+
+
+def _clamp_cloud_position(
+    x: float, y: float, radius: float
+) -> tuple[float, float]:
+    """Nudge a cloud's slot inward just enough to keep it fully in frame.
+
+    Only clouds that would actually overflow move -- a small cloud clears
+    every edge by a wide margin and keeps the scattered slot
+    `_cloud_positions` gave it.
+    """
+    half_width, up, down = _cloud_extent()
+    x = min(max(x, half_width * radius), VIEWBOX_WIDTH - half_width * radius)
+    y = min(max(y, up * radius), VIEWBOX_HEIGHT - down * radius)
+    return x, y
 
 
 def _render_cloud(
@@ -578,11 +621,12 @@ def _render_clouds(models: list[ModelCloud]) -> str:
     for (x, y), model_cloud in zip(positions, models, strict=True):
         total_tokens = model_cloud.output_tokens + model_cloud.input_tokens
         radius = _cloud_radius(total_tokens)
+        cx, cy = _clamp_cloud_position(x, y, radius)
         effort = _effort_from_cloud_label(model_cloud.model)
         title = _title(f'{model_cloud.model} — {total_tokens:,} tokens')
         elements.append(
             f'<g class="cloud">{title}'
-            f'{_render_cloud(x, y, radius, model_cloud.model, effort)}</g>'
+            f'{_render_cloud(cx, cy, radius, model_cloud.model, effort)}</g>'
         )
     return ''.join(elements)
 
@@ -610,11 +654,17 @@ def _sun_position(total_tokens: int) -> tuple[float, float]:
     """Where the sun sits.
 
     Rises from a low horizon point toward its zenith as the garden's
-    total token count grows toward saturation.
+    total token count grows toward saturation, clamped so its halo never
+    crosses the top or sides of the viewBox. The bottom is deliberately not
+    clamped: at low token counts the sun sits half-buried below the horizon,
+    which is the intended sunrise.
     """
     growth = _sun_growth(total_tokens)
     x = SUN_X_START + (SUN_X_END - SUN_X_START) * growth
     y = SUN_Y_START + (SUN_Y_END - SUN_Y_START) * growth
+    halo_radius = _sun_radius(total_tokens) * SUN_HALO_RADIUS_FACTOR
+    x = min(max(x, halo_radius), VIEWBOX_WIDTH - halo_radius)
+    y = max(y, halo_radius)
     return x, y
 
 
@@ -634,7 +684,7 @@ def _sun_rays_d(radius: float) -> list[str]:
 
 
 def _render_sun(cx: float, cy: float, radius: float) -> str:
-    halo_radius = radius * 1.9
+    halo_radius = radius * SUN_HALO_RADIUS_FACTOR
     rays = ''.join(
         f'<path d="{d}" stroke="{SUN_RAY_COLOR}" '
         f'stroke-width="{max(radius * 0.12, 2.5):.2f}" '
@@ -2094,12 +2144,16 @@ def _render_timeline_clouds(
 
     positions = _cloud_positions(len(timeline.model_effort_order))
     elements = []
-    for (cx, cy), model in zip(
+    for (slot_x, slot_y), model in zip(
         positions, timeline.model_effort_order, strict=True
     ):
         days = timeline.model_effort_days[model]
         final_tokens = days[-1].output_tokens + days[-1].input_tokens
         final_radius = _cloud_radius(final_tokens)
+        # Clamped against the *final* radius: the slot is fixed for the whole
+        # animation while the cloud scales up into it, so fitting at full size
+        # means it fits on every frame.
+        cx, cy = _clamp_cloud_position(slot_x, slot_y, final_radius)
 
         # Grown as a share of the model's *final* radius, not the same
         # absolute-tokens formula re-evaluated per day -- see the identical
