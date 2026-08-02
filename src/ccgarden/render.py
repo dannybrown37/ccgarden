@@ -14,6 +14,11 @@ if TYPE_CHECKING:
 VIEWBOX_WIDTH = 800
 VIEWBOX_HEIGHT = 800
 GROUND_Y = 728
+# The legend gets its own band below the garden rather than sharing the thin
+# strip of grass under GROUND_Y -- eight entries squeezed into 64px of height
+# left each column too narrow, so the descriptions ran into their neighbours.
+LEGEND_BAND_HEIGHT = 100.0
+LEGEND_BAND_BOTTOM = VIEWBOX_HEIGHT + LEGEND_BAND_HEIGHT
 TRUNK_HEIGHT = 300
 TRUNK_TOP_Y = GROUND_Y - TRUNK_HEIGHT
 TRUNK_CENTER_X = VIEWBOX_WIDTH / 2
@@ -164,8 +169,8 @@ TIMELINE_MIN_DAYS_TO_ANIMATE = 2
 SCRUBBER_HEIGHT = 40.0
 SCRUBBER_MARGIN = 4.0
 SCRUBBER_TOTAL_HEIGHT = SCRUBBER_HEIGHT + SCRUBBER_MARGIN * 2
-SCRUBBER_Y = VIEWBOX_HEIGHT + SCRUBBER_MARGIN
-TIMELINE_VIEWBOX_HEIGHT = VIEWBOX_HEIGHT + SCRUBBER_TOTAL_HEIGHT
+SCRUBBER_Y = LEGEND_BAND_BOTTOM + SCRUBBER_MARGIN
+TIMELINE_VIEWBOX_HEIGHT = LEGEND_BAND_BOTTOM + SCRUBBER_TOTAL_HEIGHT
 
 
 def _escape_xml(text: str) -> str:
@@ -1411,11 +1416,12 @@ def _render_leaves(
 
 
 LEGEND_MARGIN = 4.0
-LEGEND_Y = GROUND_Y + LEGEND_MARGIN
-LEGEND_HEIGHT = VIEWBOX_HEIGHT - GROUND_Y - LEGEND_MARGIN * 2
+LEGEND_Y = VIEWBOX_HEIGHT + LEGEND_MARGIN
+LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
 LEGEND_X = 14.0
 LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
 LEGEND_PADDING = 10.0
+LEGEND_COLUMNS = 4
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
@@ -1524,18 +1530,22 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
 
 
 def _render_legend() -> str:
-    """A key strip explaining what each part of the tree represents.
+    """A key panel explaining what each part of the tree represents.
 
-    Runs the full width along the bottom, below the ground line -- every
-    other part of the tree (trunk, rings, branches, leaves) sits above
-    GROUND_Y, so a strip confined to the margin below it can never overlap
-    them, unlike a panel placed somewhere over the canopy.
+    Sits in its own band below the garden viewBox, so it can never overlap
+    the tree, and laid out as a 4x2 grid -- eight columns across one row
+    left barely 90px per entry, which the two- and three-line descriptions
+    overflowed into each other.
     """
-    column_width = LEGEND_WIDTH / len(LEGEND_ROWS)
-    row_cy = LEGEND_Y + LEGEND_HEIGHT / 2
+    column_width = LEGEND_WIDTH / LEGEND_COLUMNS
+    row_count = math.ceil(len(LEGEND_ROWS) / LEGEND_COLUMNS)
+    row_height = LEGEND_HEIGHT / row_count
     parts = [
         (
             f'<g class="legend">'
+            f'<rect x="0" y="{VIEWBOX_HEIGHT:.1f}" '
+            f'width="{VIEWBOX_WIDTH:.1f}" '
+            f'height="{LEGEND_BAND_HEIGHT:.1f}" fill="#3f7a3f" />'
             f'<rect x="{LEGEND_X:.1f}" y="{LEGEND_Y:.1f}" '
             f'width="{LEGEND_WIDTH:.1f}" height="{LEGEND_HEIGHT:.1f}" rx="8" '
             f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" '
@@ -1543,7 +1553,10 @@ def _render_legend() -> str:
         )
     ]
     for index, (label, desc_lines, icon) in enumerate(LEGEND_ROWS):
-        col_x = LEGEND_X + column_width * index
+        col_x = LEGEND_X + column_width * (index % LEGEND_COLUMNS)
+        row_cy = (
+            LEGEND_Y + row_height * (index // LEGEND_COLUMNS) + row_height / 2
+        )
         icon_cx = col_x + LEGEND_PADDING + 8
         text_x = col_x + LEGEND_PADDING + 20
         parts.append(_render_legend_icon(icon, icon_cx, row_cy - 2))
@@ -1591,13 +1604,13 @@ def render_svg(garden: GardenData) -> str:
             garden.cache_write_tokens,
         )
         + _render_legend()
-        + _render_tap_tooltip(VIEWBOX_HEIGHT)
+        + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
     )
 
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {VIEWBOX_WIDTH} {VIEWBOX_HEIGHT}" '
-        f'width="{VIEWBOX_WIDTH}" height="{VIEWBOX_HEIGHT}">'
+        f'viewBox="0 0 {VIEWBOX_WIDTH} {LEGEND_BAND_BOTTOM:.1f}" '
+        f'width="{VIEWBOX_WIDTH}" height="{LEGEND_BAND_BOTTOM:.1f}">'
         f'{_render_defs()}'
         f'{_render_background()}'
         f'{body}'
@@ -2628,7 +2641,8 @@ def _render_scrubber(
     panel_x = LEGEND_X
     panel_width = LEGEND_WIDTH
     ground_fill = (
-        f'<rect x="0" y="{VIEWBOX_HEIGHT:.1f}" width="{VIEWBOX_WIDTH:.1f}" '
+        f'<rect x="0" y="{LEGEND_BAND_BOTTOM:.1f}" '
+        f'width="{VIEWBOX_WIDTH:.1f}" '
         f'height="{SCRUBBER_TOTAL_HEIGHT:.1f}" fill="#3f7a3f" />'
     )
     panel = (
