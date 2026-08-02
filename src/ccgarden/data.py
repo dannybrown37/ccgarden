@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+
+from ccgarden.claude_stats import (
+    DEFAULT_CARTOON_SINCE,
+    parse_cartoon_stats,
+    run_cartoon_stats,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +50,19 @@ class EffortBush:
 
 
 @dataclass(frozen=True)
+class CartoonBird:
+    """One cartoon adapter's token savings over the reporting window.
+
+    Cartoon is an optional external tool, so this list is simply empty
+    when it isn't installed -- see `load_cartoon_birds`.
+    """
+
+    adapter: str
+    calls: int
+    tokens_saved: int
+
+
+@dataclass(frozen=True)
 class GardenData:
     rings: list[DayRing]
     branches: list[RepoBranch]
@@ -54,6 +73,8 @@ class GardenData:
     efforts: list[EffortBush] = field(default_factory=list)
     model_efforts: list[ModelCloud] = field(default_factory=list)
     total_tokens: int = 0
+    birds: list[CartoonBird] = field(default_factory=list)
+    cartoon_since: str = ''
 
 
 @dataclass(frozen=True)
@@ -119,15 +140,58 @@ class GardenTimeline:
     tool_days: dict[str, list[ToolUsageDay]] = field(default_factory=dict)
     effort_order: list[str] = field(default_factory=list)
     effort_days: dict[str, list[EffortUsageDay]] = field(default_factory=dict)
+    # Cartoon reports a single since-window snapshot rather than daily
+    # history, so birds have no per-day frames to replay.
+    birds: list[CartoonBird] = field(default_factory=list)
+    cartoon_since: str = ''
 
 
-def load_garden_timeline(db_path: str) -> GardenTimeline:
+def load_cartoon_birds(
+    since: str = DEFAULT_CARTOON_SINCE,
+) -> list[CartoonBird]:
+    """Per-adapter cartoon savings, biggest first -- empty if unavailable.
+
+    Cartoon is an optional external binary the garden merely plugs into,
+    so every way it can be absent or unhappy (not installed, non-zero
+    exit, timeout, unparseable output) has to come back as "no birds"
+    rather than an error: a garden without cartoon is just a garden with
+    an empty sky. Adapters that saved nothing get no bird either -- a
+    passthrough adapter is real, but it isn't a saving worth drawing.
+    """
+    try:
+        output = run_cartoon_stats(since)
+        stats = parse_cartoon_stats(output) if output is not None else None
+    except (OSError, ValueError):
+        return []
+    if not stats:
+        return []
+
+    birds = [
+        CartoonBird(
+            adapter=adapter,
+            calls=counts.get('calls', 0),
+            tokens_saved=counts.get('saved', 0),
+        )
+        for adapter, counts in stats['by_adapter'].items()
+        if counts.get('saved', 0) > 0
+    ]
+    birds.sort(key=lambda bird: bird.tokens_saved, reverse=True)
+    return birds
+
+
+def load_garden_timeline(
+    db_path: str, cartoon_since: str = DEFAULT_CARTOON_SINCE
+) -> GardenTimeline:
     conn = sqlite3.connect(db_path)
     try:
         timeline = _load_timeline(conn)
     finally:
         conn.close()
-    return timeline
+    return replace(
+        timeline,
+        birds=load_cartoon_birds(cartoon_since),
+        cartoon_since=cartoon_since,
+    )
 
 
 def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
@@ -568,7 +632,9 @@ def _load_efforts(conn: sqlite3.Connection) -> list[EffortBush]:
     ]
 
 
-def load_garden_data(db_path: str) -> GardenData:
+def load_garden_data(
+    db_path: str, cartoon_since: str = DEFAULT_CARTOON_SINCE
+) -> GardenData:
     conn = sqlite3.connect(db_path)
     try:
         rings = _load_rings(conn)
@@ -591,6 +657,8 @@ def load_garden_data(db_path: str) -> GardenData:
         efforts=efforts,
         model_efforts=model_efforts,
         total_tokens=total_tokens,
+        birds=load_cartoon_birds(cartoon_since),
+        cartoon_since=cartoon_since,
     )
 
 

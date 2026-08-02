@@ -6,7 +6,14 @@ import math
 import random
 from typing import TYPE_CHECKING
 
-from ccgarden.data import DayRing, GardenData, ModelCloud, RepoBranch, ToolBush
+from ccgarden.data import (
+    CartoonBird,
+    DayRing,
+    GardenData,
+    ModelCloud,
+    RepoBranch,
+    ToolBush,
+)
 
 if TYPE_CHECKING:
     from ccgarden.data import GardenTimeline, RepoBranchDay, ToolUsageDay
@@ -171,6 +178,51 @@ SUNFLOWER_GROWTH_EXPONENT = 0.6
 SUNFLOWER_PETAL_COUNT = 12
 SUNFLOWER_PETAL_COLORS = ('#f5b731', '#f0a92a', '#ffc94d')
 SUNFLOWER_STALK_COLOR = '#4f8f4f'
+
+# One bird per cartoon adapter that saved tokens, sized by how many it
+# saved. Cartoon is an optional external tool the garden plugs into, so
+# unlike every other shape here the birds are simply absent -- along with
+# their legend entry -- on a machine that doesn't have it. Tokens cartoon
+# saves are tokens that never had to be sent, which is the one quantity in
+# the garden that's about what *didn't* happen, so it gets the one shape
+# that isn't rooted to the ground.
+BIRD_MARGIN = 55.0
+# Birds share the sky with the canopy, so like the clouds they skip the
+# column of sky the tree grows into and spread across the two bands either
+# side of it -- otherwise a small flock anchors near the middle of the
+# frame and reads as hugging the tree.
+BIRD_TREE_KEEPOUT_HALF_WIDTH = 150.0
+# Deliberately lower than the clouds' band: the open mid-sky either side
+# of the canopy is the emptiest part of the frame, and a bird is small
+# enough to sit there without competing with anything.
+BIRD_Y_MIN = 120.0
+BIRD_Y_MAX = 430.0
+MAX_BIRDS = 12
+BIRD_SIZE_MIN = 6.0
+BIRD_SIZE_MAX = 16.0
+BIRD_TOKENS_SATURATION = 250_000
+# The reference size the stroke width is scaled against.
+BIRD_SIZE = 9.0
+# Birds cluster into small skeins rather than scattering evenly: a handful
+# of loose Vs reads as wildlife, an even spread reads as a dot grid.
+BIRD_FLOCK_SIZE = 4
+BIRD_FLOCK_SPACING_X = 15.0
+BIRD_FLOCK_SPACING_Y = 8.0
+# A dark silhouette is what a bird actually looks like, but the sky here is
+# a dark dusk blue -- so they're drawn as a pale, near-white stroke, the
+# only value that reads at this size against that gradient.
+BIRD_COLOR = '#dce7f4'
+EPSILON = 1e-6
+BIRD_LEGEND_COLOR = '#3f4b5c'
+BIRD_STROKE_WIDTH = 1.8
+# In the timeline the flock drifts on its own slow loop, out from the tree
+# and back. It is the one motion in the garden that isn't tied to the day
+# frames -- cartoon reports a single snapshot, so there is no history to
+# replay -- but birds in a still sky read as dead, and drifting invents no
+# numbers, only movement.
+BIRD_DRIFT_X = 26.0
+BIRD_DRIFT_Y = 9.0
+BIRD_DRIFT_SECONDS = 11.0
 
 TOOLTIP_PAD = 8.0
 TOOLTIP_FONT_SIZE = 13.0
@@ -708,6 +760,225 @@ def _render_clouds(models: list[ModelCloud]) -> str:
             f'{_render_cloud(cx, cy, radius, model_cloud.model, effort)}</g>'
         )
     return ''.join(elements)
+
+
+def _bird_size(tokens_saved: int) -> float:
+    """A bird's wingspan for an adapter that saved this many tokens.
+
+    Same sqrt-saturation shape as the other size formulas (see
+    `_cloud_radius`, `_bush_radius`), so an adapter with modest savings is
+    still a visible bird rather than a speck.
+    """
+    growth = math.sqrt(
+        min(max(tokens_saved, 0), BIRD_TOKENS_SATURATION)
+        / BIRD_TOKENS_SATURATION
+    )
+    return BIRD_SIZE_MIN + (BIRD_SIZE_MAX - BIRD_SIZE_MIN) * growth
+
+
+def _bird_bands() -> tuple[tuple[float, float], tuple[float, float]]:
+    """The (start, end) x spans of the sky left and right of the tree."""
+    left = (BIRD_MARGIN, TRUNK_CENTER_X - BIRD_TREE_KEEPOUT_HALF_WIDTH)
+    right = (
+        TRUNK_CENTER_X + BIRD_TREE_KEEPOUT_HALF_WIDTH,
+        VIEWBOX_WIDTH - BIRD_MARGIN,
+    )
+    return left, right
+
+
+def _bird_slot_x(fraction: float) -> float:
+    """The x for a slot `fraction` of the way through the usable sky.
+
+    The two bands are treated as one continuous run so slots stay evenly
+    spread overall, they just skip the column of sky the tree grows into.
+    """
+    (left_start, left_end), (right_start, right_end) = _bird_bands()
+    left_width = max(left_end - left_start, 0.0)
+    right_width = max(right_end - right_start, 0.0)
+    offset = fraction * (left_width + right_width)
+    if offset <= left_width:
+        return left_start + offset
+    return right_start + (offset - left_width)
+
+
+def _bird_clamp_x(x: float) -> float:
+    """Pull an x back into whichever sky band it is nearest."""
+    (left_start, left_end), (right_start, right_end) = _bird_bands()
+    if x <= left_end:
+        return max(x, left_start)
+    if x >= right_start:
+        return min(x, right_end)
+    # Inside the tree's column: fall out to the closer side of it.
+    if x - left_end <= right_start - x:
+        return left_end
+    return right_start
+
+
+def _bird_positions(count: int) -> list[tuple[float, float]]:
+    """Deterministic (x, y) sky slot for each of `count` birds.
+
+    Birds are dealt into skeins of up to `BIRD_FLOCK_SIZE`, each skein
+    anchored at its own slot across the sky either side of the tree and
+    laid out as a V trailing up and back from its leader.
+    """
+    if count <= 0:
+        return []
+    flock_count = math.ceil(count / BIRD_FLOCK_SIZE)
+    positions = []
+    for index in range(count):
+        flock_index = index // BIRD_FLOCK_SIZE
+        rank_in_flock = index % BIRD_FLOCK_SIZE
+        anchor_rng = random.Random(f'ccgarden-bird-flock:{flock_index}')
+        anchor_x = _bird_slot_x(
+            (flock_index + anchor_rng.uniform(0.3, 0.7)) / flock_count
+        )
+        anchor_y = anchor_rng.uniform(BIRD_Y_MIN, BIRD_Y_MAX)
+
+        # Alternate sides of the V, one step further back with each pair.
+        side = -1.0 if rank_in_flock % 2 else 1.0
+        rank = (rank_in_flock + 1) // 2
+        rng = random.Random(f'ccgarden-bird:{index}')
+        offset_x = side * rank * BIRD_FLOCK_SPACING_X * rng.uniform(0.8, 1.2)
+        x = _bird_clamp_x(anchor_x + offset_x)
+        y = min(
+            anchor_y + rank * BIRD_FLOCK_SPACING_Y * rng.uniform(0.7, 1.3),
+            BIRD_Y_MAX,
+        )
+        positions.append((x, y))
+    return positions
+
+
+def _bird_d(cx: float, cy: float, size: float) -> str:
+    """A bird as the classic pair of wing strokes meeting at the body."""
+    half = size / 2
+    lift = size * 0.55
+    return (
+        f'M{cx - size:.1f},{cy:.1f} '
+        f'Q{cx - half:.1f},{cy - lift:.1f} {cx:.1f},{cy:.1f} '
+        f'Q{cx + half:.1f},{cy - lift:.1f} {cx + size:.1f},{cy:.1f}'
+    )
+
+
+def _render_bird(
+    cx: float, cy: float, size: float, color: str = BIRD_COLOR
+) -> str:
+    return (
+        f'<path d="{_bird_d(cx, cy, size)}" fill="none" '
+        f'stroke="{color}" '
+        f'stroke-width="{BIRD_STROKE_WIDTH * size / BIRD_SIZE:.2f}" '
+        f'stroke-linecap="round" opacity="0.85" />'
+    )
+
+
+def _clear_of_sun(
+    x: float, y: float, size: float, sun: tuple[float, float, float]
+) -> tuple[float, float]:
+    """Push a bird radially out of the sun's halo, if it landed inside it.
+
+    A pale bird washes out completely against the halo, so the one thing
+    a flock has to dodge is the sun -- clouds it may cross freely, which
+    is what birds do anyway.
+    """
+    sun_x, sun_y, sun_radius = sun
+    keepout = sun_radius * SUN_HALO_RADIUS_FACTOR + size * 2
+    dx, dy = x - sun_x, y - sun_y
+    distance = math.hypot(dx, dy)
+    if distance >= keepout:
+        return x, y
+    if distance < EPSILON:
+        # Dead center on the sun: no direction to push, so pick one.
+        dx, dy, distance = 0.0, 1.0, 1.0
+    scale = keepout / distance
+    pushed_x = sun_x + dx * scale
+    pushed_y = sun_y + dy * scale
+    return (
+        min(max(pushed_x, BIRD_MARGIN), VIEWBOX_WIDTH - BIRD_MARGIN),
+        min(max(pushed_y, BIRD_Y_MIN), BIRD_Y_MAX),
+    )
+
+
+def _bird_slots(
+    birds: list[CartoonBird], sun: tuple[float, float, float]
+) -> list[tuple[float, float, float]]:
+    """(x, y, size) for each bird, placed in the sky and clear of the sun."""
+    sizes = [_bird_size(bird.tokens_saved) for bird in birds]
+    return [
+        (*_clear_of_sun(x, y, size, sun), size)
+        for (x, y), size in zip(
+            _bird_positions(len(birds)), sizes, strict=True
+        )
+    ]
+
+
+def _bird_drift(
+    index: int,
+    x: float,
+    y: float,
+    size: float,
+    sun: tuple[float, float, float],
+) -> tuple[float, float]:
+    """How far a bird drifts from its slot at the far end of its loop.
+
+    Outward, away from the trunk, so the drift can never carry a bird into
+    the canopy; the far end is put through the same band clamp and sun
+    push-out as the slot itself, so both ends of the loop are legal
+    positions and everything between them is too.
+    """
+    rng = random.Random(f'ccgarden-bird-drift:{index}')
+    direction = 1.0 if x >= TRUNK_CENTER_X else -1.0
+    far_x = _bird_clamp_x(x + direction * BIRD_DRIFT_X * rng.uniform(0.7, 1.3))
+    far_y = min(
+        max(y - BIRD_DRIFT_Y * rng.uniform(0.5, 1.3), BIRD_Y_MIN), BIRD_Y_MAX
+    )
+    far_x, far_y = _clear_of_sun(far_x, far_y, size, sun)
+    return far_x - x, far_y - y
+
+
+def _bird_drift_animate(index: int, dx: float, dy: float) -> str:
+    """A slow there-and-back drift, looping for as long as the SVG is open.
+
+    Deliberately not keyed to the timeline's day frames: it runs on its own
+    clock so a paused or scrubbed replay still has a living sky.
+    """
+    rng = random.Random(f'ccgarden-bird-drift-time:{index}')
+    duration = BIRD_DRIFT_SECONDS * rng.uniform(0.85, 1.15)
+    return (
+        f'<animateTransform attributeName="transform" type="translate" '
+        f'dur="{duration:.3f}s" begin="0s" repeatCount="indefinite" '
+        f'calcMode="spline" keyTimes="0;0.5;1" '
+        f'keySplines="0.4 0 0.6 1;0.4 0 0.6 1" '
+        f'values="0,0;{dx:.2f},{dy:.2f};0,0" />'
+    )
+
+
+def _bird_label(bird: CartoonBird, since: str) -> str:
+    window = f' (last {since})' if since else ''
+    return (
+        f'{bird.adapter} — {bird.tokens_saved:,} tokens saved '
+        f'over {bird.calls:,} calls{window}'
+    )
+
+
+def _render_birds(
+    birds: list[CartoonBird],
+    since: str,
+    sun: tuple[float, float, float],
+) -> str:
+    """One bird per cartoon adapter -- nothing at all when cartoon is absent.
+
+    Every caller passes whatever `load_cartoon_birds` came back with, so
+    a machine without cartoon just renders a garden with an empty sky.
+    """
+    flock = birds[:MAX_BIRDS]
+    if not flock:
+        return ''
+    slots = _bird_slots(flock, sun)
+    elements = [
+        f'<g class="bird">{_title(_bird_label(bird, since))}'
+        f'{_render_bird(x, y, size)}</g>'
+        for bird, (x, y, size) in zip(flock, slots, strict=True)
+    ]
+    return f'<g class="birds">{"".join(elements)}</g>'
 
 
 def _sun_growth(total_tokens: int) -> float:
@@ -1619,6 +1890,11 @@ LEGEND_ROWS = (
         ('one per repo;', 'taller = more prompts'),
         'sunflower',
     ),
+    (
+        'Birds',
+        ('one per cartoon adapter;', 'bigger = more tokens saved'),
+        'bird',
+    ),
 )
 
 
@@ -1677,6 +1953,11 @@ def _legend_icon_sunflower(cx: float, cy: float) -> str:
     return _render_sunflower(cx, cy + 8.0, 16.0, 'legend-sunflower')
 
 
+def _legend_icon_bird(cx: float, cy: float) -> str:
+    # Dark, unlike the sky birds: the legend panel is a pale cream card.
+    return _render_bird(cx, cy + 2.0, 6.0, BIRD_LEGEND_COLOR)
+
+
 LEGEND_ICON_RENDERERS = {
     'trunk': _legend_icon_trunk,
     'ring': _legend_icon_ring,
@@ -1687,6 +1968,7 @@ LEGEND_ICON_RENDERERS = {
     'bush': _legend_icon_bush,
     'sun': _legend_icon_sun,
     'sunflower': _legend_icon_sunflower,
+    'bird': _legend_icon_bird,
 }
 
 
@@ -1694,7 +1976,7 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
     return LEGEND_ICON_RENDERERS[icon](cx, cy)
 
 
-def _render_legend() -> str:
+def _render_legend(*, with_birds: bool = False) -> str:
     """A key panel explaining what each part of the tree represents.
 
     Sits in its own band below the garden viewBox, so it can never overlap
@@ -1702,9 +1984,13 @@ def _render_legend() -> str:
     left barely 90px per entry, which the two- and three-line descriptions
     overflowed into each other, and a third row would need a taller band
     than the two- and three-line descriptions leave room for.
+
+    The birds entry is dropped unless cartoon actually produced birds:
+    a key to a shape that isn't in the sky is just a puzzle.
     """
+    rows = [row for row in LEGEND_ROWS if with_birds or row[2] != 'bird']
     column_width = LEGEND_WIDTH / LEGEND_COLUMNS
-    row_count = math.ceil(len(LEGEND_ROWS) / LEGEND_COLUMNS)
+    row_count = math.ceil(len(rows) / LEGEND_COLUMNS)
     row_height = LEGEND_HEIGHT / row_count
     parts = [
         (
@@ -1718,7 +2004,7 @@ def _render_legend() -> str:
             f'opacity="0.88" />'
         )
     ]
-    for index, (label, desc_lines, icon) in enumerate(LEGEND_ROWS):
+    for index, (label, desc_lines, icon) in enumerate(rows):
         col_x = LEGEND_X + column_width * (index % LEGEND_COLUMNS)
         row_cy = (
             LEGEND_Y + row_height * (index // LEGEND_COLUMNS) + row_height / 2
@@ -1758,6 +2044,11 @@ def render_svg(garden: GardenData) -> str:
         f'<g class="sun">{sun_title}'
         f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}</g>'
         + _render_clouds(garden.model_efforts)
+        + _render_birds(
+            garden.birds,
+            garden.cartoon_since,
+            (sun_x, sun_y, _sun_radius(garden.total_tokens)),
+        )
         + f'<g class="trunk-group">{trunk_title}'
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
@@ -1772,7 +2063,7 @@ def render_svg(garden: GardenData) -> str:
             garden.cache_read_tokens,
             garden.cache_write_tokens,
         )
-        + _render_legend()
+        + _render_legend(with_birds=bool(garden.birds))
         + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
     )
 
@@ -2431,6 +2722,45 @@ def _render_timeline_clouds(
     return ''.join(elements)
 
 
+def _render_timeline_birds(timeline: GardenTimeline) -> str:
+    """The flock, at full size for the whole replay but drifting as it flies.
+
+    Everything else in the timeline replays day by day, but cartoon only
+    reports a single since-window snapshot -- there are no per-day frames
+    to animate, and faking a growth curve for them would be inventing
+    history the tool never recorded. So the birds never grow; they just
+    drift on their own loop (see `_bird_drift`), with their window spelled
+    out in the tooltip.
+    """
+    # Keyed to the *final* sun, which climbs during the replay: a flock
+    # placed clear of where the sun ends up is clear of it throughout.
+    final_tokens = (
+        timeline.cumulative_total_tokens[-1]
+        if timeline.cumulative_total_tokens
+        else 0
+    )
+    sun_x, sun_y = _sun_position(final_tokens)
+    sun = (sun_x, sun_y, _sun_radius(final_tokens))
+
+    flock = timeline.birds[:MAX_BIRDS]
+    if not flock:
+        return ''
+    slots = _bird_slots(flock, sun)
+    elements = []
+    for index, (bird, (x, y, size)) in enumerate(
+        zip(flock, slots, strict=True)
+    ):
+        dx, dy = _bird_drift(index, x, y, size, sun)
+        animate = _bird_drift_animate(index, dx, dy)
+        elements.append(
+            f'<g class="bird">'
+            f'{_title(_bird_label(bird, timeline.cartoon_since))}'
+            f'<g transform="translate(0,0)">{animate}'
+            f'{_render_bird(x, y, size)}</g></g>'
+        )
+    return f'<g class="birds">{"".join(elements)}</g>'
+
+
 def _bush_day_radii(
     days: list[ToolUsageDay], final_radius: float
 ) -> list[float]:
@@ -2968,6 +3298,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     body = (
         _render_timeline_sun(timeline, key_times, duration)
         + _render_timeline_clouds(timeline, key_times, duration)
+        + _render_timeline_birds(timeline)
         + f'<g class="trunk-group" {trunk_tt}>{trunk_title}'
         + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
         + '</g>'
@@ -2985,7 +3316,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_sunflowers(timeline, key_times, duration)
         + _render_timeline_bushes(timeline, key_times, duration)
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
-        + _render_legend()
+        + _render_legend(with_birds=bool(timeline.birds))
         + _render_scrubber(timeline, key_times, duration)
         + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)
     )

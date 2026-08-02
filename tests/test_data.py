@@ -4,11 +4,13 @@ from pathlib import Path
 import pytest
 
 from ccgarden.data import (
+    CartoonBird,
     DayRing,
     EffortBush,
     ModelCloud,
     RepoBranch,
     ToolBush,
+    load_cartoon_birds,
     load_garden_data,
     load_garden_timeline,
 )
@@ -693,3 +695,73 @@ def test_load_model_efforts_excludes_pairings_with_no_token_usage(
     garden = load_garden_data(db_path)
 
     assert garden.model_efforts == []
+
+
+CARTOON_OUTPUT = """calls: 40
+tokens_saved: 7000
+by_adapter:
+  pytest:
+    calls: 30
+    saved: 6000
+  passthrough:
+    calls: 10
+    saved: 0
+"""
+
+
+def test_load_cartoon_birds_reads_per_adapter_savings_biggest_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        'ccgarden.data.run_cartoon_stats', lambda _since: CARTOON_OUTPUT
+    )
+
+    birds = load_cartoon_birds('7d')
+
+    # passthrough saved nothing, so it earns no bird.
+    assert birds == [
+        CartoonBird(adapter='pytest', calls=30, tokens_saved=6000)
+    ]
+
+
+def test_load_cartoon_birds_is_empty_when_cartoon_is_not_installed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # run_cartoon_stats already returns None for a missing binary, a
+    # non-zero exit, or a timeout -- all of which must read as "no birds".
+    monkeypatch.setattr('ccgarden.data.run_cartoon_stats', lambda _since: None)
+
+    assert load_cartoon_birds('7d') == []
+
+
+def test_load_cartoon_birds_is_empty_when_output_is_unparseable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        'ccgarden.data.run_cartoon_stats',
+        lambda _since: 'calls: not-a-number\n',
+    )
+
+    assert load_cartoon_birds('7d') == []
+
+
+def test_load_cartoon_birds_is_empty_when_cartoon_blows_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(since: str) -> str:
+        raise OSError(since)
+
+    monkeypatch.setattr('ccgarden.data.run_cartoon_stats', boom)
+
+    assert load_cartoon_birds('7d') == []
+
+
+def test_load_garden_data_without_cartoon_still_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr('ccgarden.data.run_cartoon_stats', lambda _since: None)
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=[])
+
+    garden = load_garden_data(db_path)
+
+    assert garden.birds == []

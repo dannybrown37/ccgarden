@@ -1,9 +1,11 @@
+import math
 import re
 
 import pytest
 
 
 from ccgarden.data import (
+    CartoonBird,
     DayRing,
     GardenData,
     GardenTimeline,
@@ -15,12 +17,19 @@ from ccgarden.data import (
     ToolUsageDay,
 )
 from ccgarden.render import (
+    BIRD_MARGIN,
+    BIRD_SIZE_MAX,
+    BIRD_SIZE_MIN,
+    BIRD_TOKENS_SATURATION,
+    BIRD_Y_MAX,
+    BIRD_Y_MIN,
     CLOUD_MARGIN,
     CLOUD_TOKENS_SATURATION,
     CLOUD_TREE_KEEPOUT_HALF_WIDTH,
     CLOUD_Y_MAX_AT_EDGE,
     CLOUD_Y_MAX_NEAR_TREE,
     LEAVES_PER_SESSION,
+    MAX_BIRDS,
     MAX_BUSHES,
     MAX_SUNFLOWERS,
     SUN_HALO_RADIUS_FACTOR,
@@ -31,12 +40,16 @@ from ccgarden.render import (
     TRUNK_CENTER_X,
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
+    _bird_size,
+    _bird_positions,
+    _bird_slots,
     _bush_radius,
     _bush_x_positions,
     _cache_efficiency_flower_count,
     _cloud_positions,
     _cloud_radius,
     _cloud_y_max,
+    _sun_position,
     _sun_radius,
     _sunflower_height,
     _sunflower_x_positions,
@@ -838,3 +851,120 @@ def test_timeline_sun_stays_inside_the_viewbox_on_every_frame() -> None:
         assert x - halo >= 0
         assert x + halo <= VIEWBOX_WIDTH
         assert y - halo >= 0
+
+
+def cartoon_birds(*savings: int) -> list[CartoonBird]:
+    return [
+        CartoonBird(adapter=f'adapter-{i}', calls=10, tokens_saved=saved)
+        for i, saved in enumerate(savings)
+    ]
+
+
+def test_bird_size_grows_with_tokens_saved() -> None:
+    assert _bird_size(0) == BIRD_SIZE_MIN
+    assert _bird_size(1_000) < _bird_size(50_000)
+    assert _bird_size(BIRD_TOKENS_SATURATION * 100) == BIRD_SIZE_MAX
+
+
+def test_bird_positions_stay_in_the_open_sky_band() -> None:
+    for count in range(1, MAX_BIRDS + 1):
+        for x, y in _bird_positions(count):
+            assert BIRD_MARGIN <= x <= VIEWBOX_WIDTH - BIRD_MARGIN
+            assert BIRD_Y_MIN <= y <= BIRD_Y_MAX
+
+
+def test_bird_positions_are_deterministic_across_calls() -> None:
+    assert _bird_positions(9) == _bird_positions(9)
+
+
+def test_birds_are_pushed_clear_of_the_sun_halo() -> None:
+    sun_x, sun_y = _sun_position(SUN_TOKENS_SATURATION)
+    radius = _sun_radius(SUN_TOKENS_SATURATION)
+    keepout = radius * SUN_HALO_RADIUS_FACTOR
+
+    slots = _bird_slots(
+        cartoon_birds(*([BIRD_TOKENS_SATURATION] * MAX_BIRDS)),
+        (sun_x, sun_y, radius),
+    )
+
+    for x, y, _size in slots:
+        assert math.hypot(x - sun_x, y - sun_y) >= keepout
+
+
+def test_render_svg_draws_one_bird_per_cartoon_adapter() -> None:
+    garden = GardenData(
+        rings=[ring('2026-07-26')],
+        branches=[branch('ccgarden')],
+        birds=cartoon_birds(5_000, 60_000, 900),
+        cartoon_since='7d',
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="bird"') == 3
+    assert 'adapter-1 — 60,000 tokens saved over 10 calls (last 7d)' in svg
+
+
+def test_render_svg_caps_the_flock() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        birds=cartoon_birds(*range(1_000, 1_000 + MAX_BIRDS + 5)),
+    )
+
+    assert render_svg(garden).count('class="bird"') == MAX_BIRDS
+
+
+def test_render_svg_without_cartoon_draws_no_birds_and_no_legend_entry() -> (
+    None
+):
+    # Cartoon is an optional external tool: a machine without it renders a
+    # garden with an empty sky, not an error and not a key to a missing
+    # shape.
+    garden = GardenData(rings=[ring('2026-07-26')], branches=[], birds=[])
+
+    svg = render_svg(garden)
+
+    assert 'class="birds"' not in svg
+    assert '>Birds<' not in svg
+
+
+def test_render_svg_with_cartoon_adds_the_birds_legend_entry() -> None:
+    garden = GardenData(rings=[], branches=[], birds=cartoon_birds(5_000))
+
+    assert '>Birds<' in render_svg(garden)
+
+
+def timeline_with_birds(birds: list[CartoonBird]) -> GardenTimeline:
+    days = ['2026-07-20', '2026-07-21', '2026-07-22']
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1] * len(days),
+        cumulative_sessions=[1, 2, 3],
+        branch_order=[],
+        branch_days={},
+        birds=birds,
+        cartoon_since='7d',
+    )
+
+
+def test_render_timeline_svg_drifts_the_flock_without_growing_it() -> None:
+    # Cartoon only reports a since-window snapshot, so there is no per-day
+    # history to replay -- the birds may fly, but must not fake growth.
+    timeline = timeline_with_birds(cartoon_birds(5_000, 60_000))
+
+    svg = render_timeline_svg(timeline)
+
+    flock = svg.split('class="birds"')[1].split('</g></g></g>')[0]
+    assert svg.count('class="bird"') == 2
+    assert flock.count('type="translate"') == 2
+    assert flock.count('repeatCount="indefinite"') == 2
+    assert 'type="scale"' not in flock
+    assert 'adapter-0 — 5,000 tokens saved over 10 calls (last 7d)' in svg
+
+
+def test_render_timeline_svg_without_cartoon_draws_no_birds() -> None:
+    svg = render_timeline_svg(timeline_with_birds([]))
+
+    assert 'class="birds"' not in svg
+    assert '>Birds<' not in svg

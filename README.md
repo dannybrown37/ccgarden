@@ -26,6 +26,8 @@ fill in as you work.)*
 | **Clouds** | One per model + reasoning-effort combination used; bigger and darker clouds mean more tokens and heavier thinking |
 | **Sun** | Rises and brightens with your all-in token total (output + input + cache read + cache write) |
 | **Bushes** | One per tool (Bash, Edit, Read, ...); bigger bushes mean more calls |
+| **Sunflowers** | One per repo; taller stalks mean more prompts |
+| **Birds** | One per `cartoon` adapter that saved tokens; bigger birds mean more tokens saved. Only appears if `cartoon` is installed |
 
 Hover (or tap, on mobile) any shape for the exact numbers behind it.
 
