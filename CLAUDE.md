@@ -1,0 +1,90 @@
+# ccgarden
+
+Renders local Claude Code session history as an animated SVG garden.
+Zero runtime dependencies — stdlib + sqlite3 only. Python >= 3.12, `uv`.
+
+## Pipeline
+
+`~/.claude/projects/**/*.jsonl` → `claude_stats.py` → `~/.claude/ccstats.db`
+→ `data.py` → `render.py` → `~/.claude/ccgarden.svg`
+
+Three modules, each a stage; keep them in that order of dependency
+(`render` never touches sqlite, `data` never parses JSONL).
+
+- `src/ccgarden/claude_stats.py` — parses transcripts, prints the terminal
+  report, and writes daily snapshots into sqlite. Entry point `ccstats`.
+- `src/ccgarden/data.py` — reads the db back out into `GardenData` (single
+  frame) and `GardenTimeline` (per-day cumulative frames). Pure dataclasses.
+- `src/ccgarden/render.py` — turns those dataclasses into SVG strings.
+  `render_svg` for a static garden, `render_timeline_svg` for the animated
+  timelapse (what the CLI actually ships).
+- `src/ccgarden/__init__.py` — the `ccgarden` CLI: record → load → render →
+  write → open in browser (WSL-aware via `explorer.exe`).
+
+## Data model
+
+sqlite tables are all day-keyed and idempotent per day (`INSERT OR REPLACE`
+on a `day` primary key), so re-running any day is safe and backfills via
+`ccstats --record --since ... --until ...` are re-runnable:
+`daily_totals`, `daily_repo_usage`, `daily_model_usage`,
+`daily_model_effort_usage`, `daily_tool_usage`, `daily_effort_usage`.
+
+`data.py` loads raw per-day rows then runs a `_cumulative_*` pass — the
+renderer always receives cumulative values, since the garden only ever
+grows. Adding a new shape means: new daily table → `_load_*` + `_load_*_days`
++ `_cumulative_*_days` → new field on `GardenData`/`GardenTimeline` → a
+`_render_*` and `_render_timeline_*` pair → legend icon + entry.
+
+## Rendering conventions
+
+- SVG is built by string concatenation, not a DOM library. All user-derived
+  text must go through `_escape_xml` / `_title`.
+- Every visual dimension is driven by a module-level saturation constant
+  (`*_SATURATION`) plus a min/max pair, so growth curves flatten instead of
+  running off-canvas. Tune the constant, don't special-case the data.
+- Animation is declarative SMIL (`_animate_tag`, `_animate_transform_tag`)
+  over `_key_times` — no JS timers. The scrubber and tap-tooltip are the
+  only inline-script parts.
+- Layout is deterministic given the data: positions come from seeded/derived
+  jitter helpers, never `random` at render time, so the same db renders the
+  same garden.
+- Shapes stay off each other: clouds honor the tree keepout, birds check
+  `_clear_of_sun`, bushes use `_bush_footprints`. Preserve those checks when
+  moving things.
+
+`cartoon` is an optional external binary. Every failure mode (missing,
+non-zero exit, timeout, unparseable) must degrade to "no birds", never
+an exception.
+
+## Working here
+
+```sh
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+uv run ccgarden --no-open     # regenerate without launching a browser
+```
+
+Pre-commit runs ruff-check, ruff-format, and pytest (via the `git-a-grip`
+hook repo) plus gitleaks — commits fail on any of them, so run them first.
+
+Style: ruff with a broad select set, line length 79, single quotes,
+annotations required on non-test code (`ANN`). Tests relax `ANN`/`PLR2004`.
+Private helpers are `_`-prefixed; the public surface is `main`,
+`load_garden_*`, `render_*svg`, and `print_report`.
+
+Tests mirror the modules (`tests/test_{claude_stats,data,render,cli}.py`)
+and are pure-unit — they build dataclasses directly and assert on geometry
+and on substrings of the emitted SVG. Follow that: no filesystem or db
+fixtures beyond `tmp_path`, no golden-image comparison.
+
+To eyeball a change, render to the scratchpad and screenshot it headless
+(`google-chrome --headless --screenshot ... file://...`) rather than
+diffing SVG text by hand.
+
+## Release
+
+Bump `version` in `pyproject.toml`, tag `v*`, push the tag — the
+`Publish to PyPI` workflow builds with `uv build` and publishes via
+trusted publishing.
