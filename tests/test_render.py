@@ -957,10 +957,34 @@ def test_render_timeline_svg_drifts_the_flock_without_growing_it() -> None:
 
     flock = svg.split('class="birds"')[1].split('</g></g></g>')[0]
     assert svg.count('class="bird"') == 2
-    assert flock.count('type="translate"') == 2
-    assert flock.count('repeatCount="indefinite"') == 2
+    # Per bird: the @keyframes, its class rule, the animation: reference, and
+    # the class on the element itself.
+    assert flock.count('bird-drift-') == 8
+    assert 'translate(' in flock
     assert 'type="scale"' not in flock
     assert 'adapter-0 — 5,000 tokens saved over 10 calls (last 7d)' in svg
+
+
+def test_render_timeline_svg_drifts_the_flock_without_smil() -> None:
+    # SMIL animateTransform is never composited, so a perpetually drifting
+    # flock repaints the whole 3k-element document every frame and janks
+    # scrolling on any page embedding the SVG. CSS transforms can be.
+    timeline = timeline_with_birds(cartoon_birds(5_000, 60_000))
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'repeatCount="indefinite"' not in svg
+    assert '<animateTransform' not in svg.split('class="birds"')[1]
+    assert 'animation:bird-drift-0' in svg
+    assert '@keyframes bird-drift-0' in svg
+
+
+def test_render_timeline_svg_flock_honors_reduced_motion() -> None:
+    timeline = timeline_with_birds(cartoon_birds(5_000, 60_000))
+
+    svg = render_timeline_svg(timeline)
+
+    assert '@media (prefers-reduced-motion:reduce)' in svg
 
 
 def test_render_timeline_svg_without_cartoon_draws_no_birds() -> None:

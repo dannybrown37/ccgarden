@@ -934,20 +934,44 @@ def _bird_drift(
     return far_x - x, far_y - y
 
 
-def _bird_drift_animate(index: int, dx: float, dy: float) -> str:
+def _bird_drift_rule(index: int, dx: float, dy: float) -> str:
     """A slow there-and-back drift, looping for as long as the SVG is open.
 
     Deliberately not keyed to the timeline's day frames: it runs on its own
     clock so a paused or scrubbed replay still has a living sky.
+
+    CSS rather than the `animateTransform` this used to be. SMIL transforms
+    are never handed to the compositor, so a flock that drifts forever kept
+    the whole document -- thousands of branch and leaf paths -- repainting on
+    the main thread every frame, which visibly janked scrolling on any page
+    embedding the garden. An equivalent CSS keyframe animation can be
+    composited, and costs nothing once the layer is up.
     """
     rng = random.Random(f'ccgarden-bird-drift-time:{index}')
     duration = BIRD_DRIFT_SECONDS * rng.uniform(0.85, 1.15)
     return (
-        f'<animateTransform attributeName="transform" type="translate" '
-        f'dur="{duration:.3f}s" begin="0s" repeatCount="indefinite" '
-        f'calcMode="spline" keyTimes="0;0.5;1" '
-        f'keySplines="0.4 0 0.6 1;0.4 0 0.6 1" '
-        f'values="0,0;{dx:.2f},{dy:.2f};0,0" />'
+        f'@keyframes bird-drift-{index}{{'
+        f'50%{{transform:translate({dx:.2f}px,{dy:.2f}px)}}}}'
+        f'.bird-drift-{index}{{'
+        f'animation:bird-drift-{index} {duration:.3f}s '
+        f'ease-in-out infinite}}'
+    )
+
+
+def _bird_drift_style(rules: list[str]) -> str:
+    """The flock's drift keyframes, plus the two rules they all share.
+
+    `will-change` is what actually buys the compositor layer; without it a
+    browser is free to keep animating the transform on the main thread and
+    the SMIL problem comes straight back.
+    """
+    return (
+        '<style>'
+        + ''.join(rules)
+        + '.bird-drift{will-change:transform}'
+        + '@media (prefers-reduced-motion:reduce)'
+        + '{.bird-drift{animation:none}}'
+        + '</style>'
     )
 
 
@@ -2747,18 +2771,20 @@ def _render_timeline_birds(timeline: GardenTimeline) -> str:
         return ''
     slots = _bird_slots(flock, sun)
     elements = []
+    rules = []
     for index, (bird, (x, y, size)) in enumerate(
         zip(flock, slots, strict=True)
     ):
         dx, dy = _bird_drift(index, x, y, size, sun)
-        animate = _bird_drift_animate(index, dx, dy)
+        rules.append(_bird_drift_rule(index, dx, dy))
         elements.append(
             f'<g class="bird">'
             f'{_title(_bird_label(bird, timeline.cartoon_since))}'
-            f'<g transform="translate(0,0)">{animate}'
+            f'<g class="bird-drift bird-drift-{index}">'
             f'{_render_bird(x, y, size)}</g></g>'
         )
-    return f'<g class="birds">{"".join(elements)}</g>'
+    style = _bird_drift_style(rules)
+    return f'<g class="birds">{style}{"".join(elements)}</g>'
 
 
 def _bush_day_radii(
