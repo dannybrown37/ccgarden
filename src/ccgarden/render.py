@@ -62,9 +62,21 @@ FLOWER_CENTER_COLOR = '#5a3d1a'
 FLOWER_RADIUS = 5.0
 
 # One cloud per model used, sized by how many tokens that model produced.
-CLOUD_MARGIN = 50.0
-CLOUD_Y_MIN = 50.0
-CLOUD_Y_MAX = 150.0
+CLOUD_MARGIN = 24.0
+CLOUD_Y_MIN = 40.0
+# The tallest branch plus its canopy reaches into the top of the sky right
+# above the trunk, so clouds are laid out in two bands either side of a
+# keep-out column centered on the trunk rather than straight across the
+# width. Half-width covers the trunk plus the reach of a near-vertical
+# max-length branch's canopy, so even the biggest tree only clips the
+# inside edge of a cloud instead of swallowing it whole.
+CLOUD_TREE_KEEPOUT_HALF_WIDTH = 170.0
+# How far down a cloud may drift, as a function of how far its slot sits
+# from the trunk. Right beside the keep-out column the tree's outer
+# branches are still climbing, so clouds stay high; out at the frame edges
+# the sky is clear all the way down and small clouds can use it.
+CLOUD_Y_MAX_NEAR_TREE = 150.0
+CLOUD_Y_MAX_AT_EDGE = 330.0
 CLOUD_RADIUS_MIN = 16.0
 CLOUD_RADIUS_MAX = 60.0
 CLOUD_TOKENS_SATURATION = 6_000_000
@@ -590,24 +602,69 @@ def _render_cloud(
     return f'<g transform="translate({cx:.1f},{cy:.1f})">{puffs}</g>'
 
 
+def _cloud_bands() -> tuple[tuple[float, float], tuple[float, float]]:
+    """The (start, end) x spans of the sky left and right of the tree."""
+    left = (CLOUD_MARGIN, TRUNK_CENTER_X - CLOUD_TREE_KEEPOUT_HALF_WIDTH)
+    right = (
+        TRUNK_CENTER_X + CLOUD_TREE_KEEPOUT_HALF_WIDTH,
+        VIEWBOX_WIDTH - CLOUD_MARGIN,
+    )
+    return left, right
+
+
+def _cloud_slot_x(fraction: float) -> float:
+    """The x for a slot `fraction` of the way through the usable sky.
+
+    The two bands are treated as one continuous run so slots stay evenly
+    spread overall, they just skip the column of sky the tree grows into.
+    """
+    (left_start, left_end), (right_start, right_end) = _cloud_bands()
+    left_width = max(left_end - left_start, 0.0)
+    right_width = max(right_end - right_start, 0.0)
+    offset = fraction * (left_width + right_width)
+    if offset <= left_width:
+        return left_start + offset
+    return right_start + (offset - left_width)
+
+
+def _cloud_y_max(x: float) -> float:
+    """How far down the sky a cloud at this x may drift.
+
+    Ramps from `CLOUD_Y_MAX_NEAR_TREE` at the edge of the keep-out column
+    out to `CLOUD_Y_MAX_AT_EDGE` at the frame's sides, following the way
+    the tree's outer branches slope down away from the trunk.
+    """
+    distance = abs(x - TRUNK_CENTER_X)
+    span = TRUNK_CENTER_X - CLOUD_MARGIN - CLOUD_TREE_KEEPOUT_HALF_WIDTH
+    if span <= 0:
+        return CLOUD_Y_MAX_NEAR_TREE
+    fraction = min(
+        max((distance - CLOUD_TREE_KEEPOUT_HALF_WIDTH) / span, 0.0), 1.0
+    )
+    return (
+        CLOUD_Y_MAX_NEAR_TREE
+        + (CLOUD_Y_MAX_AT_EDGE - CLOUD_Y_MAX_NEAR_TREE) * fraction
+    )
+
+
 def _cloud_positions(count: int) -> list[tuple[float, float]]:
     """Deterministic (x, y) sky slot for each of `count` clouds.
 
-    Spread evenly across the width like the flower floor, with per-slot
-    jitter so a full sky of models doesn't read as a mechanical grid.
-    Shuffled before returning so slot order doesn't line up with the
-    caller's (biggest-model-first) list order -- otherwise every render
-    reads as a strict big-to-small gradient across the sky instead of a
-    scattered distribution of sizes.
+    Spread evenly across the two sky bands either side of the trunk's
+    keep-out column (see `_cloud_slot_x`), with per-slot jitter so a full
+    sky of models doesn't read as a mechanical grid, and a per-slot depth
+    that opens up toward the frame edges (see `_cloud_y_max`). Shuffled
+    before returning so slot order doesn't line up with the caller's
+    (biggest-model-first) list order -- otherwise every render reads as a
+    strict big-to-small gradient across the sky instead of a scattered
+    distribution of sizes.
     """
-    usable_width = VIEWBOX_WIDTH - CLOUD_MARGIN * 2
     positions = []
     for index in range(count):
         rng = random.Random(f'ccgarden-cloud-slot:{index}')
-        x = CLOUD_MARGIN + usable_width * (
-            (index + rng.uniform(0.25, 0.75)) / count
-        )
-        y = CLOUD_Y_MIN + rng.uniform(0.0, CLOUD_Y_MAX - CLOUD_Y_MIN)
+        x = _cloud_slot_x((index + rng.uniform(0.25, 0.75)) / count)
+        y_max = _cloud_y_max(x)
+        y = CLOUD_Y_MIN + rng.uniform(0.0, y_max - CLOUD_Y_MIN)
         positions.append((x, y))
     random.Random('ccgarden-cloud-order').shuffle(positions)
     return positions

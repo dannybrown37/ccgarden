@@ -2,6 +2,7 @@ import re
 
 import pytest
 
+
 from ccgarden.data import (
     DayRing,
     GardenData,
@@ -13,12 +14,17 @@ from ccgarden.data import (
     ToolUsageDay,
 )
 from ccgarden.render import (
+    CLOUD_MARGIN,
     CLOUD_TOKENS_SATURATION,
+    CLOUD_TREE_KEEPOUT_HALF_WIDTH,
+    CLOUD_Y_MAX_AT_EDGE,
+    CLOUD_Y_MAX_NEAR_TREE,
     LEAVES_PER_SESSION,
     MAX_BUSHES,
     SUN_HALO_RADIUS_FACTOR,
     SUN_TOKENS_SATURATION,
     TIMELINE_VIEWBOX_HEIGHT,
+    TRUNK_CENTER_X,
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
     _bush_radius,
@@ -26,6 +32,7 @@ from ccgarden.render import (
     _cache_efficiency_flower_count,
     _cloud_positions,
     _cloud_radius,
+    _cloud_y_max,
     _sun_radius,
     render_svg,
     render_timeline_svg,
@@ -252,6 +259,20 @@ def test_cloud_positions_are_scattered_not_sorted_left_to_right() -> None:
 
 def test_cloud_positions_are_deterministic_across_calls() -> None:
     assert _cloud_positions(6) == _cloud_positions(6)
+
+
+def test_cloud_positions_avoid_the_column_the_tree_grows_into() -> None:
+    for count in range(1, 13):
+        for x, _ in _cloud_positions(count):
+            assert abs(x - TRUNK_CENTER_X) >= CLOUD_TREE_KEEPOUT_HALF_WIDTH
+
+
+def test_cloud_positions_hang_lower_the_further_from_the_tree() -> None:
+    near = TRUNK_CENTER_X + CLOUD_TREE_KEEPOUT_HALF_WIDTH
+    edge = VIEWBOX_WIDTH - CLOUD_MARGIN
+
+    assert _cloud_y_max(near) == CLOUD_Y_MAX_NEAR_TREE
+    assert _cloud_y_max(edge) == CLOUD_Y_MAX_AT_EDGE
 
 
 def test_render_svg_draws_no_clouds_without_models() -> None:
