@@ -34,11 +34,14 @@ Hover (or tap, on mobile) any shape for the exact numbers behind it.
 ## Install
 
 ```sh
-uv sync
+uv tool install ccgarden
 ```
 
-This installs two commands into the project's virtualenv: `ccgarden` and
+(or `pipx install ccgarden`). This installs two commands: `ccgarden` and
 `ccstats`.
+
+To hack on it instead, clone the repo and run `uv sync`, which puts the
+same two commands in the project's virtualenv.
 
 ## Usage
 
@@ -78,3 +81,7 @@ Run `uv run ccstats --help` for the full list of flags.
 uv run pytest
 uv run ruff check .
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).
