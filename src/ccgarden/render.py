@@ -155,6 +155,23 @@ BUSH_PUFFS = (
     (0.28, -0.55, 0.5),
 )
 
+# One sunflower per repo, standing as tall as that repo's prompt count.
+# Prompts are the one thing *you* contribute rather than the tree, so they
+# get a plant of their own instead of another dimension on the branches.
+# Sunflowers are planted in the two flank bands either side of the tree --
+# the widest stretch of empty ground in the frame, and far enough from the
+# trunk that a tall stalk rises into open sky rather than into the canopy.
+MAX_SUNFLOWERS = 8
+SUNFLOWER_MARGIN = 20.0
+SUNFLOWER_BAND_WIDTH = 150.0
+SUNFLOWER_HEIGHT_MIN = 70.0
+SUNFLOWER_HEIGHT_MAX = 200.0
+SUNFLOWER_PROMPTS_SATURATION = 1500
+SUNFLOWER_GROWTH_EXPONENT = 0.6
+SUNFLOWER_PETAL_COUNT = 12
+SUNFLOWER_PETAL_COLORS = ('#f5b731', '#f0a92a', '#ffc94d')
+SUNFLOWER_STALK_COLOR = '#4f8f4f'
+
 TOOLTIP_PAD = 8.0
 TOOLTIP_FONT_SIZE = 13.0
 TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
@@ -866,6 +883,144 @@ def _render_bushes(tools: list[ToolBush]) -> str:
     )
 
 
+def _sunflower_height(prompts: int) -> float:
+    """A repo's sunflower height, growing toward a cap without flattening.
+
+    Same shape as `_bush_radius` and for the same reason: prompt counts
+    are top-heavy across repos (one main project usually dwarfs the rest),
+    so a fractional exponent above 0.5 keeps the busiest repo visibly the
+    tallest while a barely-touched repo still gets a stalk you can see.
+    """
+    growth = (
+        min(prompts, SUNFLOWER_PROMPTS_SATURATION)
+        / SUNFLOWER_PROMPTS_SATURATION
+    ) ** SUNFLOWER_GROWTH_EXPONENT
+    return (
+        SUNFLOWER_HEIGHT_MIN
+        + (SUNFLOWER_HEIGHT_MAX - SUNFLOWER_HEIGHT_MIN) * growth
+    )
+
+
+def _sunflower_x_positions(count: int) -> list[float]:
+    """Ground-line x slot for each of `count` sunflowers, alternating sides.
+
+    Two bands, one per flank, filled alternately so the sunflowers stay
+    balanced either side of the trunk however many repos there are --
+    filling one band before starting the other would leave a lone
+    left-hand thicket for anyone with five repos.
+    """
+    left_count = math.ceil(count / 2)
+    right_count = count - left_count
+    positions: list[float] = []
+    for side_index, side_count in ((0, left_count), (1, right_count)):
+        band_start = (
+            SUNFLOWER_MARGIN
+            if side_index == 0
+            else VIEWBOX_WIDTH - SUNFLOWER_MARGIN - SUNFLOWER_BAND_WIDTH
+        )
+        for index in range(side_count):
+            rng = random.Random(
+                f'ccgarden-sunflower-slot:{side_index}:{index}'
+            )
+            positions.append(
+                band_start
+                + SUNFLOWER_BAND_WIDTH
+                * ((index + rng.uniform(0.25, 0.75)) / side_count)
+            )
+    # Interleave the two bands back into the caller's (prompts-descending)
+    # order, so the tallest sunflowers don't all end up on one side.
+    interleaved: list[float] = []
+    for index in range(count):
+        side, slot = index % 2, index // 2
+        interleaved.append(
+            positions[slot] if side == 0 else positions[left_count + slot]
+        )
+    return interleaved
+
+
+def _render_sunflower(
+    cx: float, base_y: float, height: float, seed: str
+) -> str:
+    """One sunflower, rooted at (cx, base_y) and growing upward.
+
+    Laid out relative to a (0, 0) ground-contact point like `_render_bush`,
+    so a caller can scale the whole group to grow it up out of the soil
+    instead of expanding it symmetrically about its middle.
+    """
+    rng = random.Random(seed)
+    lean = rng.uniform(-0.16, 0.16) * height
+    head_x = lean
+    head_y = -height
+    head_radius = height * 0.115
+    stalk_width = max(2.0, height * 0.035)
+
+    parts = [
+        (
+            f'<path d="M0,0 Q{lean * 0.3:.1f},{-height * 0.55:.1f} '
+            f'{head_x:.1f},{head_y:.1f}" fill="none" '
+            f'stroke="{SUNFLOWER_STALK_COLOR}" '
+            f'stroke-width="{stalk_width:.2f}" stroke-linecap="round" />'
+        )
+    ]
+    for leaf_index, frac in enumerate((0.36, 0.6)):
+        side = 1 if leaf_index % 2 == 0 else -1
+        leaf_x = lean * frac * 0.4 + side * height * 0.07
+        leaf_y = -height * frac
+        leaf_scale = height * 0.1
+        parts.append(
+            f'<g transform="translate({leaf_x:.1f},{leaf_y:.1f}) '
+            f'rotate({side * 68}) scale({leaf_scale:.2f})">'
+            f'<path d="{LEAF_SHAPE_D}" fill="{SUNFLOWER_STALK_COLOR}" '
+            f'opacity="0.9" />'
+            f'</g>'
+        )
+
+    angle_offset = rng.uniform(0, 360 / SUNFLOWER_PETAL_COUNT)
+    for petal_index in range(SUNFLOWER_PETAL_COUNT):
+        angle = angle_offset + petal_index * (360 / SUNFLOWER_PETAL_COUNT)
+        color = SUNFLOWER_PETAL_COLORS[
+            petal_index % len(SUNFLOWER_PETAL_COLORS)
+        ]
+        parts.append(
+            f'<ellipse cx="{head_x:.1f}" cy="{head_y:.1f}" '
+            f'rx="{head_radius * 0.95:.2f}" ry="{head_radius * 0.36:.2f}" '
+            f'fill="{color}" opacity="0.94" '
+            f'transform="rotate({angle:.1f} {head_x:.1f} {head_y:.1f})" />'
+        )
+    parts.append(
+        f'<circle cx="{head_x:.1f}" cy="{head_y:.1f}" '
+        f'r="{head_radius * 0.52:.2f}" fill="{FLOWER_CENTER_COLOR}" />'
+    )
+    return (
+        f'<g transform="translate({cx:.1f},{base_y:.1f})">{"".join(parts)}</g>'
+    )
+
+
+def _sunflower_repos(branches: list[RepoBranch]) -> list[RepoBranch]:
+    """The repos that get a sunflower, tallest (most prompts) first."""
+    with_prompts = [branch for branch in branches if branch.prompts > 0]
+    with_prompts.sort(key=lambda branch: branch.prompts, reverse=True)
+    return with_prompts[:MAX_SUNFLOWERS]
+
+
+def _render_sunflowers(branches: list[RepoBranch]) -> str:
+    repos = _sunflower_repos(branches)
+    if not repos:
+        return ''
+    xs = _sunflower_x_positions(len(repos))
+    parts = []
+    for x, branch in zip(xs, repos, strict=True):
+        plant = _render_sunflower(
+            x, GROUND_Y, _sunflower_height(branch.prompts), branch.repo
+        )
+        parts.append(
+            '<g class="sunflower">'
+            f'{_title(f"{branch.repo} — {branch.prompts:,} prompts")}'
+            f'{plant}</g>'
+        )
+    return ''.join(parts)
+
+
 def _render_trunk(base_half_width: float) -> str:
     top_half_width = base_half_width * TRUNK_TOP_TAPER
     cx = TRUNK_CENTER_X
@@ -1421,7 +1576,7 @@ LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
 LEGEND_X = 14.0
 LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
 LEGEND_PADDING = 10.0
-LEGEND_COLUMNS = 4
+LEGEND_COLUMNS = 5
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
@@ -1458,6 +1613,11 @@ LEGEND_ROWS = (
         'Sun',
         ('rises + grows w/', 'total all-in tokens'),
         'sun',
+    ),
+    (
+        'Sunflowers',
+        ('one per repo;', 'taller = more prompts'),
+        'sunflower',
     ),
 )
 
@@ -1513,6 +1673,10 @@ def _legend_icon_sun(cx: float, cy: float) -> str:
     return _render_sun(cx, cy, 6.0)
 
 
+def _legend_icon_sunflower(cx: float, cy: float) -> str:
+    return _render_sunflower(cx, cy + 8.0, 16.0, 'legend-sunflower')
+
+
 LEGEND_ICON_RENDERERS = {
     'trunk': _legend_icon_trunk,
     'ring': _legend_icon_ring,
@@ -1522,6 +1686,7 @@ LEGEND_ICON_RENDERERS = {
     'cloud': _legend_icon_cloud,
     'bush': _legend_icon_bush,
     'sun': _legend_icon_sun,
+    'sunflower': _legend_icon_sunflower,
 }
 
 
@@ -1533,9 +1698,10 @@ def _render_legend() -> str:
     """A key panel explaining what each part of the tree represents.
 
     Sits in its own band below the garden viewBox, so it can never overlap
-    the tree, and laid out as a 4x2 grid -- eight columns across one row
+    the tree, and laid out as a 5x2 grid -- every entry across one row
     left barely 90px per entry, which the two- and three-line descriptions
-    overflowed into each other.
+    overflowed into each other, and a third row would need a taller band
+    than the two- and three-line descriptions leave room for.
     """
     column_width = LEGEND_WIDTH / LEGEND_COLUMNS
     row_count = math.ceil(len(LEGEND_ROWS) / LEGEND_COLUMNS)
@@ -1596,6 +1762,9 @@ def render_svg(garden: GardenData) -> str:
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
+        # Sunflowers go down before the bushes so their stalks are rooted
+        # behind the shrubbery rather than standing in front of it.
+        + _render_sunflowers(garden.branches)
         + _render_bushes(garden.tools)
         + _render_flowers_on_bushes(
             flower_count,
@@ -2422,6 +2591,73 @@ def _render_timeline_flowers_on_bushes(
     return f'<g class="flowers" {tt}>{title}{"".join(elements)}</g>'
 
 
+def _render_timeline_sunflowers(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    """Sunflowers growing out of the soil as each repo's prompts accumulate.
+
+    Scaled from the ground-contact point like `_render_timeline_bushes`,
+    so a stalk rises out of the earth rather than inflating in place, and
+    keyed to each day's share of the repo's *final* prompt count for the
+    same reason as `_bush_day_radii`.
+    """
+    repos = _sunflower_repos(
+        [
+            RepoBranch(
+                repo=repo,
+                sessions=0,
+                lines_added=0,
+                lines_removed=0,
+                output_tokens=0,
+                input_tokens=0,
+                cost=0.0,
+                prompts=timeline.branch_days[repo][-1].prompts,
+            )
+            for repo in timeline.branch_order
+        ]
+    )
+    if not repos:
+        return ''
+
+    xs = _sunflower_x_positions(len(repos))
+    elements = []
+    for x, branch in zip(xs, repos, strict=True):
+        days = timeline.branch_days[branch.repo]
+        final_height = _sunflower_height(branch.prompts)
+        final_prompts = days[-1].prompts
+        scale_values = []
+        for day_stat in days:
+            fraction = (
+                min(day_stat.prompts / final_prompts, 1.0)
+                if final_prompts
+                else 1.0
+            )
+            day_height = (
+                SUNFLOWER_HEIGHT_MIN
+                + (final_height - SUNFLOWER_HEIGHT_MIN) * fraction
+            )
+            scale_values.append(f'{day_height / final_height:.4f}')
+        animate = _animate_transform_tag(
+            'scale', scale_values, key_times, duration
+        )
+        plant = _render_sunflower(0, 0, final_height, branch.repo)
+        day_labels = [
+            f'{branch.repo} — {day_stat.prompts:,} prompts'
+            for day_stat in days
+        ]
+        title = _title(day_labels[-1])
+        tt = _tt_attr(day_labels)
+        elements.append(
+            f'<g class="sunflower" {tt} '
+            f'transform="translate({x:.1f},{GROUND_Y})">'
+            f'{title}<g transform="scale(1)">{animate}{plant}</g>'
+            f'</g>'
+        )
+    return ''.join(elements)
+
+
 def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
     """The tree's final state, for the fallback when there's <2 days."""
     rings = [
@@ -2439,6 +2675,7 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
             output_tokens=timeline.branch_days[repo][-1].output_tokens,
             input_tokens=timeline.branch_days[repo][-1].input_tokens,
             cost=timeline.branch_days[repo][-1].cost,
+            prompts=timeline.branch_days[repo][-1].prompts,
         )
         for repo in timeline.branch_order
     ]
@@ -2744,6 +2981,8 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
         )
+        # Behind the bushes -- see the same ordering note in `render_svg`.
+        + _render_timeline_sunflowers(timeline, key_times, duration)
         + _render_timeline_bushes(timeline, key_times, duration)
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         + _render_legend()

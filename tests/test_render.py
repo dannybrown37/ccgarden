@@ -10,6 +10,7 @@ from ccgarden.data import (
     ModelCloud,
     ModelUsageDay,
     RepoBranch,
+    RepoBranchDay,
     ToolBush,
     ToolUsageDay,
 )
@@ -21,8 +22,11 @@ from ccgarden.render import (
     CLOUD_Y_MAX_NEAR_TREE,
     LEAVES_PER_SESSION,
     MAX_BUSHES,
+    MAX_SUNFLOWERS,
     SUN_HALO_RADIUS_FACTOR,
     SUN_TOKENS_SATURATION,
+    SUNFLOWER_BAND_WIDTH,
+    SUNFLOWER_MARGIN,
     TIMELINE_VIEWBOX_HEIGHT,
     TRUNK_CENTER_X,
     VIEWBOX_HEIGHT,
@@ -34,6 +38,8 @@ from ccgarden.render import (
     _cloud_radius,
     _cloud_y_max,
     _sun_radius,
+    _sunflower_height,
+    _sunflower_x_positions,
     render_svg,
     render_timeline_svg,
 )
@@ -318,6 +324,152 @@ def test_render_svg_caps_bushes_at_max_bushes() -> None:
     svg = render_svg(garden)
 
     assert svg.count('class="bush"') == MAX_BUSHES
+
+
+def timeline_with_sunflowers(
+    prompts_by_day: dict[str, list[int]],
+) -> GardenTimeline:
+    day_count = len(next(iter(prompts_by_day.values())))
+    days = [f'2026-07-{20 + i}' for i in range(day_count)]
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1] * day_count,
+        cumulative_sessions=list(range(1, day_count + 1)),
+        branch_order=list(prompts_by_day),
+        branch_days={
+            repo: [
+                RepoBranchDay(
+                    day=day,
+                    sessions=1,
+                    lines_added=10,
+                    lines_removed=1,
+                    output_tokens=100,
+                    input_tokens=10,
+                    cost=0.1,
+                    prompts=prompts,
+                )
+                for day, prompts in zip(days, counts, strict=True)
+            ]
+            for repo, counts in prompts_by_day.items()
+        },
+    )
+
+
+def sunflower_branch(repo: str, *, prompts: int) -> RepoBranch:
+    return RepoBranch(
+        repo=repo,
+        sessions=1,
+        lines_added=100,
+        lines_removed=10,
+        output_tokens=1000,
+        input_tokens=100,
+        cost=1.0,
+        prompts=prompts,
+    )
+
+
+@pytest.mark.parametrize('repo_count', [1, 2, 5])
+def test_render_svg_draws_one_sunflower_per_repo(repo_count: int) -> None:
+    branches = [
+        sunflower_branch(f'repo-{i}', prompts=50) for i in range(repo_count)
+    ]
+    garden = GardenData(rings=[], branches=branches)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="sunflower"') == repo_count
+
+
+def test_render_svg_draws_no_sunflower_for_a_repo_without_prompts() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            sunflower_branch('quiet', prompts=0),
+            sunflower_branch('busy', prompts=10),
+        ],
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="sunflower"') == 1
+    assert 'busy — 10 prompts' in svg
+    assert 'quiet' not in svg.split('class="sunflower"')[1]
+
+
+def test_render_svg_caps_sunflowers_at_max_sunflowers() -> None:
+    branches = [
+        sunflower_branch(f'repo-{i}', prompts=50)
+        for i in range(MAX_SUNFLOWERS + 4)
+    ]
+    garden = GardenData(rings=[], branches=branches)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="sunflower"') == MAX_SUNFLOWERS
+
+
+def test_render_svg_keeps_the_tallest_sunflowers_when_capped() -> None:
+    branches = [
+        sunflower_branch(f'repo-{i}', prompts=i + 1)
+        for i in range(MAX_SUNFLOWERS + 2)
+    ]
+    garden = GardenData(rings=[], branches=branches)
+
+    svg = render_svg(garden)
+
+    # repo-0 and repo-1 have the fewest prompts, so they lose their slot.
+    assert 'repo-0 — 1 prompts' not in svg
+    assert 'repo-1 — 2 prompts' not in svg
+    assert f'repo-{MAX_SUNFLOWERS + 1} — {MAX_SUNFLOWERS + 2} prompts' in svg
+
+
+def test_sunflower_height_grows_with_prompts() -> None:
+    assert _sunflower_height(0) < _sunflower_height(100)
+    assert _sunflower_height(100) < _sunflower_height(5_000)
+
+
+def test_sunflowers_are_planted_in_the_flank_bands() -> None:
+    # The whole point of the sunflowers is the empty ground either side of
+    # the tree -- a slot drifting in toward the trunk would defeat it.
+    left_edge = SUNFLOWER_MARGIN
+    left_inner = SUNFLOWER_MARGIN + SUNFLOWER_BAND_WIDTH
+    right_inner = VIEWBOX_WIDTH - left_inner
+    right_edge = VIEWBOX_WIDTH - SUNFLOWER_MARGIN
+
+    for count in range(1, MAX_SUNFLOWERS + 1):
+        for x in _sunflower_x_positions(count):
+            assert left_edge <= x <= left_inner or right_inner <= x <= (
+                right_edge
+            )
+
+
+def test_sunflowers_alternate_between_the_two_flank_bands() -> None:
+    positions = _sunflower_x_positions(4)
+
+    sides = [x > TRUNK_CENTER_X for x in positions]
+    assert sides == [False, True, False, True]
+
+
+def test_render_timeline_svg_sunflower_carries_per_day_prompt_totals() -> None:
+    timeline = timeline_with_sunflowers({'ccgarden': [2, 5, 9]})
+
+    svg = render_timeline_svg(timeline)
+
+    group = svg.split('class="sunflower"')[1].split('</g>')[0]
+    assert 'ccgarden — 2 prompts' in group
+    assert 'ccgarden — 5 prompts' in group
+    assert 'ccgarden — 9 prompts' in group
+
+
+def test_render_timeline_svg_grows_sunflowers_out_of_the_ground() -> None:
+    timeline = timeline_with_sunflowers({'ccgarden': [1, 500, 1500]})
+
+    svg = render_timeline_svg(timeline)
+
+    block = svg.split('class="sunflower"')[1]
+    scales = [float(value) for value in _animate_values(block, 'transform')]
+    assert scales == sorted(scales)
+    assert scales[-1] == pytest.approx(1.0)
 
 
 def _flower_blocks(svg: str) -> list[str]:
