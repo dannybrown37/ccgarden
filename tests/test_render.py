@@ -1,3 +1,4 @@
+import itertools
 import math
 import re
 
@@ -18,6 +19,10 @@ from ccgarden.data import (
 )
 from ccgarden.render import (
     BIRD_MARGIN,
+    BRANCH_ANGLE_JITTER_DEGREES,
+    BRANCH_LENGTH_MAX,
+    BRANCH_LENGTH_MIN,
+    BRANCH_LINES_SATURATION,
     BIRD_SIZE_MAX,
     BIRD_SIZE_MIN,
     BIRD_TOKENS_SATURATION,
@@ -41,6 +46,10 @@ from ccgarden.render import (
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
     _bird_size,
+    _branch_bow,
+    _branch_endpoint,
+    _branch_length,
+    _branch_placement,
     _bird_positions,
     _bird_slots,
     _bush_radius,
@@ -992,3 +1001,90 @@ def test_render_timeline_svg_without_cartoon_draws_no_birds() -> None:
 
     assert 'class="birds"' not in svg
     assert '>Birds<' not in svg
+
+
+def test_branch_placement_puts_the_longest_branch_lowest() -> None:
+    count = 6
+    ys = [
+        _branch_placement(index, count, f'repo{index}', 20.0).origin_y
+        for index in range(count)
+    ]
+
+    # Branches arrive longest-first, and origin_y grows downwards, so the
+    # heights must descend: longest at the base, stubs in the crown.
+    assert ys == sorted(ys, reverse=True)
+
+
+def test_branch_placement_jitters_height_but_keeps_order() -> None:
+    count = 6
+    placements = [
+        _branch_placement(index, count, f'repo{index}', 20.0)
+        for index in range(count)
+    ]
+
+    ys = [placement.origin_y for placement in placements]
+    assert ys == sorted(ys, reverse=True)
+    # Jitter, not an even ladder: no two gaps come out the same.
+    gaps = [round(b - a, 3) for a, b in itertools.pairwise(ys)]
+    assert len(set(gaps)) == len(gaps)
+    for placement in placements:
+        assert abs(placement.angle_jitter) <= BRANCH_ANGLE_JITTER_DEGREES
+
+
+def test_branch_placement_is_deterministic_per_repo() -> None:
+    first = _branch_placement(2, 5, 'ccgarden', 20.0)
+    second = _branch_placement(2, 5, 'ccgarden', 20.0)
+
+    assert first == second
+    assert _branch_placement(2, 5, 'other', 20.0) != first
+
+
+@pytest.mark.parametrize('side', [-1, 1])
+def test_long_branches_droop_towards_horizontal(side: int) -> None:
+    def pitch(length: float) -> float:
+        end_x, end_y = _branch_endpoint(400.0, 500.0, length, side, 0.5)
+        return math.degrees(math.atan2(500.0 - end_y, abs(end_x - 400.0)))
+
+    assert pitch(BRANCH_LENGTH_MAX) < pitch(BRANCH_LENGTH_MAX * 0.2)
+
+
+@pytest.mark.parametrize('side', [-1, 1])
+def test_branch_endpoint_stays_on_its_own_side(side: int) -> None:
+    end_x, _ = _branch_endpoint(
+        400.0, 500.0, BRANCH_LENGTH_MAX, side, 1.0, angle_jitter=8.0
+    )
+
+    assert (end_x - 400.0) * side > 0
+
+
+def test_branch_bow_sags_harder_as_a_branch_lengthens() -> None:
+    short = _branch_bow(BRANCH_LENGTH_MAX * 0.2, 1, 0.5)
+    long = _branch_bow(BRANCH_LENGTH_MAX, 1, 0.5)
+
+    assert 0 < short < long
+    # Both flanks sag, so the sign follows `side`.
+    assert _branch_bow(BRANCH_LENGTH_MAX, -1, 0.5) == -long
+
+
+def test_branch_length_compresses_the_dominant_repo() -> None:
+    small = _branch_length(600)
+    large = _branch_length(6000)
+
+    # 10x the lines must still read as clearly longer...
+    assert large > small * 1.5
+    # ...but not so much longer that it owns the whole crown, which is what
+    # the old power curve did.
+    assert large < small * 2.5
+
+
+def test_branch_length_is_monotonic_and_bounded() -> None:
+    lengths = [
+        _branch_length(lines)
+        for lines in (0, 100, 500, 2_000, BRANCH_LINES_SATURATION, 10**6)
+    ]
+
+    assert lengths == sorted(lengths)
+    assert lengths[0] == pytest.approx(BRANCH_LENGTH_MIN)
+    assert lengths[-1] == pytest.approx(BRANCH_LENGTH_MAX)
+    # Saturation is a cap, not a cliff.
+    assert lengths[-1] == pytest.approx(lengths[-2])

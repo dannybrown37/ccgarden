@@ -4,7 +4,7 @@ import datetime
 import json
 import math
 import random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from ccgarden.data import (
     CartoonBird,
@@ -37,8 +37,29 @@ BRANCH_ZONE_HEIGHT = 220
 BRANCH_LENGTH_MIN = 30.0
 BRANCH_LENGTH_MAX = 230.0
 BRANCH_LINES_SATURATION = 6000
-BRANCH_LENGTH_EXPONENT = 0.7
+# Lines added below which `_branch_length` grows quickly, and above which it
+# compresses. Tune this rather than the min/max pair to rebalance the crown.
+BRANCH_LENGTH_LOG_KNEE = 400.0
 BRANCH_SPREAD_DEGREES = 55.0
+# Strictly alternating branches at evenly interpolated angles read as a
+# ladder rather than a tree, so each branch gets a seeded nudge to both its
+# height on the trunk and its exit angle. Both are derived from the repo
+# name, so the same db still renders the same garden.
+BRANCH_ANGLE_JITTER_DEGREES = 8.0
+# As a fraction of the gap between two neighbouring branch origins -- kept
+# under half a gap so jitter can never reorder branches up the trunk.
+BRANCH_Y_JITTER_FRACTION = 0.4
+# A long branch carries more foliage, so it sags. Most of that sag lives in
+# the belly of the branch (BRANCH_BOW_*, below) rather than the exit angle,
+# which only tips this far towards horizontal at BRANCH_LENGTH_MAX -- a
+# branch that leaves the trunk low and still lifts its tip is the vase
+# shape real trees make as they grow back towards the light. Putting all the
+# sag in the angle instead just flattened everything.
+BRANCH_DROOP_DEGREES = 9.0
+# Lateral belly of a branch as a fraction of its length, ramping from short
+# (nearly straight) to BRANCH_LENGTH_MAX (a pronounced sag).
+BRANCH_BOW_FRACTION_MIN = 0.07
+BRANCH_BOW_FRACTION_MAX = 0.2
 BRANCH_TIP_WIDTH = 1.6
 BRANCH_WIDTH_MIN = 2.2
 BRANCH_WIDTH_MAX = 7.0
@@ -334,20 +355,24 @@ def _ring_stroke_width(sessions: int) -> float:
 def _branch_length(lines_added: int) -> float:
     """A branch's length for a repo with this many cumulative lines added.
 
-    A pure linear mapping reads as proportional but leaves every branch
-    looking stubby for realistic lines-added totals, since none of them
-    get near BRANCH_LINES_SATURATION; a pure sqrt curve fixes the
-    stubbiness but compresses the ratios between repos too much (a repo
-    with 17x the lines of another only ends up ~2.7x longer). Raising
-    the fraction to BRANCH_LENGTH_EXPONENT (between the two) is a happy
-    medium: smaller totals still get boosted off the floor, but relative
-    differences between repos stay much closer to their real ratio than
-    sqrt allows.
+    Lines added are distributed like most repo metrics: one or two repos
+    carry an order of magnitude more than the rest. A linear mapping leaves
+    every branch stubby, and a power curve (this used to be
+    fraction ** 0.7) still hands the dominant repo most of the available
+    length, which is what left the crown lopsided -- one branch at the cap
+    and a fan of short ones under it.
+
+    A log curve balances that: it climbs steeply below
+    BRANCH_LENGTH_LOG_KNEE, so a modest repo still gets a branch with real
+    presence, then compresses hard above it, so a 10x bigger repo reads as
+    clearly bigger without running away with the frame. Relative ratios
+    shrink -- that is the point. Absolute proportionality lives in the
+    tooltip; the silhouette is for balance.
     """
-    fraction = (
-        min(lines_added, BRANCH_LINES_SATURATION) / BRANCH_LINES_SATURATION
+    lines = min(lines_added, BRANCH_LINES_SATURATION)
+    growth = math.log1p(lines / BRANCH_LENGTH_LOG_KNEE) / math.log1p(
+        BRANCH_LINES_SATURATION / BRANCH_LENGTH_LOG_KNEE
     )
-    growth = fraction**BRANCH_LENGTH_EXPONENT
     return BRANCH_LENGTH_MIN + (BRANCH_LENGTH_MAX - BRANCH_LENGTH_MIN) * growth
 
 
@@ -1383,16 +1408,86 @@ def _render_rings(rings: list[DayRing], base_half_width: float) -> str:
     return ''.join(elements)
 
 
+class _BranchPlacement(NamedTuple):
+    """Where a repo's branch leaves the trunk, and at what pitch.
+
+    Shared by the static and timeline renderers so both trees put the same
+    repo in the same place -- the timeline is the same tree, grown.
+    """
+
+    origin_x: float
+    origin_y: float
+    side: int
+    spread_index: float
+    angle_jitter: float
+
+
+def _branch_placement(
+    index: int, count: int, repo: str, base_half_width: float
+) -> _BranchPlacement:
+    side = -1 if index % 2 == 0 else 1
+    rng = random.Random(f'{repo}:place')
+    spacing = 1.0 / max(count, 2)
+    # Branches arrive ordered by lines added, descending -- so index 0 is the
+    # longest, and it belongs at the *bottom* of the zone. Reading the order
+    # straight through put the longest branches at the top and the stubs at
+    # the base, which is an upside-down cone: the tips traced two rays
+    # diverging upwards and the whole tree read as a V. Longest-lowest gives
+    # the broad-at-the-bottom silhouette a real crown has.
+    y_fraction = (
+        1.0
+        - index / max(count - 1, 1)
+        + rng.uniform(-BRANCH_Y_JITTER_FRACTION, BRANCH_Y_JITTER_FRACTION)
+        * spacing
+    )
+    y_fraction = min(max(y_fraction, 0.0), 1.0)
+    origin_y = TRUNK_TOP_Y + y_fraction * BRANCH_ZONE_HEIGHT
+    origin_half_width = _half_width_at(origin_y, base_half_width)
+    return _BranchPlacement(
+        origin_x=TRUNK_CENTER_X + origin_half_width * side * 0.5,
+        origin_y=origin_y,
+        side=side,
+        spread_index=y_fraction,
+        angle_jitter=rng.uniform(
+            -BRANCH_ANGLE_JITTER_DEGREES, BRANCH_ANGLE_JITTER_DEGREES
+        ),
+    )
+
+
+def _branch_bow(length: float, side: int, bow_factor: float) -> float:
+    """How far a branch's midpoint sags off the straight origin-tip line.
+
+    Signed by `side` because the perpendicular that `_branch_shape_points`
+    offsets along points downwards on the right flank and upwards on the
+    left, so `* side` is what makes both flanks sag rather than one of them
+    arching over.
+    """
+    load = min(length / BRANCH_LENGTH_MAX, 1.0)
+    fraction = (
+        BRANCH_BOW_FRACTION_MIN
+        + (BRANCH_BOW_FRACTION_MAX - BRANCH_BOW_FRACTION_MIN) * load
+    )
+    return length * fraction * side * (0.7 + 0.6 * bow_factor)
+
+
 def _branch_endpoint(
     origin_x: float,
     origin_y: float,
     length: float,
     side: int,
     spread_index: float,
+    *,
+    angle_jitter: float = 0.0,
 ) -> tuple[float, float]:
-    angle_deg = 90 - (
-        BRANCH_SPREAD_DEGREES * side * (0.4 + 0.6 * spread_index)
+    # One side-relative spread term carries all three contributions, so a
+    # bigger number always means "further from vertical" on either flank.
+    droop = BRANCH_DROOP_DEGREES * min(length / BRANCH_LENGTH_MAX, 1.0)
+    spread = (
+        BRANCH_SPREAD_DEGREES * (0.4 + 0.6 * spread_index)
+        + angle_jitter
+        + droop
     )
+    angle_deg = 90 - side * spread
     angle_rad = math.radians(angle_deg)
     end_x = origin_x + length * (1 if side > 0 else -1) * abs(
         math.cos(angle_rad)
@@ -1551,21 +1646,29 @@ def _render_branches_and_leaves(
     ]
     count = len(branches)
     for index, repo_branch in enumerate(branches):
-        side = -1 if index % 2 == 0 else 1
-        y_fraction = index / max(count - 1, 1)
-        origin_y = TRUNK_TOP_Y + y_fraction * BRANCH_ZONE_HEIGHT
-        origin_half_width = _half_width_at(origin_y, base_half_width)
-        origin_x = TRUNK_CENTER_X + origin_half_width * side * 0.5
+        placement = _branch_placement(
+            index, count, repo_branch.repo, base_half_width
+        )
+        origin_x, origin_y, side = (
+            placement.origin_x,
+            placement.origin_y,
+            placement.side,
+        )
 
         length = _branch_length(repo_branch.lines_added)
         end_x, end_y = _branch_endpoint(
-            origin_x, origin_y, length, side, y_fraction
+            origin_x,
+            origin_y,
+            length,
+            side,
+            placement.spread_index,
+            angle_jitter=placement.angle_jitter,
         )
         base_width = _branch_width(
             repo_branch.output_tokens + repo_branch.input_tokens
         )
         curve_rng = random.Random(f'{repo_branch.repo}:curve')
-        bow = length * 0.08 * side * (0.7 + 0.6 * curve_rng.random())
+        bow = _branch_bow(length, side, curve_rng.random())
         root_overlap = base_width * 0.9
 
         shape_d = _render_branch_shape(
@@ -2305,11 +2408,14 @@ def _render_timeline_branches_and_leaves(
     ]
     count = len(timeline.branch_order)
     for index, repo in enumerate(timeline.branch_order):
-        side = -1 if index % 2 == 0 else 1
-        y_fraction = index / max(count - 1, 1)
-        origin_y = TRUNK_TOP_Y + y_fraction * BRANCH_ZONE_HEIGHT
-        origin_half_width = _half_width_at(origin_y, final_base_half_width)
-        origin_x = TRUNK_CENTER_X + origin_half_width * side * 0.5
+        placement = _branch_placement(
+            index, count, repo, final_base_half_width
+        )
+        origin_x, origin_y, side = (
+            placement.origin_x,
+            placement.origin_y,
+            placement.side,
+        )
         bow_factor = random.Random(f'{repo}:curve').random()
 
         days = timeline.branch_days[repo]
@@ -2378,14 +2484,22 @@ def _render_timeline_branches_and_leaves(
                 BRANCH_LENGTH_MIN
                 + (final_length - BRANCH_LENGTH_MIN) * length_fraction
             )
+            # `length` is the day's grown length, so the droop baked into
+            # `_branch_endpoint` deepens over the timelapse: a branch sags
+            # as it puts on foliage.
             end_x, end_y = _branch_endpoint(
-                origin_x, origin_y, length, side, y_fraction
+                origin_x,
+                origin_y,
+                length,
+                side,
+                placement.spread_index,
+                angle_jitter=placement.angle_jitter,
             )
             base_width = (
                 BRANCH_WIDTH_MIN
                 + (final_width - BRANCH_WIDTH_MIN) * width_fraction
             )
-            bow = length * 0.08 * side * (0.7 + 0.6 * bow_factor)
+            bow = _branch_bow(length, side, bow_factor)
             root_overlap = base_width * 0.9
             d_values.append(
                 _render_branch_shape(
@@ -2430,20 +2544,7 @@ def _render_timeline_branches_and_leaves(
         collar_animate = _animate_tag(
             'd', collar_d_values, key_times, duration
         )
-        day_labels = []
-        for day_stat in days:
-            day_tokens = day_stat.output_tokens + day_stat.input_tokens
-            avg_turns = (
-                day_stat.prompts / day_stat.sessions
-                if day_stat.sessions
-                else 0.0
-            )
-            day_labels.append(
-                f'{repo} — {day_stat.sessions} sessions, '
-                f'+{day_stat.lines_added:,}/-{day_stat.lines_removed:,} '
-                f'lines, {day_tokens:,} tokens, ${day_stat.cost:,.2f}, '
-                f'{avg_turns:.1f} turns/session'
-            )
+        day_labels = _branch_day_labels(repo, days)
         title = _title(day_labels[-1])
         tt = _tt_attr(day_labels)
         collar = (
@@ -2473,6 +2574,23 @@ def _render_timeline_branches_and_leaves(
             f'{title}{collar}{branch_path}{leaves}</g>'
         )
     return ''.join(elements)
+
+
+def _branch_day_labels(repo: str, days: list[RepoBranchDay]) -> list[str]:
+    """One tooltip line per day for a repo's branch."""
+    labels = []
+    for day_stat in days:
+        day_tokens = day_stat.output_tokens + day_stat.input_tokens
+        avg_turns = (
+            day_stat.prompts / day_stat.sessions if day_stat.sessions else 0.0
+        )
+        labels.append(
+            f'{repo} — {day_stat.sessions} sessions, '
+            f'+{day_stat.lines_added:,}/-{day_stat.lines_removed:,} '
+            f'lines, {day_tokens:,} tokens, ${day_stat.cost:,.2f}, '
+            f'{avg_turns:.1f} turns/session'
+        )
+    return labels
 
 
 def _render_timeline_leaves(  # noqa: PLR0915
