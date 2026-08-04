@@ -45,6 +45,11 @@ grows. Adding a new shape means: new daily table → `_load_*` + `_load_*_days`
 - Animation is declarative SMIL (`_animate_tag`, `_animate_transform_tag`)
   over `_key_times` — no JS timers. The scrubber and tap-tooltip are the
   only inline-script parts.
+- The timeline starts on a synthetic empty day (`_with_seed_day`) and every
+  shape is sized through `_grown_size`, which is zero — not the min — before
+  a shape's first day of data, so the timelapse grows out of bare ground.
+  Values animated as `d` must stay interpolable (a degenerate path, never an
+  empty one) or SMIL falls back to discrete step-per-day snapping.
 - Layout is deterministic given the data: positions come from seeded/derived
   jitter helpers, never `random` at render time, so the same db renders the
   same garden.

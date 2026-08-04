@@ -312,6 +312,31 @@ def _trunk_half_width(total_sessions: int) -> float:
     )
 
 
+def _grown_size(
+    value: float,
+    final_value: float,
+    minimum: float,
+    final_size: float,
+) -> float:
+    """A shape's size on a day it has `value` of its eventual `final_value`.
+
+    Interpolates from the shape's minimum up to its final size -- but a
+    shape with nothing behind it yet has size zero, not the minimum. The
+    minimum is what a shape looks like once it exists; before its first
+    day of data (notably the timeline's empty day 0) it hasn't sprouted,
+    so the whole garden grows out of bare ground rather than fading up
+    from a pre-arranged set of seedlings.
+    """
+    # A shape that never accumulates anything (final_value of zero) is
+    # still a shape -- it just sits at its minimum the whole way, as it
+    # always has. Only a shape that *will* grow is held back to nothing.
+    if not final_value:
+        return final_size
+    if value <= 0:
+        return 0.0
+    return minimum + (final_size - minimum) * min(value / final_value, 1.0)
+
+
 def _trunk_half_widths_for_timeline(
     cumulative_sessions: list[int],
 ) -> list[float]:
@@ -327,10 +352,13 @@ def _trunk_half_widths_for_timeline(
     always starts near the minimum and grows into the real final width.
     """
     final_width = _trunk_half_width(cumulative_sessions[-1])
-    final_total = cumulative_sessions[-1] or 1
     return [
-        TRUNK_BASE_HALF_WIDTH_MIN
-        + (final_width - TRUNK_BASE_HALF_WIDTH_MIN) * (sessions / final_total)
+        _grown_size(
+            sessions,
+            cumulative_sessions[-1],
+            TRUNK_BASE_HALF_WIDTH_MIN,
+            final_width,
+        )
         for sessions in cumulative_sessions
     ]
 
@@ -2297,6 +2325,16 @@ def _bark_stripe_d(
     )
 
 
+def _outline_widths(
+    base_half_width_by_day: list[float], width: float
+) -> list[str]:
+    """Per-day stroke widths that vanish on days the trunk has no width."""
+    return [
+        f'{width if half_width > 0 else 0.0:.2f}'
+        for half_width in base_half_width_by_day
+    ]
+
+
 def _render_timeline_trunk(
     base_half_width_by_day: list[float],
     key_times: list[float],
@@ -2304,10 +2342,21 @@ def _render_timeline_trunk(
 ) -> str:
     d_values = [_trunk_path_d(width) for width in base_half_width_by_day]
     animate = _animate_tag('d', d_values, key_times, duration)
+    # The outline has to fade in with the trunk: a zero-width trunk is a
+    # degenerate path, and stroking it would draw a hairline the full
+    # height of a tree that hasn't sprouted yet. (Blanking the `d` would
+    # hide it too, but an empty path can't interpolate, which turns the
+    # whole trunk's growth into a discrete step-per-day snap.)
+    stroke_animate = _animate_tag(
+        'stroke-width',
+        _outline_widths(base_half_width_by_day, 1.5),
+        key_times,
+        duration,
+    )
     trunk = (
         f'<path class="trunk" d="{d_values[-1]}" fill="url(#trunkGradient)" '
         f'stroke="#3a2412" stroke-width="1.5" stroke-linejoin="round">'
-        f'{animate}</path>'
+        f'{animate}{stroke_animate}</path>'
     )
     bark = _render_timeline_bark(base_half_width_by_day, key_times, duration)
     return trunk + bark
@@ -2327,9 +2376,15 @@ def _render_timeline_bark(
             for width in base_half_width_by_day
         ]
         animate = _animate_tag('d', d_values, key_times, duration)
+        stroke_animate = _animate_tag(
+            'stroke-width',
+            _outline_widths(base_half_width_by_day, 1.0),
+            key_times,
+            duration,
+        )
         elements.append(
             f'<path d="{d_values[-1]}" fill="none" stroke="#3a2412" '
-            f'stroke-width="1" opacity="0.22">{animate}</path>'
+            f'stroke-width="1" opacity="0.22">{animate}{stroke_animate}</path>'
         )
     return ''.join(elements)
 
@@ -2386,7 +2441,9 @@ def _render_timeline_crown(
     for width in base_half_width_by_day:
         top_half_width = width * TRUNK_TOP_TAPER
         cy = TRUNK_TOP_Y - top_half_width * 0.2
-        radius = max(width * 1.15, 22.0)
+        # The 22.0 floor is the crown's size once it exists; a trunk that
+        # hasn't sprouted yet carries no crown at all.
+        radius = max(width * 1.15, 22.0) if width > 0 else 0.0
         d_values.append(
             _blob_path(cx, cy, radius, random.Random('ccgarden-crown'))
         )
@@ -2773,7 +2830,9 @@ def _sun_day_values(
         fraction = min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
         x = SUN_X_START + (final_x - SUN_X_START) * fraction
         y = SUN_Y_START + (final_y - SUN_Y_START) * fraction
-        radius = SUN_RADIUS_MIN + (final_radius - SUN_RADIUS_MIN) * fraction
+        radius = _grown_size(
+            day_tokens, final_tokens, SUN_RADIUS_MIN, final_radius
+        )
         values.append((x, y, radius))
     return values
 
@@ -2837,11 +2896,8 @@ def _render_timeline_clouds(
         scale_values = []
         for day_stat in days:
             day_tokens = day_stat.output_tokens + day_stat.input_tokens
-            fraction = (
-                min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
-            )
-            day_radius = (
-                CLOUD_RADIUS_MIN + (final_radius - CLOUD_RADIUS_MIN) * fraction
+            day_radius = _grown_size(
+                day_tokens, final_tokens, CLOUD_RADIUS_MIN, final_radius
             )
             scale_values.append(f'{day_radius / final_radius:.4f}')
 
@@ -2918,15 +2974,10 @@ def _bush_day_radii(
     identical reasoning in `_render_timeline_branches_and_leaves`.
     """
     final_count = days[-1].count
-    radii = []
-    for day_stat in days:
-        fraction = (
-            min(day_stat.count / final_count, 1.0) if final_count else 1.0
-        )
-        radii.append(
-            BUSH_RADIUS_MIN + (final_radius - BUSH_RADIUS_MIN) * fraction
-        )
-    return radii
+    return [
+        _grown_size(day_stat.count, final_count, BUSH_RADIUS_MIN, final_radius)
+        for day_stat in days
+    ]
 
 
 def _render_timeline_bushes(
@@ -3107,14 +3158,11 @@ def _render_timeline_sunflowers(
         final_prompts = days[-1].prompts
         scale_values = []
         for day_stat in days:
-            fraction = (
-                min(day_stat.prompts / final_prompts, 1.0)
-                if final_prompts
-                else 1.0
-            )
-            day_height = (
-                SUNFLOWER_HEIGHT_MIN
-                + (final_height - SUNFLOWER_HEIGHT_MIN) * fraction
+            day_height = _grown_size(
+                day_stat.prompts,
+                final_prompts,
+                SUNFLOWER_HEIGHT_MIN,
+                final_height,
             )
             scale_values.append(f'{day_height / final_height:.4f}')
         animate = _animate_transform_tag(

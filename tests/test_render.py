@@ -1,6 +1,7 @@
 import itertools
 import math
 import re
+from dataclasses import replace
 
 import pytest
 
@@ -619,6 +620,48 @@ def test_tap_tooltip_clamps_to_the_timeline_viewbox_height() -> None:
     # scrubber strip); clamping against the short height would push
     # tooltips off the bottom of the garden.
     assert f'var viewHeight = {TIMELINE_VIEWBOX_HEIGHT:.1f};' in svg
+
+
+def test_render_timeline_svg_starts_every_shape_at_nothing() -> None:
+    # A leading day with no data at all -- the empty day 0 the timeline
+    # loader prepends. Every shape has to open the animation at zero
+    # rather than at its minimum size.
+    timeline = timeline_with_tools_and_cache(
+        tool_counts_by_day={'Bash': [0, 20, 30]},
+        cache_read_by_day=[0, 10, 20],
+        cache_write_by_day=[0, 10, 10],
+    )
+    timeline = replace(
+        timeline,
+        daily_sessions=[0, 1, 1],
+        cumulative_sessions=[0, 1, 2],
+        cumulative_total_tokens=[0, 100, 300],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    bush_scale = _first_values(svg.split('class="bush"')[1], 'scale')
+    assert bush_scale[0] == '0.0000'
+    sun_scale = _first_values(svg.split('class="sun"')[1], 'scale')
+    assert sun_scale[0] == '0.0000'
+    # The trunk keeps a real (zero-width, so invisible) path so that `d`
+    # stays interpolable; its outline stroke is what has to vanish.
+    trunk = svg.split('class="trunk"')[1]
+    trunk_d = _first_values(trunk, 'd')
+    assert f'M {TRUNK_CENTER_X:.2f},' in trunk_d[0]
+    assert trunk_d[0] != trunk_d[-1]
+    assert float(_first_values(trunk, 'stroke-width')[0]) == 0.0
+
+
+def _first_values(fragment: str, attribute: str) -> list[str]:
+    """The `values` list of `fragment`'s first animation of `attribute`."""
+    marker = (
+        f'type="{attribute}"'
+        if attribute in {'scale', 'translate'}
+        else f'attributeName="{attribute}"'
+    )
+    tag = fragment.split(marker)[1].split('/>', maxsplit=1)[0]
+    return tag.split('values="')[1].split('"')[0].split(';')
 
 
 def test_render_timeline_svg_bush_carries_per_day_tooltip_data() -> None:
