@@ -2345,6 +2345,10 @@ def _render_timeline_rings(
         return ''
     elements = []
     for index, sessions in enumerate(timeline.daily_sessions):
+        # A day with no sessions grew no ring -- notably the synthetic
+        # day 0 the timeline starts from.
+        if sessions <= 0:
+            continue
         y = GROUND_Y - (index + 1) / (day_count + 1) * TRUNK_HEIGHT
         half_width = _half_width_at(y, final_base_half_width) * 0.85
         cx = TRUNK_CENTER_X

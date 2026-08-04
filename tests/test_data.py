@@ -504,6 +504,30 @@ def test_load_tools_sorts_by_count_descending(tmp_path: Path) -> None:
     ]
 
 
+def test_load_garden_timeline_starts_from_an_empty_seed_day(
+    tmp_path: Path,
+) -> None:
+    totals_rows = [
+        totals_row('2026-07-26', sessions=3, lines_added=10, lines_removed=1),
+    ]
+    repo_rows = [
+        repo_row(
+            '2026-07-26', 'alpha', sessions=3, lines_added=10, lines_removed=1
+        )
+    ]
+    db_path = make_db(tmp_path, totals_rows=totals_rows, repo_rows=repo_rows)
+
+    timeline = load_garden_timeline(db_path)
+
+    assert timeline.days == ['2026-07-25', '2026-07-26']
+    assert timeline.daily_sessions == [0, 3]
+    assert timeline.cumulative_sessions == [0, 3]
+    first_frame = timeline.branch_days['alpha'][0]
+    assert first_frame.day == '2026-07-25'
+    assert first_frame.sessions == 0
+    assert first_frame.lines_added == 0
+
+
 def test_load_garden_timeline_tracks_cumulative_cache_tokens_per_day(
     tmp_path: Path,
 ) -> None:
@@ -529,8 +553,8 @@ def test_load_garden_timeline_tracks_cumulative_cache_tokens_per_day(
 
     timeline = load_garden_timeline(db_path)
 
-    assert timeline.cumulative_cache_read == [300, 500]
-    assert timeline.cumulative_cache_write == [100, 150]
+    assert timeline.cumulative_cache_read == [0, 300, 500]
+    assert timeline.cumulative_cache_write == [0, 100, 150]
 
 
 def test_load_garden_timeline_tracks_cumulative_total_tokens_per_day(
@@ -562,7 +586,7 @@ def test_load_garden_timeline_tracks_cumulative_total_tokens_per_day(
 
     timeline = load_garden_timeline(db_path)
 
-    assert timeline.cumulative_total_tokens == [450, 725]
+    assert timeline.cumulative_total_tokens == [0, 450, 725]
 
 
 def test_load_tools_excludes_tools_with_zero_count(tmp_path: Path) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
 
 from ccgarden.claude_stats import (
     DEFAULT_CARTOON_SINCE,
@@ -223,12 +224,30 @@ def _load_total_tokens(conn: sqlite3.Connection) -> int:
     return row[0]
 
 
+def _with_seed_day(
+    day_rows: list[tuple[str, int, int, int, int, int]],
+) -> list[tuple[str, int, int, int, int, int]]:
+    """Prepend an empty day so the timelapse grows out of bare ground.
+
+    The first recorded day is already a full day's work, so replaying
+    straight from it opens on a garden that has clearly been going for a
+    while. One synthetic all-zero day before it gives the animation a
+    day 0 to start from.
+    """
+    if not day_rows:
+        return day_rows
+    first_day = date.fromisoformat(day_rows[0][0])
+    seed = (str(first_day - timedelta(days=1)), 0, 0, 0, 0, 0)
+    return [seed, *day_rows]
+
+
 def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
     day_rows = conn.execute(
         'SELECT day, sessions, cache_read_tokens, cache_write_tokens, '
         'output_tokens, input_tokens '
         'FROM daily_totals ORDER BY day ASC'
     ).fetchall()
+    day_rows = _with_seed_day(day_rows)
     days = [row[0] for row in day_rows]
     daily_sessions = [row[1] for row in day_rows]
     day_index = {day: index for index, day in enumerate(days)}
