@@ -43,6 +43,7 @@ from ccgarden.render import (
     SUNFLOWER_BAND_WIDTH,
     SUNFLOWER_MARGIN,
     TIMELINE_VIEWBOX_HEIGHT,
+    TRUNK_BASE_HALF_WIDTH_MIN,
     TRUNK_CENTER_X,
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
@@ -644,13 +645,13 @@ def test_render_timeline_svg_starts_every_shape_at_nothing() -> None:
     assert bush_scale[0] == '0.0000'
     sun_scale = _first_values(svg.split('class="sun"')[1], 'scale')
     assert sun_scale[0] == '0.0000'
-    # The trunk keeps a real (zero-width, so invisible) path so that `d`
-    # stays interpolable; its outline stroke is what has to vanish.
+    # The trunk is the exception: it's visible at its minimum width from
+    # the seed day, so the tree doesn't pop into existence all at once.
     trunk = svg.split('class="trunk"')[1]
     trunk_d = _first_values(trunk, 'd')
-    assert f'M {TRUNK_CENTER_X:.2f},' in trunk_d[0]
+    assert f'M {TRUNK_CENTER_X - TRUNK_BASE_HALF_WIDTH_MIN:.2f},' in trunk_d[0]
     assert trunk_d[0] != trunk_d[-1]
-    assert float(_first_values(trunk, 'stroke-width')[0]) == 0.0
+    assert float(_first_values(trunk, 'stroke-width')[0]) > 0.0
 
 
 def _first_values(fragment: str, attribute: str) -> list[str]:

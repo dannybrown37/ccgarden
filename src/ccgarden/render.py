@@ -350,14 +350,23 @@ def _trunk_half_widths_for_timeline(
     by interpolating as a fraction of *their own* final size instead of
     re-deriving an absolute value per day; do the same here so the trunk
     always starts near the minimum and grows into the real final width.
+
+    The trunk is the one shape that does *not* start from nothing on the
+    timeline's seed day: everything else hangs off it, so growing it out of
+    bare ground makes the first real day pop a full-height tree (and its
+    first branch) into existence at once. It sits at its minimum from the
+    very first frame instead, and only its width animates.
     """
     final_width = _trunk_half_width(cumulative_sessions[-1])
     return [
-        _grown_size(
-            sessions,
-            cumulative_sessions[-1],
+        max(
+            _grown_size(
+                sessions,
+                cumulative_sessions[-1],
+                TRUNK_BASE_HALF_WIDTH_MIN,
+                final_width,
+            ),
             TRUNK_BASE_HALF_WIDTH_MIN,
-            final_width,
         )
         for sessions in cumulative_sessions
     ]
