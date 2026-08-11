@@ -2291,7 +2291,9 @@ LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
 LEGEND_X = 14.0
 LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
 LEGEND_PADDING = 10.0
-LEGEND_COLUMNS = 6
+LEGEND_GRID_ROWS = 2
+LEGEND_LABEL_DY = 13.0
+LEGEND_LINE_HEIGHT = 10.0
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
@@ -2307,7 +2309,7 @@ LEGEND_ROWS = (
     ),
     (
         'Flowers',
-        ('one per whole ratio of', 'cache reads to writes'),
+        ('one per whole ratio', 'of cache read:write'),
         'flower',
     ),
     (
@@ -2331,12 +2333,12 @@ LEGEND_ROWS = (
     ),
     (
         'Season',
-        ('turns + thins the longer', 'the garden goes untended'),
+        ('turns + thins the', 'longer you are away'),
         'season',
     ),
     (
         'Sky',
-        ('darkens with the share', 'of prompts after 22:00'),
+        ('darkens with prompts', 'typed after 22:00'),
         'sky',
     ),
     (
@@ -2346,7 +2348,7 @@ LEGEND_ROWS = (
     ),
     (
         'Birds',
-        ('one per cartoon adapter;', 'bigger = more tokens saved'),
+        ('one per cartoon call;', 'bigger = more saved'),
         'bird',
     ),
 )
@@ -2467,10 +2469,10 @@ def _render_legend(
     """A key panel explaining what each part of the tree represents.
 
     Sits in its own band below the garden viewBox, so it can never overlap
-    the tree, and laid out as a 5x2 grid -- every entry across one row
-    left barely 90px per entry, which the two- and three-line descriptions
-    overflowed into each other, and a third row would need a taller band
-    than the two- and three-line descriptions leave room for.
+    the tree. Always two rows, with the column count derived from how many
+    entries survive the drops below -- a fixed column count leaves the last
+    row ragged and half empty as soon as an entry is dropped, and two rows
+    is all the band's height affords a three-line description.
 
     The birds, sky and season entries are dropped unless there's actually
     a bird, a night or a turned leaf to explain: a key to something the
@@ -2484,8 +2486,9 @@ def _render_legend(
     if not with_seasons:
         dropped.add('season')
     rows = [row for row in LEGEND_ROWS if row[2] not in dropped]
-    column_width = LEGEND_WIDTH / LEGEND_COLUMNS
-    row_count = math.ceil(len(rows) / LEGEND_COLUMNS)
+    columns = math.ceil(len(rows) / LEGEND_GRID_ROWS)
+    column_width = LEGEND_WIDTH / columns
+    row_count = math.ceil(len(rows) / columns)
     row_height = LEGEND_HEIGHT / row_count
     parts = [
         (
@@ -2499,24 +2502,37 @@ def _render_legend(
             f'opacity="0.88" />'
         )
     ]
-    for index, (label, desc_lines, icon) in enumerate(rows):
-        col_x = LEGEND_X + column_width * (index % LEGEND_COLUMNS)
-        row_cy = (
-            LEGEND_Y + row_height * (index // LEGEND_COLUMNS) + row_height / 2
-        )
-        icon_cx = col_x + LEGEND_PADDING + 8
-        text_x = col_x + LEGEND_PADDING + 20
-        parts.append(_render_legend_icon(icon, icon_cx, row_cy - 2))
+    for divider in range(1, columns):
+        divider_x = LEGEND_X + column_width * divider
         parts.append(
-            f'<text x="{text_x:.1f}" y="{row_cy - 9:.1f}" '
-            f'font-family="Georgia, serif" font-size="10" '
+            f'<line x1="{divider_x:.1f}" y1="{LEGEND_Y + 6:.1f}" '
+            f'x2="{divider_x:.1f}" '
+            f'y2="{LEGEND_Y + LEGEND_HEIGHT - 6:.1f}" '
+            f'stroke="#3a2412" stroke-width="0.4" opacity="0.18" />'
+        )
+    for index, (label, desc_lines, icon) in enumerate(rows):
+        row_index = index // columns
+        column_index = index % columns
+        # The last row can come up short; centre it instead of leaving a
+        # hole on the right.
+        in_row = min(len(rows) - row_index * columns, columns)
+        indent = (columns - in_row) * column_width / 2
+        col_x = LEGEND_X + indent + column_width * column_index
+        row_top = LEGEND_Y + row_height * row_index
+        label_y = row_top + LEGEND_LABEL_DY
+        icon_cx = col_x + LEGEND_PADDING + 8
+        text_x = col_x + LEGEND_PADDING + 22
+        parts.append(_render_legend_icon(icon, icon_cx, label_y + 4))
+        parts.append(
+            f'<text x="{text_x:.1f}" y="{label_y:.1f}" '
+            f'font-family="Georgia, serif" font-size="10.5" '
             f'font-weight="bold" fill="#2f3b23">{label}</text>'
         )
         for line_index, desc_line in enumerate(desc_lines):
-            line_y = row_cy + 2 + line_index * 9
+            line_y = label_y + 11 + line_index * LEGEND_LINE_HEIGHT
             parts.append(
                 f'<text x="{text_x:.1f}" y="{line_y:.1f}" '
-                f'font-family="Georgia, serif" font-size="8.2" '
+                f'font-family="Georgia, serif" font-size="8.6" '
                 f'fill="#4a4a3a">{desc_line}</text>'
             )
     parts.append('</g>')

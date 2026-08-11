@@ -1163,7 +1163,7 @@ def test_a_daylit_garden_draws_no_night() -> None:
     assert 'class="night"' in svg
     assert 'opacity="0.000"' in svg
     # No night to explain means no key entry for it.
-    assert 'darkens with the share' not in svg
+    assert 'darkens with prompts' not in svg
 
 
 def test_a_night_garden_darkens_and_gets_a_legend_entry() -> None:
@@ -1177,7 +1177,7 @@ def test_a_night_garden_darkens_and_gets_a_legend_entry() -> None:
     )
 
     assert f'opacity="{NIGHT_VEIL_MAX_OPACITY:.3f}"' in svg
-    assert 'darkens with the share' in svg
+    assert 'darkens with prompts' in svg
     assert 'busiest hour 02:00' in svg
 
 
@@ -1284,5 +1284,5 @@ def test_a_still_garden_is_rendered_in_the_season_it_has_reached() -> None:
     assert AUTUMN_COLORS[0] in autumn
     assert LEAF_COLORS[0] in spring
     # A garden still being tended has no season to explain.
-    assert 'the garden goes untended' in autumn
-    assert 'the garden goes untended' not in spring
+    assert 'longer you are away' in autumn
+    assert 'longer you are away' not in spring
