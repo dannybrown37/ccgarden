@@ -77,6 +77,15 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
 - Shapes stay off each other: clouds honor the tree keepout, birds check
   `_clear_of_sun`, bushes use `_bush_footprints`. Preserve those checks when
   moving things.
+- The tree's skeleton is **limbs, not repos**. `_plan_limbs` apportions at
+  least `MIN_LIMBS` limbs across the repos (busiest repos split hardest),
+  and `_limb_share_of` cuts each repo's totals on cumulative boundaries so
+  its limbs sum back to the repo exactly — leaf counts still equal
+  `sessions * LEAVES_PER_SESSION`. Both renderers derive limbs from the
+  *final* totals so the timelapse ends on the static tree. A repo that
+  isn't split keeps `key == repo`, so a wide garden is unchanged. Anything
+  seeded per-branch (placement, bow, collar, foliage) must seed off
+  `limb.key`; anything user-facing (titles, `data-repo`) off the repo.
 
 `cartoon` is an optional external binary. Every failure mode (missing,
 non-zero exit, timeout, unparseable) must degrade to "no birds", never

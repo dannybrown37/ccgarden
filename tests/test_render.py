@@ -66,6 +66,13 @@ from ccgarden.render import (
     _branch_endpoint,
     _branch_length,
     _branch_placement,
+    _branch_side,
+    LIMB_SHARE_FALLOFF,
+    _Limb,
+    _limb_counts,
+    _limb_share_of,
+    _plan_limbs,
+    MIN_LIMBS,
     _bird_positions,
     _bird_slots,
     _bush_radius,
@@ -175,14 +182,18 @@ def test_render_svg_draws_one_ring_per_day(ring_count: int) -> None:
     assert svg.count('class="ring"') == ring_count
 
 
-@pytest.mark.parametrize('branch_count', [1, 3, 5])
-def test_render_svg_draws_one_branch_per_repo(branch_count: int) -> None:
-    branches = [branch(f'repo-{i}') for i in range(branch_count)]
+@pytest.mark.parametrize('repo_count', [1, 3, 5, 9])
+def test_render_svg_draws_a_limb_for_every_repo(repo_count: int) -> None:
+    branches = [branch(f'repo-{i}') for i in range(repo_count)]
     garden = GardenData(rings=[], branches=branches)
 
     svg = render_svg(garden)
 
-    assert svg.count('class="branch"') == branch_count
+    # Never fewer limbs than repos, and never a skeleton too sparse to read
+    # as a tree -- a one-repo garden is still a crown, not a pole.
+    assert svg.count('class="branch"') == max(repo_count, MIN_LIMBS)
+    for index in range(repo_count):
+        assert f'data-repo="repo-{index}"' in svg
 
 
 @pytest.mark.parametrize('sessions', [3, 40, 600])
@@ -1286,3 +1297,117 @@ def test_a_still_garden_is_rendered_in_the_season_it_has_reached() -> None:
     # A garden still being tended has no season to explain.
     assert 'longer you are away' in autumn
     assert 'longer you are away' not in spring
+
+
+def test_limb_counts_gives_every_repo_at_least_one_limb() -> None:
+    counts = _limb_counts([9000.0, 400.0, 20.0], MIN_LIMBS)
+
+    assert len(counts) == 3
+    assert min(counts) >= 1
+    assert sum(counts) == MIN_LIMBS
+
+
+def test_limb_counts_leaves_a_wide_garden_untouched() -> None:
+    weights = [float(1000 - 100 * i) for i in range(MIN_LIMBS + 2)]
+
+    assert _limb_counts(weights, MIN_LIMBS) == [1] * len(weights)
+
+
+def test_limb_counts_favours_the_busiest_repo() -> None:
+    counts = _limb_counts([9000.0, 400.0], MIN_LIMBS)
+
+    assert counts[0] > counts[1]
+
+
+@pytest.mark.parametrize('repo_count', [1, 2, 3, MIN_LIMBS, MIN_LIMBS + 3])
+def test_plan_limbs_never_builds_a_sparse_skeleton(repo_count: int) -> None:
+    repos = [(f'repo{i}', 5000.0 * 0.6**i) for i in range(repo_count)]
+
+    limbs = _plan_limbs(repos)
+
+    assert len(limbs) == max(repo_count, MIN_LIMBS)
+    assert len({limb.key for limb in limbs}) == len(limbs)
+    for repo, _ in repos:
+        shares = [limb.share for limb in limbs if limb.repo == repo]
+        assert shares
+        assert sum(shares) == pytest.approx(1.0)
+
+
+def test_plan_limbs_orders_limbs_biggest_first() -> None:
+    repos = [('big', 9000.0), ('small', 300.0)]
+
+    limbs = _plan_limbs(repos)
+    weights = [limb.share * dict(repos)[limb.repo] for limb in limbs]
+
+    assert weights == sorted(weights, reverse=True)
+    assert limbs[0].repo == 'big'
+
+
+def test_plan_limbs_keeps_the_key_stable_for_an_unsplit_repo() -> None:
+    repos = [(f'repo{i}', 100.0) for i in range(MIN_LIMBS)]
+
+    assert [limb.key for limb in _plan_limbs(repos)] == [
+        f'repo{i}' for i in range(MIN_LIMBS)
+    ]
+
+
+def test_limb_share_of_scales_every_total() -> None:
+    branch = RepoBranch(
+        repo='r',
+        sessions=100,
+        lines_added=1000,
+        lines_removed=400,
+        output_tokens=2000,
+        input_tokens=6000,
+        cost=8.0,
+        prompts=500,
+    )
+
+    lower = _Limb('r#0', 'r', 0.5, 0.0)
+    upper = _Limb('r#1', 'r', 0.5, 0.5)
+
+    half = _limb_share_of(branch, lower)
+
+    assert half.repo == 'r'
+    assert (half.sessions, half.lines_added, half.prompts) == (50, 500, 250)
+    assert half.cost == pytest.approx(4.0)
+    assert half.sessions + _limb_share_of(branch, upper).sessions == 100
+    assert _limb_share_of(branch, _Limb('r', 'r', 1.0)) == branch
+
+
+def test_single_repo_garden_still_grows_a_full_crown() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='only',
+                sessions=180,
+                lines_added=42000,
+                lines_removed=15000,
+                output_tokens=3_000_000,
+                input_tokens=9_000_000,
+                cost=400.0,
+                prompts=2200,
+            )
+        ],
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="branch"') == MIN_LIMBS
+    assert svg.count('data-repo="only"') == MIN_LIMBS
+
+
+def test_branch_side_balances_the_two_flanks() -> None:
+    # Weights of a repo split MIN_LIMBS ways, biggest first.
+    falloff = [LIMB_SHARE_FALLOFF**rank for rank in range(MIN_LIMBS)]
+    weights = [term / sum(falloff) for term in falloff]
+
+    flanks = {-1: 0.0, 1: 0.0}
+    for index, weight in enumerate(weights):
+        flanks[_branch_side(index)] += weight
+
+    assert abs(flanks[-1] - flanks[1]) < 0.1
+    # Both flanks are used at every size a tree can be.
+    for count in range(2, 12):
+        assert len({_branch_side(i) for i in range(count)}) == 2

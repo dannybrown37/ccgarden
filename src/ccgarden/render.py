@@ -4,6 +4,7 @@ import datetime
 import json
 import math
 import random
+from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from ccgarden.data import (
@@ -64,6 +65,20 @@ BRANCH_TIP_WIDTH = 1.6
 BRANCH_WIDTH_MIN = 2.2
 BRANCH_WIDTH_MAX = 7.0
 BRANCH_TOKENS_SATURATION = 2_500_000
+# A skeleton of one branch per repo is a telephone pole for anyone who does
+# all their work in a single repo. A real crown is carried on a handful of
+# primary limbs however many repos feed it, so the busiest repos are split
+# across several limbs until the tree has at least this many. Volume still
+# decides everything *about* a limb -- its length, thickness and foliage --
+# so more work is still a bigger tree; it just always reads as a tree.
+MIN_LIMBS = 6
+# Each successive limb cut from the same repo carries this much of the
+# previous one's share, so a split repo gets one dominant leader and
+# progressively smaller siblings instead of a fan of identical twins. Kept
+# close to 1: a steeper falloff hands the first limb so much of the repo
+# that its canopy reads as the whole tree with four wisps stuck on beside
+# it, which is the pole problem again in a different shape.
+LIMB_SHARE_FALLOFF = 0.78
 LEAVES_PER_SESSION = 5
 LEAF_SATURATION_COUNT = 2000
 LEAF_TURNS_FLOOR = 0.0
@@ -1723,6 +1738,98 @@ def _render_rings(rings: list[DayRing], base_half_width: float) -> str:
     return ''.join(elements)
 
 
+class _Limb(NamedTuple):
+    """One primary limb of the tree, and the slice of a repo it carries.
+
+    `key` seeds every piece of derived randomness for the limb (placement,
+    bow, collar, foliage), so two limbs cut from the same repo don't come
+    out as identical twins. It stays equal to `repo` for a repo that isn't
+    split, which keeps a wide garden rendering exactly as it did before
+    limbs existed.
+    """
+
+    key: str
+    repo: str
+    share: float
+    # Where this limb's share sits in its repo's 0..1 run. `_limb_share_of`
+    # splits on the *boundaries* rather than rounding each share on its own,
+    # so a repo's limbs add back up to exactly the repo -- five limbs still
+    # carry exactly `sessions * LEAVES_PER_SESSION` leaves between them.
+    start: float = 0.0
+
+
+def _limb_counts(weights: list[float], minimum: int) -> list[int]:
+    """How many limbs each repo is split across, biggest repo first.
+
+    Highest-averages apportionment: each extra limb goes to whichever repo
+    is currently carrying the most work per limb, so a garden dominated by
+    one repo splits that repo hardest while a handful of comparable repos
+    share the extras evenly.
+    """
+    counts = [1] * len(weights)
+    for _ in range(minimum - len(weights)):
+        counts[
+            max(
+                range(len(weights)),
+                key=lambda index: weights[index] / (counts[index] + 1),
+            )
+        ] += 1
+    return counts
+
+
+def _plan_limbs(repos: list[tuple[str, float]]) -> list[_Limb]:
+    """Lay out the tree's primary limbs, biggest first.
+
+    `repos` is (name, weight) ordered by weight descending, and the limbs
+    come back in the same order, which `_branch_placement` reads as
+    "longest lowest on the trunk".
+    """
+    if not repos:
+        return []
+    counts = _limb_counts([weight for _, weight in repos], MIN_LIMBS)
+    weighted: list[tuple[float, _Limb]] = []
+    for (repo, weight), count in zip(repos, counts, strict=True):
+        falloff = [LIMB_SHARE_FALLOFF**rank for rank in range(count)]
+        total = sum(falloff)
+        start = 0.0
+        for rank, term in enumerate(falloff):
+            share = term / total
+            key = repo if count == 1 else f'{repo}#{rank}'
+            weighted.append((weight * share, _Limb(key, repo, share, start)))
+            start += share
+    weighted.sort(key=lambda item: -item[0])
+    return [limb for _, limb in weighted]
+
+
+def _limb_share_of[Stats: (RepoBranch, RepoBranchDay)](
+    stats: Stats, limb: _Limb
+) -> Stats:
+    """The slice of a repo's totals that one of its limbs carries.
+
+    Every integer is cut on the limb's cumulative boundaries, so the cuts
+    telescope: a repo's limbs sum back to the repo exactly, however many
+    limbs it was split across and however the fractions land.
+    """
+    if limb.share >= 1.0:
+        return stats
+
+    def cut(total: int) -> int:
+        return round(total * (limb.start + limb.share)) - round(
+            total * limb.start
+        )
+
+    return replace(
+        stats,
+        sessions=cut(stats.sessions),
+        lines_added=cut(stats.lines_added),
+        lines_removed=cut(stats.lines_removed),
+        output_tokens=cut(stats.output_tokens),
+        input_tokens=cut(stats.input_tokens),
+        cost=stats.cost * limb.share,
+        prompts=cut(stats.prompts),
+    )
+
+
 class _BranchPlacement(NamedTuple):
     """Where a repo's branch leaves the trunk, and at what pitch.
 
@@ -1737,10 +1844,24 @@ class _BranchPlacement(NamedTuple):
     angle_jitter: float
 
 
+def _branch_side(index: int) -> int:
+    """Which flank of the trunk the index-th largest branch leaves on.
+
+    Strict left/right alternation puts every odd-ranked branch on one side,
+    and since branches arrive largest-first that hands the left flank the
+    1st, 3rd and 5th biggest every time -- a reliably lopsided tree. The
+    Thue-Morse parity (L R R L R L L R ...) is the standard fair-division
+    answer to exactly that: it keeps the running weight on the two flanks
+    as close as possible for any decreasing series, and its runs of two
+    also break up the ladder that clean alternation draws.
+    """
+    return -1 if bin(index).count('1') % 2 == 0 else 1
+
+
 def _branch_placement(
     index: int, count: int, repo: str, base_half_width: float
 ) -> _BranchPlacement:
-    side = -1 if index % 2 == 0 else 1
+    side = _branch_side(index)
     rng = random.Random(f'{repo}:place')
     spacing = 1.0 / max(count, 2)
     # Branches arrive ordered by lines added, descending -- so index 0 is the
@@ -1959,11 +2080,15 @@ def _render_branches_and_leaves(
     elements = [
         _render_crown(base_half_width, base_half_width * TRUNK_TOP_TAPER)
     ]
-    count = len(branches)
-    for index, repo_branch in enumerate(branches):
-        placement = _branch_placement(
-            index, count, repo_branch.repo, base_half_width
-        )
+    by_repo = {branch.repo: branch for branch in branches}
+    limbs = _plan_limbs(
+        [(branch.repo, float(branch.lines_added)) for branch in branches]
+    )
+    count = len(limbs)
+    for index, limb in enumerate(limbs):
+        whole_repo = by_repo[limb.repo]
+        repo_branch = _limb_share_of(whole_repo, limb)
+        placement = _branch_placement(index, count, limb.key, base_half_width)
         origin_x, origin_y, side = (
             placement.origin_x,
             placement.origin_y,
@@ -1982,7 +2107,7 @@ def _render_branches_and_leaves(
         base_width = _branch_width(
             repo_branch.output_tokens + repo_branch.input_tokens
         )
-        curve_rng = random.Random(f'{repo_branch.repo}:curve')
+        curve_rng = random.Random(f'{limb.key}:curve')
         bow = _branch_bow(length, side, curve_rng.random())
         root_overlap = base_width * 0.9
 
@@ -2006,20 +2131,22 @@ def _render_branches_and_leaves(
             bow=bow,
             root_overlap=root_overlap,
         )
-        total_tokens = repo_branch.output_tokens + repo_branch.input_tokens
+        # Hovering any limb reports the repo it was cut from in full -- the
+        # limb's own share is a rendering detail, not a statistic.
+        total_tokens = whole_repo.output_tokens + whole_repo.input_tokens
         avg_turns = (
-            repo_branch.prompts / repo_branch.sessions
-            if repo_branch.sessions
+            whole_repo.prompts / whole_repo.sessions
+            if whole_repo.sessions
             else 0.0
         )
         title = _title(
-            f'{repo_branch.repo} — {repo_branch.sessions} sessions, '
-            f'+{repo_branch.lines_added:,}/-{repo_branch.lines_removed:,} '
-            f'lines, {total_tokens:,} tokens, ${repo_branch.cost:,.2f}, '
+            f'{whole_repo.repo} — {whole_repo.sessions} sessions, '
+            f'+{whole_repo.lines_added:,}/-{whole_repo.lines_removed:,} '
+            f'lines, {total_tokens:,} tokens, ${whole_repo.cost:,.2f}, '
             f'{avg_turns:.1f} turns/session'
         )
         collar = _render_branch_collar(
-            origin_x, origin_y, base_width, repo_branch.repo
+            origin_x, origin_y, base_width, limb.key
         )
         branch_path = (
             f'<path class="branch" data-repo="{repo_branch.repo}" '
@@ -2027,7 +2154,9 @@ def _render_branches_and_leaves(
             f'<path d="{outline_d}" fill="none" stroke="#3a2412" '
             f'stroke-width="0.75" stroke-linecap="round" opacity="0.95" />'
         )
-        leaves = _render_leaves(repo_branch, origin_x, origin_y, end_x, end_y)
+        leaves = _render_leaves(
+            repo_branch, origin_x, origin_y, end_x, end_y, seed=limb.key
+        )
         elements.append(
             f'<g class="repo-group">{title}{collar}{branch_path}{leaves}</g>'
         )
@@ -2211,11 +2340,14 @@ def _render_leaves(
     origin_y: float,
     end_x: float,
     end_y: float,
+    *,
+    seed: str = '',
 ) -> str:
     leaf_count = repo_branch.sessions * LEAVES_PER_SESSION
     if leaf_count == 0:
         return ''
-    rng = random.Random(repo_branch.repo)
+    seed = seed or repo_branch.repo
+    rng = random.Random(seed)
     elements = []
 
     avg_turns = (
@@ -2245,7 +2377,7 @@ def _render_leaves(
                     dy,
                     fraction=fraction,
                     canopy_radius=canopy_radius,
-                    seed=f'{repo_branch.repo}:{fraction:.3f}',
+                    seed=f'{seed}:{fraction:.3f}',
                 )
             )
 
@@ -2299,7 +2431,7 @@ LEGEND_ROWS = (
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
     (
         'Branches',
-        ('one per repo', 'longer = more lines;', 'thicker = more tokens'),
+        ('grouped by repo;', 'longer = more lines;', 'thicker = more tokens'),
         'branch',
     ),
     (
@@ -2834,25 +2966,36 @@ def _render_timeline_branches_and_leaves(
     elements = [
         _render_timeline_crown(base_half_width_by_day, key_times, duration)
     ]
-    count = len(timeline.branch_order)
-    for index, repo in enumerate(timeline.branch_order):
+    # Limbs are apportioned from the *final* totals, so the timelapse and
+    # the static garden build the same skeleton -- the last frame of one is
+    # the other.
+    limbs = _plan_limbs(
+        [
+            (repo, float(timeline.branch_days[repo][-1].lines_added))
+            for repo in timeline.branch_order
+        ]
+    )
+    count = len(limbs)
+    for index, limb in enumerate(limbs):
+        repo = limb.repo
         placement = _branch_placement(
-            index, count, repo, final_base_half_width
+            index, count, limb.key, final_base_half_width
         )
         origin_x, origin_y, side = (
             placement.origin_x,
             placement.origin_y,
             placement.side,
         )
-        bow_factor = random.Random(f'{repo}:curve').random()
+        bow_factor = random.Random(f'{limb.key}:curve').random()
 
-        days = timeline.branch_days[repo]
+        repo_days = timeline.branch_days[repo]
+        days = [_limb_share_of(day, limb) for day in repo_days]
         final_lines_added = days[-1].lines_added
         final_tokens = days[-1].output_tokens + days[-1].input_tokens
         final_length = _branch_length(final_lines_added)
         final_width = _branch_width(final_tokens)
 
-        collar_rng_seed = f'{repo}:collar'
+        collar_rng_seed = f'{limb.key}:collar'
         d_values = []
         outline_d_values = []
         collar_d_values = []
@@ -2972,7 +3115,7 @@ def _render_timeline_branches_and_leaves(
         collar_animate = _animate_tag(
             'd', collar_d_values, key_times, duration
         )
-        day_labels = _branch_day_labels(repo, days)
+        day_labels = _branch_day_labels(repo, repo_days)
         title = _title(day_labels[-1])
         tt = _tt_attr(day_labels)
         collar = (
@@ -2988,7 +3131,7 @@ def _render_timeline_branches_and_leaves(
             f'opacity="0.95">{outline_animate}</path>'
         )
         leaves = _render_timeline_leaves(
-            repo,
+            limb.key,
             days,
             origin_x,
             origin_y,
@@ -3023,7 +3166,7 @@ def _branch_day_labels(repo: str, days: list[RepoBranchDay]) -> list[str]:
 
 
 def _render_timeline_leaves(  # noqa: PLR0915
-    repo: str,
+    seed: str,
     days: list[RepoBranchDay],
     origin_x: float,
     origin_y: float,
@@ -3081,7 +3224,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
                         cx + blob_radius * 0.18,
                         cy + blob_radius * 0.22,
                         blob_radius * 0.92,
-                        random.Random(f'{repo}:{fraction:.3f}:shadow'),
+                        random.Random(f'{seed}:{fraction:.3f}:shadow'),
                     )
                 )
                 main_values.append(
@@ -3089,7 +3232,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
                         cx,
                         cy,
                         blob_radius,
-                        random.Random(f'{repo}:{fraction:.3f}:canopy'),
+                        random.Random(f'{seed}:{fraction:.3f}:canopy'),
                     )
                 )
             shadow_animate = _animate_tag(
@@ -3107,7 +3250,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
                 f'{main_animate}</path>'
             )
 
-    rng = random.Random(f'{repo}:leaves')
+    rng = random.Random(f'{seed}:leaves')
     for leaf_index in range(leaf_count):
         if has_canopy:
             t, relative_radius, r_frac, blob_angle = _leaf_placement(
