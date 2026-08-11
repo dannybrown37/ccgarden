@@ -27,13 +27,34 @@ sqlite tables are all day-keyed and idempotent per day (`INSERT OR REPLACE`
 on a `day` primary key), so re-running any day is safe and backfills via
 `ccstats --record --since ... --until ...` are re-runnable:
 `daily_totals`, `daily_repo_usage`, `daily_model_usage`,
-`daily_model_effort_usage`, `daily_tool_usage`, `daily_effort_usage`.
+`daily_model_effort_usage`, `daily_tool_usage`, `daily_effort_usage`,
+`daily_hour_usage`.
 
-`data.py` loads raw per-day rows then runs a `_cumulative_*` pass — the
-renderer always receives cumulative values, since the garden only ever
-grows. Adding a new shape means: new daily table → `_load_*` + `_load_*_days`
-+ `_cumulative_*_days` → new field on `GardenData`/`GardenTimeline` → a
-`_render_*` and `_render_timeline_*` pair → legend icon + entry.
+`data.py` loads raw per-day rows then runs a `_cumulative_*` pass — for
+every *shape*, the renderer receives cumulative values, since the garden
+only ever grows. Adding a new shape means: new daily table → `_load_*` +
+`_load_*_days` + `_cumulative_*_days` → new field on
+`GardenData`/`GardenTimeline` → a `_render_*` and `_render_timeline_*`
+pair → legend icon + entry.
+
+Two channels are deliberately **not** cumulative, because they describe
+the day rather than the total: `daily_nightness` (share of that day's
+prompts typed after 22:00, which drives the sky) and `daily_vitality`
+(decays with days since you last worked, which drives the season). Vitality
+is the only value in the whole pipeline that can fall. Because the db only
+holds days you actually worked, `_with_dormant_days` inserts one all-zero
+frame into the middle of every gap ≥ 4 days so a lapse has somewhere to be
+visible; those frames carry no rows in any other table, so every cumulative
+shape correctly holds its value there instead of growing.
+
+New tables must be tolerated when absent — `daily_hour_usage` postdates the
+first released schema, so its loaders check `_table_exists` and degrade to
+"no opinion" rather than raising on an older db.
+
+Seasonal colour is applied through **shared paints**, not per-element
+fills: leaves reference `url(#leafPaint{n})` and the canopy uses
+`canopyGradient`, so ten `stop-color` animations in `<defs>` recolour a
+canopy of thousands of leaves. Never give a leaf its own colour animation.
 
 ## Rendering conventions
 

@@ -27,6 +27,8 @@ fill in as you work.)*
 | **Sun** | Rises and brightens with your all-in token total (output + input + cache read + cache write) |
 | **Bushes** | One per tool (Bash, Edit, Read, ...); bigger bushes mean more calls |
 | **Sunflowers** | One per repo; taller stalks mean more prompts |
+| **Sky** | Darkens toward night with the share of prompts you type after 22:00 — stars come out for a committed night owl |
+| **Season** | Leaves turn gold and thin out the longer the garden goes untended, and green back up when you return |
 | **Birds** | One per `cartoon` adapter that saved tokens; bigger birds mean more tokens saved. Only appears if `cartoon` is installed |
 
 Hover (or tap, on mobile) any shape for the exact numbers behind it.
@@ -60,6 +62,26 @@ This will:
 
 Run it again any day and the garden picks up where it left off — new
 rings, longer branches, bigger clouds, more leaves.
+
+#### Options
+
+| Flag | Effect |
+|---|---|
+| `--no-open` | write the SVG without opening a browser |
+| `-o`, `--output PATH` | where to write the SVG |
+| `--db PATH` | which stats db to render from |
+| `--log-root DIR` | transcript root to record from (repeatable) |
+| `--static` | render one still garden instead of the timelapse |
+| `--since`, `--until` | limit the garden to a date range |
+| `--no-record` | render the db as-is, skipping today's snapshot |
+| `--version` | print the installed version |
+
+So a still image of just this year's garden, written somewhere else and
+without touching the db, is:
+
+```sh
+ccgarden --static --since 2026-01-01 --no-record --no-open -o garden.svg
+```
 
 ### `ccstats`
 

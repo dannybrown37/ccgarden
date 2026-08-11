@@ -19,6 +19,20 @@ from ccgarden.data import (
     ToolUsageDay,
 )
 from ccgarden.render import (
+    AUTUMN_COLORS,
+    LEAF_COLORS,
+    LEAF_OPACITY_DORMANT,
+    LEAF_OPACITY_LIVING,
+    LEAF_PAINT_ID,
+    LIVING_CANOPY_STOPS,
+    LIVING_GROUND_STOPS,
+    _blend_hex,
+    _leaf_color,
+    _leaf_opacity,
+    NIGHTNESS_SATURATION,
+    NIGHT_VEIL_MAX_OPACITY,
+    _saturated_nightness,
+    _star_field,
     BIRD_MARGIN,
     BRANCH_ANGLE_JITTER_DEGREES,
     BRANCH_LENGTH_MAX,
@@ -1132,3 +1146,143 @@ def test_branch_length_is_monotonic_and_bounded() -> None:
     assert lengths[-1] == pytest.approx(BRANCH_LENGTH_MAX)
     # Saturation is a cap, not a cliff.
     assert lengths[-1] == pytest.approx(lengths[-2])
+
+
+def test_nightness_saturates_rather_than_scaling_linearly() -> None:
+    # A modest evening habit still shows, but a night owl maxes out.
+    assert _saturated_nightness(0.0) == 0.0
+    assert 0 < _saturated_nightness(0.1) < 1
+    assert _saturated_nightness(NIGHTNESS_SATURATION) == pytest.approx(1.0)
+    # Saturation is a cap, not a cliff.
+    assert _saturated_nightness(0.99) == pytest.approx(1.0)
+
+
+def test_a_daylit_garden_draws_no_night() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], nightness=0.0))
+
+    assert 'class="night"' in svg
+    assert 'opacity="0.000"' in svg
+    # No night to explain means no key entry for it.
+    assert 'darkens with the share' not in svg
+
+
+def test_a_night_garden_darkens_and_gets_a_legend_entry() -> None:
+    svg = render_svg(
+        GardenData(
+            rings=[],
+            branches=[],
+            nightness=1.0,
+            hour_counts={2: 10},
+        )
+    )
+
+    assert f'opacity="{NIGHT_VEIL_MAX_OPACITY:.3f}"' in svg
+    assert 'darkens with the share' in svg
+    assert 'busiest hour 02:00' in svg
+
+
+def test_the_night_veil_never_swallows_other_tooltips() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], nightness=1.0))
+
+    veil = re.search(r'<rect class="night"[^>]*>', svg)
+    assert veil is not None
+    assert 'pointer-events="none"' in veil.group(0)
+
+
+def test_the_veil_stops_above_the_legend_band() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], nightness=1.0))
+
+    veil = re.search(r'<rect class="night"[^>]*>', svg)
+    assert f'height="{VIEWBOX_HEIGHT}"' in veil.group(0)
+
+
+def test_the_star_field_is_deterministic() -> None:
+    assert _star_field() == _star_field()
+
+
+def test_timeline_animates_the_sky_day_by_day() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02', '2026-01-03'],
+        daily_sessions=[1, 1, 1],
+        cumulative_sessions=[1, 2, 3],
+        branch_order=[],
+        branch_days={},
+        daily_nightness=[0.0, 1.0, 0.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    # Stars and veil both ride the same per-day signal, dark in the middle.
+    assert 'class="stars"' in svg
+    assert '0.000;1.000;0.000' in svg
+    assert f'0.000;{NIGHT_VEIL_MAX_OPACITY:.3f};0.000' in svg
+
+
+def test_a_timeline_with_no_hour_data_draws_no_night_at_all() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02'],
+        daily_sessions=[1, 1],
+        cumulative_sessions=[1, 2],
+        branch_order=[],
+        branch_days={},
+        daily_nightness=[0.0, 0.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'class="stars"' not in svg
+    assert 'class="night"' not in svg
+
+
+def test_leaf_colour_blends_from_green_to_autumn() -> None:
+    assert _leaf_color(0, 1.0) == LEAF_COLORS[0]
+    assert _leaf_color(0, 0.0) == AUTUMN_COLORS[0]
+    # Halfway is genuinely between the two, not one or the other.
+    midway = _leaf_color(0, 0.5)
+    assert midway not in (LEAF_COLORS[0], AUTUMN_COLORS[0])
+
+
+def test_leaves_thin_out_as_the_garden_goes_dormant() -> None:
+    assert _leaf_opacity(1.0) == pytest.approx(LEAF_OPACITY_LIVING)
+    assert _leaf_opacity(0.0) == pytest.approx(LEAF_OPACITY_DORMANT)
+    assert _leaf_opacity(0.5) < _leaf_opacity(1.0)
+
+
+def test_blending_is_clamped_outside_the_unit_range() -> None:
+    assert _blend_hex('#000000', '#ffffff', 2.0) == '#ffffff'
+    assert _blend_hex('#000000', '#ffffff', -1.0) == '#000000'
+
+
+def test_every_leaf_shares_a_paint_so_the_canopy_turns_at_once() -> None:
+    """Thousands of leaves must not mean thousands of animations."""
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02'],
+        daily_sessions=[4, 4],
+        cumulative_sessions=[4, 8],
+        branch_order=['repo'],
+        branch_days={
+            'repo': [
+                RepoBranchDay('2026-01-01', 4, 100, 0, 10, 10, 0.0, 20),
+                RepoBranchDay('2026-01-02', 8, 200, 0, 20, 20, 0.0, 40),
+            ]
+        },
+        daily_vitality=[1.0, 0.1],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert svg.count(f'url(#{LEAF_PAINT_ID}') > len(LEAF_COLORS)
+    assert svg.count('attributeName="stop-color"') == (
+        len(LEAF_COLORS) + len(LIVING_GROUND_STOPS) + len(LIVING_CANOPY_STOPS)
+    )
+
+
+def test_a_still_garden_is_rendered_in_the_season_it_has_reached() -> None:
+    autumn = render_svg(GardenData(rings=[], branches=[], vitality=0.0))
+    spring = render_svg(GardenData(rings=[], branches=[], vitality=1.0))
+
+    assert AUTUMN_COLORS[0] in autumn
+    assert LEAF_COLORS[0] in spring
+    # A garden still being tended has no season to explain.
+    assert 'the garden goes untended' in autumn
+    assert 'the garden goes untended' not in spring

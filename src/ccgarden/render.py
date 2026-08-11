@@ -438,18 +438,143 @@ def _half_width_at(y: float, base_half_width: float) -> float:
     )
 
 
-def _render_defs() -> str:
+# Seasons. Vitality (see `_daily_vitality`) runs 1.0 for "worked today"
+# down toward 0 for "long gone", and every seasonal colour is a blend
+# between the living value and its dormant counterpart. One shared paint
+# per leaf colour means the whole canopy turns with five <animate> tags
+# instead of one per leaf, which matters when a big garden has thousands.
+LEAF_PAINT_ID = 'leafPaint'
+AUTUMN_COLORS = ('#8a4b1e', '#a35c1f', '#b8792a', '#c98f36', '#d8a441')
+DORMANT_GROUND_STOPS = ('#8d8a5a', '#6b6942')
+LIVING_GROUND_STOPS = ('#74b25e', '#3f7a3f')
+# The canopy blobs sit behind the individual leaves, so they have to turn
+# with them -- a gold canopy over green undergrowth reads as a rendering
+# bug rather than as autumn.
+DORMANT_CANOPY_STOPS = ('#c9a05a', '#a37438', '#6b4a20')
+LIVING_CANOPY_STOPS = ('#8fcf6f', '#5a9e5a', '#2f5f2f')
+# Leaves thin out as well as turn -- a bare-branch winter needs both.
+LEAF_OPACITY_LIVING = 0.92
+LEAF_OPACITY_DORMANT = 0.12
+
+
+def _blend_hex(dormant: str, living: str, vitality: float) -> str:
+    """Mix two #rrggbb colours, `vitality` 1.0 being fully living."""
+    ratio = max(0.0, min(vitality, 1.0))
+    channels = []
+    for start in (1, 3, 5):
+        cold = int(dormant[start : start + 2], 16)
+        warm = int(living[start : start + 2], 16)
+        channels.append(round(cold + (warm - cold) * ratio))
+    return '#{:02x}{:02x}{:02x}'.format(*channels)
+
+
+def _leaf_color(index: int, vitality: float) -> str:
+    return _blend_hex(AUTUMN_COLORS[index], LEAF_COLORS[index], vitality)
+
+
+def _leaf_opacity(vitality: float) -> float:
+    ratio = max(0.0, min(vitality, 1.0))
+    return (
+        LEAF_OPACITY_DORMANT
+        + (LEAF_OPACITY_LIVING - LEAF_OPACITY_DORMANT) * ratio
+    )
+
+
+def _season_animations(
+    vitality: list[float],
+    key_times: list[float],
+    duration: float,
+) -> tuple[list[str], list[str], list[str]]:
+    """Leaf-paint, ground-stop and canopy-stop colour animations, one per stop.
+
+    Returned rather than emitted inline because the paints they drive
+    live in `<defs>`, which is rendered before any of the shapes that
+    reference them.
+    """
+    leaf_animations = [
+        _animate_tag(
+            'stop-color',
+            [_leaf_color(index, value) for value in vitality],
+            key_times,
+            duration,
+        )
+        for index in range(len(LEAF_COLORS))
+    ]
+    ground_animations = [
+        _animate_tag(
+            'stop-color',
+            [_blend_hex(dormant, living, value) for value in vitality],
+            key_times,
+            duration,
+        )
+        for dormant, living in zip(
+            DORMANT_GROUND_STOPS, LIVING_GROUND_STOPS, strict=True
+        )
+    ]
+    canopy_animations = [
+        _animate_tag(
+            'stop-color',
+            [_blend_hex(dormant, living, value) for value in vitality],
+            key_times,
+            duration,
+        )
+        for dormant, living in zip(
+            DORMANT_CANOPY_STOPS, LIVING_CANOPY_STOPS, strict=True
+        )
+    ]
+    return leaf_animations, ground_animations, canopy_animations
+
+
+def _render_leaf_paints(
+    animations: list[str] | None = None, vitality: float = 1.0
+) -> str:
+    """One single-stop gradient per leaf colour, so leaves share a paint."""
+    paints = []
+    for index in range(len(LEAF_COLORS)):
+        animate = animations[index] if animations else ''
+        paints.append(
+            f'<linearGradient id="{LEAF_PAINT_ID}{index}">'
+            f'<stop offset="0%" '
+            f'stop-color="{_leaf_color(index, vitality)}">{animate}</stop>'
+            f'</linearGradient>'
+        )
+    return ''.join(paints)
+
+
+def _render_defs(
+    leaf_animations: list[str] | None = None,
+    ground_animations: list[str] | None = None,
+    canopy_animations: list[str] | None = None,
+    vitality: float = 1.0,
+) -> str:
+    ground = ground_animations or ['', '']
+    canopy = canopy_animations or ['', '', '']
+    canopy_stops = [
+        _blend_hex(dormant, living, vitality)
+        for dormant, living in zip(
+            DORMANT_CANOPY_STOPS, LIVING_CANOPY_STOPS, strict=True
+        )
+    ]
+    ground_stops = [
+        _blend_hex(dormant, living, vitality)
+        for dormant, living in zip(
+            DORMANT_GROUND_STOPS, LIVING_GROUND_STOPS, strict=True
+        )
+    ]
     return (
         '<defs>'
-        '<linearGradient id="skyGradient" x1="0%" y1="0%" x2="0%" y2="100%">'
+        + _render_leaf_paints(leaf_animations, vitality)
+        + '<linearGradient id="skyGradient" x1="0%" y1="0%" x2="0%" y2="100%">'
         '<stop offset="0%" stop-color="#1c3d5a" />'
         '<stop offset="55%" stop-color="#2f5c82" />'
         '<stop offset="100%" stop-color="#4a7fa5" />'
         '</linearGradient>'
         '<linearGradient id="groundGradient" '
         'x1="0%" y1="0%" x2="0%" y2="100%">'
-        '<stop offset="0%" stop-color="#74b25e" />'
-        '<stop offset="100%" stop-color="#3f7a3f" />'
+        f'<stop offset="0%" stop-color="{ground_stops[0]}">'
+        f'{ground[0]}</stop>'
+        f'<stop offset="100%" stop-color="{ground_stops[1]}">'
+        f'{ground[1]}</stop>'
         '</linearGradient>'
         '<linearGradient id="trunkGradient" gradientUnits="userSpaceOnUse" '
         f'x1="{TRUNK_CENTER_X - TRUNK_BASE_HALF_WIDTH_MAX}" y1="0" '
@@ -460,9 +585,10 @@ def _render_defs() -> str:
         '<stop offset="100%" stop-color="#3a2412" />'
         '</linearGradient>'
         '<radialGradient id="canopyGradient" cx="35%" cy="30%" r="75%">'
-        '<stop offset="0%" stop-color="#8fcf6f" />'
-        '<stop offset="55%" stop-color="#5a9e5a" />'
-        '<stop offset="100%" stop-color="#2f5f2f" />'
+        f'<stop offset="0%" stop-color="{canopy_stops[0]}">{canopy[0]}</stop>'
+        f'<stop offset="55%" stop-color="{canopy_stops[1]}">{canopy[1]}</stop>'
+        f'<stop offset="100%" stop-color="{canopy_stops[2]}">'
+        f'{canopy[2]}</stop>'
         '</radialGradient>'
         f'{_cloud_gradient_defs()}'
         '<radialGradient id="sunGradient" cx="50%" cy="50%" r="50%">'
@@ -527,6 +653,158 @@ def _render_grass() -> str:
             f'opacity="0.4" />'
         )
     return ''.join(elements)
+
+
+# The sky darkens with the share of that day's prompts typed between
+# 22:00 and 06:00 local. Unlike every other dimension this one isn't a
+# saturating growth curve -- it's already a 0..1 ratio -- so it only needs
+# a ceiling, to keep even an all-night garden readable rather than black.
+NIGHT_VEIL_MAX_OPACITY = 0.62
+# Almost nobody types a majority of their prompts after 22:00, so a raw
+# ratio would leave every garden in permanent daylight. Saturating at 45%
+# means a genuine night owl gets a genuinely dark sky, while an ordinary
+# evening habit still shows as dusk rather than noon.
+NIGHTNESS_SATURATION = 0.45
+NIGHT_VEIL_COLOR = '#0b1636'
+STAR_COUNT = 70
+STAR_FIELD_BOTTOM = 420.0
+STAR_RADIUS_MIN = 0.6
+STAR_RADIUS_MAX = 1.9
+STAR_COLOR = '#fdfbf0'
+# Stars sit behind the tree and clouds but in front of the sky, so a
+# night garden reads as "lit from behind" rather than as speckled foliage.
+STAR_TWINKLE_MIN_S = 2.4
+STAR_TWINKLE_MAX_S = 6.5
+
+
+def _star_field() -> list[tuple[float, float, float, float, float]]:
+    """Deterministic (x, y, radius, twinkle duration, phase) per star.
+
+    Seeded like the grass so the same db always renders the same sky.
+    Stars thin out toward the horizon, which is where the tree and the
+    ground would hide them anyway.
+    """
+    rng = random.Random('ccgarden-stars')
+    stars = []
+    for _ in range(STAR_COUNT):
+        depth = rng.random() ** 0.6
+        stars.append(
+            (
+                rng.uniform(4, VIEWBOX_WIDTH - 4),
+                depth * STAR_FIELD_BOTTOM,
+                rng.uniform(STAR_RADIUS_MIN, STAR_RADIUS_MAX),
+                rng.uniform(STAR_TWINKLE_MIN_S, STAR_TWINKLE_MAX_S),
+                rng.uniform(0.0, 1.0),
+            )
+        )
+    return stars
+
+
+def _render_stars(
+    opacity: float,
+    animate: str = '',
+    title: str = '',
+    group_attrs: str = '',
+) -> str:
+    """The star field, faded in as a whole by `opacity`.
+
+    `animate` carries the group's per-day opacity <animate> in the
+    timeline render; the static render just bakes the value in.
+
+    The stars carry the sky's tooltip, because they're the only part of
+    the night that can take a hover: the veil has to stay
+    `pointer-events="none"` or it would swallow every shape's tooltip
+    underneath it, and a fully-daylit garden has no stars to hover --
+    which is the right answer, since it has no night to describe.
+    """
+    stars = []
+    for x, y, radius, twinkle, phase in _star_field():
+        stars.append(
+            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius:.2f}" '
+            f'fill="{STAR_COLOR}">'
+            f'<animate attributeName="opacity" values="0.35;1;0.35" '
+            f'dur="{twinkle:.2f}s" begin="-{phase * twinkle:.2f}s" '
+            f'repeatCount="indefinite" />'
+            f'</circle>'
+        )
+    return (
+        f'<g class="stars" opacity="{opacity:.3f}" {group_attrs}>'
+        f'{title}{animate}{"".join(stars)}</g>'
+    )
+
+
+def _saturated_nightness(nightness: float) -> float:
+    """Raw night share, curved onto 0..1 by `NIGHTNESS_SATURATION`."""
+    return max(0.0, min(nightness / NIGHTNESS_SATURATION, 1.0))
+
+
+def _night_veil_opacity(nightness: float) -> float:
+    return _saturated_nightness(nightness) * NIGHT_VEIL_MAX_OPACITY
+
+
+def _render_night_veil(nightness: float, animate: str = '') -> str:
+    """A deep-blue wash over the whole garden, scaled by `nightness`.
+
+    Drawn over the scene rather than under it so the ground and foliage
+    go dusky too -- a night sky above brightly lit grass reads as wrong.
+    Never over the legend, which has to stay readable.
+    """
+    return (
+        f'<rect class="night" x="0" y="0" width="{VIEWBOX_WIDTH}" '
+        f'height="{VIEWBOX_HEIGHT}" fill="{NIGHT_VEIL_COLOR}" '
+        f'opacity="{_night_veil_opacity(nightness):.3f}" '
+        f'pointer-events="none">{animate}</rect>'
+    )
+
+
+def _night_title(nightness: float, hour_counts: dict[int, int]) -> str:
+    total = sum(hour_counts.values())
+    if total <= 0:
+        return ''
+    peak = max(hour_counts.items(), key=lambda item: (item[1], -item[0]))[0]
+    return _title(
+        f'Sky — {nightness:.0%} of {total:,} prompts typed at night; '
+        f'busiest hour {peak:02d}:00'
+    )
+
+
+def _render_timeline_night(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+    *,
+    veil: bool,
+) -> str:
+    """The star field (`veil=False`) or the night wash (`veil=True`).
+
+    Both are the same signal animated over the same per-day values, but
+    they sit at opposite ends of the drawing order -- stars behind the
+    garden, veil in front of it -- so they're rendered in two passes.
+
+    A db recorded before `daily_hour_usage` existed has no nightness at
+    all, in which case there's nothing to draw and no animation to emit.
+    """
+    nightness = timeline.daily_nightness
+    if not nightness or not any(nightness):
+        return ''
+
+    if veil:
+        values = [f'{_night_veil_opacity(value):.3f}' for value in nightness]
+        animate = _animate_tag('opacity', values, key_times, duration)
+        return _render_night_veil(nightness[-1], animate)
+
+    values = [f'{_saturated_nightness(value):.3f}' for value in nightness]
+    animate = _animate_tag('opacity', values, key_times, duration)
+    day_labels = [
+        f'Sky — {_format_day(day)}: {value:.0%} of prompts typed at night'
+        for day, value in zip(timeline.days, nightness, strict=True)
+    ]
+    return _render_stars(
+        _saturated_nightness(nightness[-1]),
+        animate,
+        _title(day_labels[-1]),
+        _tt_attr(day_labels),
+    )
 
 
 def _cache_efficiency_flower_count(
@@ -1993,11 +2271,13 @@ def _render_leaves(
             max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5) * size_multiplier
         )
         angle = rng.uniform(0, 360)
-        color = rng.choice(LEAF_COLORS)
+        color_index = rng.randrange(len(LEAF_COLORS))
         elements.append(
             f'<g class="leaf" transform="translate({leaf_x:.1f},{leaf_y:.1f}) '
             f'rotate({angle:.1f}) scale({radius:.2f})">'
-            f'<path d="{LEAF_SHAPE_D}" fill="{color}" opacity="0.92" />'
+            f'<path d="{LEAF_SHAPE_D}" '
+            f'fill="url(#{LEAF_PAINT_ID}{color_index})" '
+            f'opacity="{LEAF_OPACITY_LIVING}" />'
             f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
             f'opacity="0.5" />'
             f'</g>'
@@ -2011,7 +2291,7 @@ LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
 LEGEND_X = 14.0
 LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
 LEGEND_PADDING = 10.0
-LEGEND_COLUMNS = 5
+LEGEND_COLUMNS = 6
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
@@ -2048,6 +2328,16 @@ LEGEND_ROWS = (
         'Sun',
         ('rises + grows w/', 'total all-in tokens'),
         'sun',
+    ),
+    (
+        'Season',
+        ('turns + thins the longer', 'the garden goes untended'),
+        'season',
+    ),
+    (
+        'Sky',
+        ('darkens with the share', 'of prompts after 22:00'),
+        'sky',
     ),
     (
         'Sunflowers',
@@ -2117,6 +2407,32 @@ def _legend_icon_sunflower(cx: float, cy: float) -> str:
     return _render_sunflower(cx, cy + 8.0, 16.0, 'legend-sunflower')
 
 
+def _legend_icon_season(cx: float, cy: float) -> str:
+    return (
+        f'<path d="{LEAF_SHAPE_D}" fill="{LEAF_COLORS[1]}" '
+        f'transform="translate({cx - 3.5:.1f},{cy:.1f}) '
+        f'rotate(-20) scale(5)" />'
+        f'<path d="{LEAF_SHAPE_D}" fill="{AUTUMN_COLORS[2]}" '
+        f'transform="translate({cx + 3.5:.1f},{cy:.1f}) '
+        f'rotate(25) scale(5)" />'
+    )
+
+
+def _legend_icon_sky(cx: float, cy: float) -> str:
+    return (
+        f'<rect x="{cx - 6:.1f}" y="{cy - 5:.1f}" width="12" height="10" '
+        f'rx="2" fill="{NIGHT_VEIL_COLOR}" />'
+        f'<circle cx="{cx - 3:.1f}" cy="{cy - 2:.1f}" r="0.9" '
+        f'fill="{STAR_COLOR}" />'
+        f'<circle cx="{cx + 2:.1f}" cy="{cy - 3.4:.1f}" r="0.7" '
+        f'fill="{STAR_COLOR}" />'
+        f'<circle cx="{cx + 3.4:.1f}" cy="{cy + 1.6:.1f}" r="0.9" '
+        f'fill="{STAR_COLOR}" />'
+        f'<circle cx="{cx - 1.6:.1f}" cy="{cy + 2.6:.1f}" r="0.6" '
+        f'fill="{STAR_COLOR}" />'
+    )
+
+
 def _legend_icon_bird(cx: float, cy: float) -> str:
     # Dark, unlike the sky birds: the legend panel is a pale cream card.
     return _render_bird(cx, cy + 2.0, 6.0, BIRD_LEGEND_COLOR)
@@ -2132,6 +2448,8 @@ LEGEND_ICON_RENDERERS = {
     'bush': _legend_icon_bush,
     'sun': _legend_icon_sun,
     'sunflower': _legend_icon_sunflower,
+    'sky': _legend_icon_sky,
+    'season': _legend_icon_season,
     'bird': _legend_icon_bird,
 }
 
@@ -2140,7 +2458,12 @@ def _render_legend_icon(icon: str, cx: float, cy: float) -> str:
     return LEGEND_ICON_RENDERERS[icon](cx, cy)
 
 
-def _render_legend(*, with_birds: bool = False) -> str:
+def _render_legend(
+    *,
+    with_birds: bool = False,
+    with_night: bool = False,
+    with_seasons: bool = False,
+) -> str:
     """A key panel explaining what each part of the tree represents.
 
     Sits in its own band below the garden viewBox, so it can never overlap
@@ -2149,10 +2472,18 @@ def _render_legend(*, with_birds: bool = False) -> str:
     overflowed into each other, and a third row would need a taller band
     than the two- and three-line descriptions leave room for.
 
-    The birds entry is dropped unless cartoon actually produced birds:
-    a key to a shape that isn't in the sky is just a puzzle.
+    The birds, sky and season entries are dropped unless there's actually
+    a bird, a night or a turned leaf to explain: a key to something the
+    garden isn't doing is just a puzzle.
     """
-    rows = [row for row in LEGEND_ROWS if with_birds or row[2] != 'bird']
+    dropped = set()
+    if not with_birds:
+        dropped.add('bird')
+    if not with_night:
+        dropped.add('sky')
+    if not with_seasons:
+        dropped.add('season')
+    rows = [row for row in LEGEND_ROWS if row[2] not in dropped]
     column_width = LEGEND_WIDTH / LEGEND_COLUMNS
     row_count = math.ceil(len(rows) / LEGEND_COLUMNS)
     row_height = LEGEND_HEIGHT / row_count
@@ -2205,7 +2536,11 @@ def render_svg(garden: GardenData) -> str:
     sun_title = _title(f'Sun — {garden.total_tokens:,} tokens (all-in)')
 
     body = (
-        f'<g class="sun">{sun_title}'
+        _render_stars(
+            _saturated_nightness(garden.nightness),
+            title=_night_title(garden.nightness, garden.hour_counts),
+        )
+        + f'<g class="sun">{sun_title}'
         f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}</g>'
         + _render_clouds(garden.model_efforts)
         + _render_birds(
@@ -2227,7 +2562,13 @@ def render_svg(garden: GardenData) -> str:
             garden.cache_read_tokens,
             garden.cache_write_tokens,
         )
-        + _render_legend(with_birds=bool(garden.birds))
+        # The veil goes over the garden but under the legend.
+        + _render_night_veil(garden.nightness)
+        + _render_legend(
+            with_birds=bool(garden.birds),
+            with_night=garden.nightness > 0,
+            with_seasons=garden.vitality < 1.0,
+        )
         + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
     )
 
@@ -2235,7 +2576,7 @@ def render_svg(garden: GardenData) -> str:
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="0 0 {VIEWBOX_WIDTH} {LEGEND_BAND_BOTTOM:.1f}" '
         f'width="{VIEWBOX_WIDTH}" height="{LEGEND_BAND_BOTTOM:.1f}">'
-        f'{_render_defs()}'
+        f'{_render_defs(vitality=garden.vitality)}'
         f'{_render_background()}'
         f'{body}'
         f'</svg>'
@@ -2473,6 +2814,7 @@ def _render_timeline_branches_and_leaves(
     if not timeline.branch_order:
         return ''
 
+    vitality = timeline.daily_vitality or [1.0] * len(timeline.days)
     elements = [
         _render_timeline_crown(base_half_width_by_day, key_times, duration)
     ]
@@ -2638,6 +2980,7 @@ def _render_timeline_branches_and_leaves(
             final_length=final_length,
             key_times=key_times,
             duration=duration,
+            vitality=vitality,
         )
         elements.append(
             f'<g class="repo-group" {tt}>'
@@ -2673,6 +3016,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
     final_length: float,
     key_times: list[float],
     duration: float,
+    vitality: list[float],
 ) -> str:
     # A branch's direction is fixed once chosen (only its length grows day
     # to day), so the unit vectors from the *final* vector describe every
@@ -2760,7 +3104,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
             max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5) * size_multiplier
         )
         angle = rng.uniform(0, 360)
-        color = rng.choice(LEAF_COLORS)
+        color_index = rng.randrange(len(LEAF_COLORS))
 
         # Track the branch's position every day, not just on the day this
         # leaf appears -- otherwise the leaf fades in already sitting at its
@@ -2802,8 +3146,14 @@ def _render_timeline_leaves(  # noqa: PLR0915
             ),
             day_count - 1,
         )
+        # Combined with the leaf path's own opacity, this both fades the
+        # leaf in on the day it was earned and thins the canopy out as
+        # the garden goes dormant.
         opacity_values = [
-            '1' if i >= birth_index else '0' for i in range(day_count)
+            f'{_leaf_opacity(vitality[i]) / LEAF_OPACITY_LIVING:.3f}'
+            if i >= birth_index
+            else '0'
+            for i in range(day_count)
         ]
         opacity_animate = _animate_tag(
             'opacity', opacity_values, key_times, duration
@@ -2814,7 +3164,9 @@ def _render_timeline_leaves(  # noqa: PLR0915
             f'{translate_animate}'
             f'<g transform="rotate({angle:.1f}) scale({radius:.2f})" '
             f'opacity="1">'
-            f'<path d="{LEAF_SHAPE_D}" fill="{color}" opacity="0.92" />'
+            f'<path d="{LEAF_SHAPE_D}" '
+            f'fill="url(#{LEAF_PAINT_ID}{color_index})" '
+            f'opacity="{LEAF_OPACITY_LIVING}" />'
             f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
             f'opacity="0.5" />'
             f'{opacity_animate}'
@@ -3501,7 +3853,8 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     trunk_tt = _tt_attr(trunk_day_labels)
 
     body = (
-        _render_timeline_sun(timeline, key_times, duration)
+        _render_timeline_night(timeline, key_times, duration, veil=False)
+        + _render_timeline_sun(timeline, key_times, duration)
         + _render_timeline_clouds(timeline, key_times, duration)
         + _render_timeline_birds(timeline)
         + f'<g class="trunk-group" {trunk_tt}>{trunk_title}'
@@ -3521,16 +3874,27 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_sunflowers(timeline, key_times, duration)
         + _render_timeline_bushes(timeline, key_times, duration)
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
-        + _render_legend(with_birds=bool(timeline.birds))
+        # Over the garden but under the legend -- as in `render_svg`.
+        + _render_timeline_night(timeline, key_times, duration, veil=True)
+        + _render_legend(
+            with_birds=bool(timeline.birds),
+            with_night=any(timeline.daily_nightness),
+            with_seasons=any(value < 1.0 for value in timeline.daily_vitality),
+        )
         + _render_scrubber(timeline, key_times, duration)
         + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)
     )
 
+    leaf_animations, ground_animations, canopy_animations = _season_animations(
+        timeline.daily_vitality or [1.0] * day_count, key_times, duration
+    )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="0 0 {VIEWBOX_WIDTH} {TIMELINE_VIEWBOX_HEIGHT:.1f}" '
         f'width="{VIEWBOX_WIDTH}" height="{TIMELINE_VIEWBOX_HEIGHT:.1f}">'
-        f'{_render_defs()}'
+        f'{
+            _render_defs(leaf_animations, ground_animations, canopy_animations)
+        }'
         f'{_render_background()}'
         f'{body}'
         f'</svg>'

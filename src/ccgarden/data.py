@@ -12,6 +12,38 @@ from ccgarden.claude_stats import (
 
 
 @dataclass(frozen=True)
+class DayRange:
+    """An optional inclusive `day` filter shared by every loader query.
+
+    Every table is day-keyed with ISO `day` strings, and no query has a
+    WHERE clause of its own, so `clause()` can always be spliced in
+    directly after the FROM and its `params` prepended to the query's.
+    """
+
+    since: str | None = None
+    until: str | None = None
+
+    def clause(self) -> str:
+        conditions = []
+        if self.since is not None:
+            conditions.append('day >= ?')
+        if self.until is not None:
+            conditions.append('day <= ?')
+        if not conditions:
+            return ''
+        return ' WHERE ' + ' AND '.join(conditions)
+
+    @property
+    def params(self) -> tuple[str, ...]:
+        return tuple(
+            bound for bound in (self.since, self.until) if bound is not None
+        )
+
+
+ALL_DAYS = DayRange()
+
+
+@dataclass(frozen=True)
 class DayRing:
     day: str
     sessions: int
@@ -76,6 +108,11 @@ class GardenData:
     total_tokens: int = 0
     birds: list[CartoonBird] = field(default_factory=list)
     cartoon_since: str = ''
+    # Prompts by local hour, and the share of them typed at night.
+    hour_counts: dict[int, int] = field(default_factory=dict)
+    nightness: float = 0.0
+    # How alive the garden is *today* -- see `_daily_vitality`.
+    vitality: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -145,6 +182,80 @@ class GardenTimeline:
     # history, so birds have no per-day frames to replay.
     birds: list[CartoonBird] = field(default_factory=list)
     cartoon_since: str = ''
+    # One nightness per day -- the only per-day channel that isn't
+    # cumulative, since the sky reflects that day alone.
+    daily_nightness: list[float] = field(default_factory=list)
+    hour_counts: dict[int, int] = field(default_factory=dict)
+    # Also non-cumulative, and the only channel that can fall: how
+    # recently you worked, which drives the season.
+    daily_vitality: list[float] = field(default_factory=list)
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    """Whether `table` is present in this db.
+
+    `daily_hour_usage` arrived after the first released schema, so a db
+    recorded by an older version simply has no hours in it. That's a
+    garden with no opinion about the time of day, not an error -- the
+    table appears again on the next `ccstats` run.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+NIGHT_HOURS = frozenset({22, 23, 0, 1, 2, 3, 4, 5})
+
+
+def _nightness(hour_counts: dict[int, int]) -> float:
+    """Share of a day's prompts typed at night, 0.0-1.0.
+
+    Drives how dark the sky is drawn. A day with no prompts at all has no
+    opinion about the time of day, so it comes back 0.0 (broad daylight)
+    rather than dividing by zero.
+    """
+    total = sum(hour_counts.values())
+    if total <= 0:
+        return 0.0
+    night = sum(
+        count for hour, count in hour_counts.items() if hour in NIGHT_HOURS
+    )
+    return night / total
+
+
+def _load_hour_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
+) -> tuple[list[float], dict[int, int]]:
+    """Per-day nightness plus the garden-wide hour histogram.
+
+    Nightness is deliberately *not* cumulative: unlike every other shape,
+    the sky reflects how you were working on that day, not the sum of
+    every day before it.
+    """
+    if not _table_exists(conn, 'daily_hour_usage'):
+        return [0.0] * len(days), {}
+
+    cursor = conn.execute(
+        'SELECT day, hour, count '
+        f'FROM daily_hour_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
+    )
+
+    per_day: list[dict[int, int]] = [{} for _ in days]
+    overall: dict[int, int] = {}
+    for day, hour, count in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        per_day[index][hour] = per_day[index].get(hour, 0) + count
+        overall[hour] = overall.get(hour, 0) + count
+
+    return [_nightness(counts) for counts in per_day], overall
 
 
 def load_cartoon_birds(
@@ -181,11 +292,13 @@ def load_cartoon_birds(
 
 
 def load_garden_timeline(
-    db_path: str, cartoon_since: str = DEFAULT_CARTOON_SINCE
+    db_path: str,
+    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    days: DayRange = ALL_DAYS,
 ) -> GardenTimeline:
     conn = sqlite3.connect(db_path)
     try:
-        timeline = _load_timeline(conn)
+        timeline = _load_timeline(conn, days)
     finally:
         conn.close()
     return replace(
@@ -195,7 +308,9 @@ def load_garden_timeline(
     )
 
 
-def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
+def _load_cache_totals(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> tuple[int, int]:
     """Garden-wide cache read/write token sums.
 
     Feeds the cache-efficiency flower count -- how many times a cache write
@@ -203,12 +318,16 @@ def _load_cache_totals(conn: sqlite3.Connection) -> tuple[int, int]:
     """
     row = conn.execute(
         'SELECT COALESCE(SUM(cache_read_tokens), 0), '
-        'COALESCE(SUM(cache_write_tokens), 0) FROM daily_totals'
+        'COALESCE(SUM(cache_write_tokens), 0) '
+        f'FROM daily_totals{days.clause()}',
+        days.params,
     ).fetchone()
     return row[0], row[1]
 
 
-def _load_total_tokens(conn: sqlite3.Connection) -> int:
+def _load_total_tokens(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> int:
     """Garden-wide sum of every token counted anywhere.
 
     Includes output, input, cache read, and cache write. Feeds the
@@ -219,9 +338,67 @@ def _load_total_tokens(conn: sqlite3.Connection) -> int:
         'SELECT COALESCE(SUM(output_tokens), 0) '
         '+ COALESCE(SUM(input_tokens), 0) '
         '+ COALESCE(SUM(cache_read_tokens), 0) '
-        '+ COALESCE(SUM(cache_write_tokens), 0) FROM daily_totals'
+        '+ COALESCE(SUM(cache_write_tokens), 0) '
+        f'FROM daily_totals{days.clause()}',
+        days.params,
     ).fetchone()
     return row[0]
+
+
+# A gap shorter than this is a weekend, not a dormancy, and shouldn't
+# cost the garden its leaves.
+DORMANCY_MIN_GAP_DAYS = 4
+# Days of silence for the garden to lose half its vitality. Tuned so a
+# fortnight away reads as autumn and a couple of months as bare winter.
+DORMANCY_HALF_LIFE_DAYS = 12.0
+# It takes two days to have a gap between them.
+MIN_DAYS_WITH_A_GAP = 2
+
+
+def _with_dormant_days(
+    day_rows: list[tuple[str, int, int, int, int, int]],
+) -> list[tuple[str, int, int, int, int, int]]:
+    """Insert an all-zero frame into the middle of every real gap.
+
+    The db only holds days you actually worked, so without this a
+    three-month break is just one frame boundary and the timelapse
+    skips straight over it. A single synthetic day per gap gives the
+    animation somewhere to *be* dormant, and because it carries no rows
+    in any other table, every cumulative shape simply holds its value
+    there rather than growing -- which is exactly what a gap means.
+    """
+    if len(day_rows) < MIN_DAYS_WITH_A_GAP:
+        return day_rows
+
+    expanded = [day_rows[0]]
+    for row in day_rows[1:]:
+        previous = date.fromisoformat(expanded[-1][0])
+        current = date.fromisoformat(row[0])
+        gap = (current - previous).days
+        if gap >= DORMANCY_MIN_GAP_DAYS:
+            midpoint = previous + timedelta(days=gap // 2)
+            expanded.append((str(midpoint), 0, 0, 0, 0, 0))
+        expanded.append(row)
+    return expanded
+
+
+def _daily_vitality(days: list[str], active: set[str]) -> list[float]:
+    """How alive the garden is on each frame, 1.0 down to ~0.
+
+    Decays with the number of calendar days since you last worked, so a
+    lapse turns the leaves and the ground turn autumnal and a return
+    brings them back. Unlike the cumulative channels this one can fall:
+    that's the whole point of it.
+    """
+    vitality = []
+    last_active: date | None = None
+    for day in days:
+        current = date.fromisoformat(day)
+        if day in active:
+            last_active = current
+        gap = (current - last_active).days if last_active else 0
+        vitality.append(0.5 ** (gap / DORMANCY_HALF_LIFE_DAYS))
+    return vitality
 
 
 def _with_seed_day(
@@ -241,13 +418,17 @@ def _with_seed_day(
     return [seed, *day_rows]
 
 
-def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
+def _load_timeline(
+    conn: sqlite3.Connection, days_range: DayRange = ALL_DAYS
+) -> GardenTimeline:
     day_rows = conn.execute(
         'SELECT day, sessions, cache_read_tokens, cache_write_tokens, '
         'output_tokens, input_tokens '
-        'FROM daily_totals ORDER BY day ASC'
+        f'FROM daily_totals{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
     ).fetchall()
-    day_rows = _with_seed_day(day_rows)
+    active_days = {row[0] for row in day_rows}
+    day_rows = _with_seed_day(_with_dormant_days(day_rows))
     days = [row[0] for row in day_rows]
     daily_sessions = [row[1] for row in day_rows]
     day_index = {day: index for index, day in enumerate(days)}
@@ -277,16 +458,30 @@ def _load_timeline(conn: sqlite3.Connection) -> GardenTimeline:
         cumulative_cache_write.append(running_cache_write)
         cumulative_total_tokens.append(running_total_tokens)
 
-    branch_order, branch_days = _load_branch_days(conn, days, day_index)
-    model_order, model_days = _load_model_days(conn, days, day_index)
-    tool_order, tool_days = _load_tool_days(conn, days, day_index)
-    effort_order, effort_days = _load_effort_days(conn, days, day_index)
-    model_effort_order, model_effort_days = _load_model_effort_days(
-        conn, days, day_index
+    branch_order, branch_days = _load_branch_days(
+        conn, days, day_index, days_range
     )
-    cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
+    model_order, model_days = _load_model_days(
+        conn, days, day_index, days_range
+    )
+    tool_order, tool_days = _load_tool_days(conn, days, day_index, days_range)
+    effort_order, effort_days = _load_effort_days(
+        conn, days, day_index, days_range
+    )
+    model_effort_order, model_effort_days = _load_model_effort_days(
+        conn, days, day_index, days_range
+    )
+    cache_read_tokens, cache_write_tokens = _load_cache_totals(
+        conn, days_range
+    )
+    daily_nightness, hour_counts = _load_hour_days(
+        conn, days, day_index, days_range
+    )
 
     return GardenTimeline(
+        daily_nightness=daily_nightness,
+        hour_counts=hour_counts,
+        daily_vitality=_daily_vitality(days, active_days),
         days=days,
         daily_sessions=daily_sessions,
         cumulative_sessions=cumulative_sessions,
@@ -312,13 +507,13 @@ def _load_branch_days(
     conn: sqlite3.Connection,
     days: list[str],
     day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
 ) -> tuple[list[str], dict[str, list[RepoBranchDay]]]:
     cursor = conn.execute(
-        """
-        SELECT day, repo, sessions, lines_added, lines_removed,
-               output_tokens, input_tokens, cost, prompts
-        FROM daily_repo_usage ORDER BY day ASC
-        """
+        'SELECT day, repo, sessions, lines_added, lines_removed, '
+        'output_tokens, input_tokens, cost, prompts '
+        f'FROM daily_repo_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
     )
 
     day_count = len(days)
@@ -399,15 +594,18 @@ def _cumulative_branch_days(
     return rows
 
 
-def _load_models(conn: sqlite3.Connection) -> list[ModelCloud]:
+def _load_models(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[ModelCloud]:
     cursor = conn.execute(
-        """
+        f"""
         SELECT model, SUM(output_tokens), SUM(input_tokens)
-        FROM daily_model_usage
+        FROM daily_model_usage{days.clause()}
         GROUP BY model
         HAVING SUM(output_tokens) + SUM(input_tokens) > 0
         ORDER BY SUM(output_tokens) + SUM(input_tokens) DESC
-        """
+        """,
+        days.params,
     )
     return [
         ModelCloud(model=row[0], output_tokens=row[1], input_tokens=row[2])
@@ -419,10 +617,12 @@ def _load_model_days(
     conn: sqlite3.Connection,
     days: list[str],
     day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
 ) -> tuple[list[str], dict[str, list[ModelUsageDay]]]:
     cursor = conn.execute(
         'SELECT day, model, output_tokens, input_tokens '
-        'FROM daily_model_usage ORDER BY day ASC'
+        f'FROM daily_model_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
     )
 
     day_count = len(days)
@@ -477,15 +677,18 @@ def _cumulative_model_days(
     return rows
 
 
-def _load_tools(conn: sqlite3.Connection) -> list[ToolBush]:
+def _load_tools(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[ToolBush]:
     cursor = conn.execute(
-        """
+        f"""
         SELECT tool, SUM(count)
-        FROM daily_tool_usage
+        FROM daily_tool_usage{days.clause()}
         GROUP BY tool
         HAVING SUM(count) > 0
         ORDER BY SUM(count) DESC
-        """
+        """,
+        days.params,
     )
     return [ToolBush(tool=row[0], count=row[1]) for row in cursor.fetchall()]
 
@@ -494,9 +697,12 @@ def _load_tool_days(
     conn: sqlite3.Connection,
     days: list[str],
     day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
 ) -> tuple[list[str], dict[str, list[ToolUsageDay]]]:
     cursor = conn.execute(
-        'SELECT day, tool, count FROM daily_tool_usage ORDER BY day ASC'
+        'SELECT day, tool, count '
+        f'FROM daily_tool_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
     )
 
     day_count = len(days)
@@ -535,15 +741,18 @@ def _cumulative_tool_days(
     return rows
 
 
-def _load_model_effort_clouds(conn: sqlite3.Connection) -> list[ModelCloud]:
+def _load_model_effort_clouds(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[ModelCloud]:
     cursor = conn.execute(
-        """
+        f"""
         SELECT model_effort, SUM(output_tokens), SUM(input_tokens)
-        FROM daily_model_effort_usage
+        FROM daily_model_effort_usage{days.clause()}
         GROUP BY model_effort
         HAVING SUM(output_tokens) + SUM(input_tokens) > 0
         ORDER BY SUM(output_tokens) + SUM(input_tokens) DESC
-        """
+        """,
+        days.params,
     )
     return [
         ModelCloud(model=row[0], output_tokens=row[1], input_tokens=row[2])
@@ -555,10 +764,13 @@ def _load_model_effort_days(
     conn: sqlite3.Connection,
     days: list[str],
     day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
 ) -> tuple[list[str], dict[str, list[ModelUsageDay]]]:
     cursor = conn.execute(
         'SELECT day, model_effort, output_tokens, input_tokens '
-        'FROM daily_model_effort_usage ORDER BY day ASC'
+        f'FROM daily_model_effort_usage{days_range.clause()} '
+        'ORDER BY day ASC',
+        days_range.params,
     )
 
     day_count = len(days)
@@ -594,9 +806,12 @@ def _load_effort_days(
     conn: sqlite3.Connection,
     days: list[str],
     day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
 ) -> tuple[list[str], dict[str, list[EffortUsageDay]]]:
     cursor = conn.execute(
-        'SELECT day, effort, count FROM daily_effort_usage ORDER BY day ASC'
+        'SELECT day, effort, count '
+        f'FROM daily_effort_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
     )
 
     day_count = len(days)
@@ -636,15 +851,18 @@ def _cumulative_effort_days(
     return rows
 
 
-def _load_efforts(conn: sqlite3.Connection) -> list[EffortBush]:
+def _load_efforts(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[EffortBush]:
     cursor = conn.execute(
-        """
+        f"""
         SELECT effort, SUM(count)
-        FROM daily_effort_usage
+        FROM daily_effort_usage{days.clause()}
         GROUP BY effort
         HAVING SUM(count) > 0
         ORDER BY SUM(count) DESC
-        """
+        """,
+        days.params,
     )
     return [
         EffortBush(effort=row[0], count=row[1]) for row in cursor.fetchall()
@@ -652,18 +870,21 @@ def _load_efforts(conn: sqlite3.Connection) -> list[EffortBush]:
 
 
 def load_garden_data(
-    db_path: str, cartoon_since: str = DEFAULT_CARTOON_SINCE
+    db_path: str,
+    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    days: DayRange = ALL_DAYS,
 ) -> GardenData:
     conn = sqlite3.connect(db_path)
     try:
-        rings = _load_rings(conn)
-        branches = _load_branches(conn)
-        models = _load_models(conn)
-        tools = _load_tools(conn)
-        efforts = _load_efforts(conn)
-        model_efforts = _load_model_effort_clouds(conn)
-        cache_read_tokens, cache_write_tokens = _load_cache_totals(conn)
-        total_tokens = _load_total_tokens(conn)
+        rings = _load_rings(conn, days)
+        branches = _load_branches(conn, days)
+        models = _load_models(conn, days)
+        tools = _load_tools(conn, days)
+        efforts = _load_efforts(conn, days)
+        model_efforts = _load_model_effort_clouds(conn, days)
+        cache_read_tokens, cache_write_tokens = _load_cache_totals(conn, days)
+        total_tokens = _load_total_tokens(conn, days)
+        hour_counts = _load_hours(conn, days)
     finally:
         conn.close()
     return GardenData(
@@ -678,13 +899,49 @@ def load_garden_data(
         total_tokens=total_tokens,
         birds=load_cartoon_birds(cartoon_since),
         cartoon_since=cartoon_since,
+        hour_counts=hour_counts,
+        nightness=_nightness(hour_counts),
+        vitality=_vitality_today(rings),
     )
 
 
-def _load_rings(conn: sqlite3.Connection) -> list[DayRing]:
+def _vitality_today(rings: list[DayRing]) -> float:
+    """Today's vitality, from how long ago the last recorded day was.
+
+    A still garden is rendered "as of now", so a garden last worked in
+    the spring should be shown in the autumn it has actually reached --
+    not frozen green on its final active day.
+    """
+    if not rings:
+        return 1.0
+    gap = (date.today() - date.fromisoformat(rings[-1].day)).days
+    return 0.5 ** (max(gap, 0) / DORMANCY_HALF_LIFE_DAYS)
+
+
+def _load_hours(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> dict[int, int]:
+    if not _table_exists(conn, 'daily_hour_usage'):
+        return {}
+    cursor = conn.execute(
+        f"""
+        SELECT hour, SUM(count)
+        FROM daily_hour_usage{days.clause()}
+        GROUP BY hour
+        HAVING SUM(count) > 0
+        """,
+        days.params,
+    )
+    return dict(cursor.fetchall())
+
+
+def _load_rings(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[DayRing]:
     cursor = conn.execute(
         'SELECT day, sessions, lines_added, lines_removed '
-        'FROM daily_totals ORDER BY day ASC'
+        f'FROM daily_totals{days.clause()} ORDER BY day ASC',
+        days.params,
     )
     return [
         DayRing(
@@ -697,9 +954,11 @@ def _load_rings(conn: sqlite3.Connection) -> list[DayRing]:
     ]
 
 
-def _load_branches(conn: sqlite3.Connection) -> list[RepoBranch]:
+def _load_branches(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[RepoBranch]:
     cursor = conn.execute(
-        """
+        f"""
         SELECT repo,
                SUM(sessions),
                SUM(lines_added),
@@ -708,10 +967,11 @@ def _load_branches(conn: sqlite3.Connection) -> list[RepoBranch]:
                SUM(input_tokens),
                SUM(cost),
                SUM(prompts)
-        FROM daily_repo_usage
+        FROM daily_repo_usage{days.clause()}
         GROUP BY repo
         ORDER BY SUM(lines_added) DESC
-        """
+        """,
+        days.params,
     )
     return [
         RepoBranch(

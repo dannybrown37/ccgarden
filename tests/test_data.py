@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 from ccgarden.data import (
+    ALL_DAYS,
     CartoonBird,
+    DayRange,
     DayRing,
     EffortBush,
     ModelCloud,
@@ -13,6 +15,8 @@ from ccgarden.data import (
     load_cartoon_birds,
     load_garden_data,
     load_garden_timeline,
+    _daily_vitality,
+    _nightness,
 )
 
 SCHEMA = """
@@ -83,6 +87,13 @@ CREATE TABLE daily_model_effort_usage (
     cache_write_tokens INTEGER NOT NULL,
     PRIMARY KEY (day, model_effort)
 );
+
+CREATE TABLE IF NOT EXISTS daily_hour_usage (
+    day TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, hour)
+);
 """
 
 
@@ -95,6 +106,7 @@ def make_db(
     tool_rows: list[tuple] | None = None,
     effort_rows: list[tuple] | None = None,
     model_effort_rows: list[tuple] | None = None,
+    hour_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -114,6 +126,10 @@ def make_db(
     conn.executemany(
         'INSERT INTO daily_tool_usage VALUES (?,?,?)',
         tool_rows or [],
+    )
+    conn.executemany(
+        'INSERT INTO daily_hour_usage VALUES (?,?,?)',
+        hour_rows or [],
     )
     conn.executemany(
         'INSERT INTO daily_effort_usage VALUES (?,?,?)',
@@ -789,3 +805,188 @@ def test_load_garden_data_without_cartoon_still_loads(
     garden = load_garden_data(db_path)
 
     assert garden.birds == []
+
+
+def test_nightness_is_the_share_of_prompts_typed_at_night() -> None:
+    # 3 of 12 prompts fall in NIGHT_HOURS (23:00 and 02:00).
+    assert _nightness({9: 6, 14: 3, 23: 2, 2: 1}) == pytest.approx(0.25)
+
+
+def test_nightness_of_a_day_with_no_prompts_is_zero() -> None:
+    assert _nightness({}) == 0.0
+
+
+def test_load_garden_data_aggregates_hours_across_days(
+    tmp_path: Path,
+) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[totals_row('2026-01-01', 1, 0, 0)],
+        repo_rows=[],
+        hour_rows=[
+            ('2026-01-01', 9, 4),
+            ('2026-01-01', 23, 1),
+            ('2026-01-02', 9, 2),
+            ('2026-01-02', 2, 3),
+        ],
+    )
+
+    garden = load_garden_data(db_path, cartoon_since='')
+
+    assert garden.hour_counts == {9: 6, 23: 1, 2: 3}
+    assert garden.nightness == pytest.approx(0.4)
+
+
+def test_timeline_nightness_is_per_day_not_cumulative(tmp_path: Path) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 1, 0, 0),
+            totals_row('2026-01-02', 1, 0, 0),
+        ],
+        repo_rows=[],
+        hour_rows=[
+            # An all-night first day followed by an all-day second one.
+            ('2026-01-01', 2, 5),
+            ('2026-01-02', 14, 5),
+        ],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    # The seed day leads, then the real days -- and day two drops back to
+    # full daylight rather than inheriting day one's night.
+    assert timeline.daily_nightness == [0.0, 1.0, 0.0]
+
+
+def test_hours_are_absent_when_the_table_predates_the_feature(
+    tmp_path: Path,
+) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[totals_row('2026-01-01', 1, 0, 0)],
+        repo_rows=[],
+    )
+    sqlite3.connect(db_path).execute('DROP TABLE daily_hour_usage')
+
+    garden = load_garden_data(db_path, cartoon_since='')
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert garden.hour_counts == {}
+    assert garden.nightness == 0.0
+    assert timeline.daily_nightness == [0.0, 0.0]
+
+
+def test_day_range_limits_what_the_garden_loads(tmp_path: Path) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 1, 10, 0),
+            totals_row('2026-02-01', 1, 20, 0),
+            totals_row('2026-03-01', 1, 40, 0),
+        ],
+        repo_rows=[],
+    )
+
+    garden = load_garden_data(
+        db_path,
+        cartoon_since='',
+        days=DayRange(since='2026-02-01', until='2026-02-28'),
+    )
+
+    assert [ring.day for ring in garden.rings] == ['2026-02-01']
+
+
+def test_an_open_ended_day_range_bounds_only_one_side(
+    tmp_path: Path,
+) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 1, 10, 0),
+            totals_row('2026-02-01', 1, 20, 0),
+            totals_row('2026-03-01', 1, 40, 0),
+        ],
+        repo_rows=[],
+    )
+
+    garden = load_garden_data(
+        db_path, cartoon_since='', days=DayRange(since='2026-02-01')
+    )
+
+    assert [ring.day for ring in garden.rings] == ['2026-02-01', '2026-03-01']
+
+
+def test_the_default_day_range_selects_everything() -> None:
+    assert ALL_DAYS.clause() == ''
+    assert ALL_DAYS.params == ()
+
+
+def test_a_long_gap_gets_a_dormant_frame_of_its_own(tmp_path: Path) -> None:
+    """Without one, a months-long lapse is a single frame boundary."""
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 1, 0, 0),
+            totals_row('2026-03-02', 1, 0, 0),
+        ],
+        repo_rows=[],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert timeline.days == [
+        '2025-12-31',  # seed
+        '2026-01-01',
+        '2026-01-31',  # dormant midpoint
+        '2026-03-02',
+    ]
+    dormant = timeline.daily_vitality[2]
+    assert dormant < 0.2
+    # The garden comes back to life when you do.
+    assert timeline.daily_vitality[-1] == pytest.approx(1.0)
+
+
+def test_a_weekend_is_not_a_dormancy(tmp_path: Path) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-02', 1, 0, 0),  # Friday
+            totals_row('2026-01-05', 1, 0, 0),  # Monday
+        ],
+        repo_rows=[],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert timeline.days == ['2026-01-01', '2026-01-02', '2026-01-05']
+    assert all(value == 1.0 for value in timeline.daily_vitality)
+
+
+def test_a_dormant_frame_holds_growth_rather_than_reversing_it(
+    tmp_path: Path,
+) -> None:
+    """Cumulative shapes must not shrink during a gap -- only pause."""
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 3, 0, 0),
+            totals_row('2026-03-02', 2, 0, 0),
+        ],
+        repo_rows=[],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert timeline.cumulative_sessions == [0, 3, 3, 5]
+
+
+def test_vitality_decays_with_days_since_the_last_active_day() -> None:
+    days = ['2026-01-01', '2026-01-13', '2026-01-25']
+
+    vitality = _daily_vitality(days, active={'2026-01-01'})
+
+    # One half-life, then two.
+    assert vitality[0] == pytest.approx(1.0)
+    assert vitality[1] == pytest.approx(0.5, abs=0.01)
+    assert vitality[2] == pytest.approx(0.25, abs=0.01)

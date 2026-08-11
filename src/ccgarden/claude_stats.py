@@ -127,6 +127,10 @@ class UsageStats:
     longest_prompt_chars: int = 0
     models: Counter = field(default_factory=Counter)
     tools: Counter = field(default_factory=Counter)
+    # Prompts keyed by local hour (0-23) -- when you were at the keyboard,
+    # which drives the garden's time of day. Prompts rather than records,
+    # since a long agentic run shouldn't count as hours of presence.
+    hours: Counter = field(default_factory=Counter)
     efforts: Counter = field(default_factory=Counter)
     model_effort_counts: Counter = field(default_factory=Counter)
     model_usage: dict[str, ModelUsage] = field(default_factory=dict)
@@ -460,6 +464,8 @@ def collect_stats_from_logs(
 
             if stamp:
                 track_span(stats, stamp)
+                if is_prompt(record):
+                    stats.hours[stamp.astimezone().hour] += 1
 
             session = record.get('sessionId') or record.get('session_id')
             if session:
@@ -655,6 +661,7 @@ def merge_counts(merged: UsageStats, part: UsageStats) -> None:
     )
     merged.models.update(part.models)
     merged.tools.update(part.tools)
+    merged.hours.update(part.hours)
     merged.efforts.update(part.efforts)
     merged.model_effort_counts.update(part.model_effort_counts)
     for day, tokens in part.output_tokens_by_day.items():
@@ -847,6 +854,13 @@ CREATE TABLE IF NOT EXISTS daily_tool_usage (
     PRIMARY KEY (day, tool)
 );
 
+CREATE TABLE IF NOT EXISTS daily_hour_usage (
+    day TEXT NOT NULL,
+    hour INTEGER NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, hour)
+);
+
 CREATE TABLE IF NOT EXISTS daily_effort_usage (
     day TEXT NOT NULL,
     effort TEXT NOT NULL,
@@ -954,6 +968,13 @@ def record_day(
         conn.execute(
             'INSERT INTO daily_tool_usage (day, tool, count) VALUES (?, ?, ?)',
             (day_key, tool, count),
+        )
+
+    conn.execute('DELETE FROM daily_hour_usage WHERE day = ?', (day_key,))
+    for hour, count in stats.hours.items():
+        conn.execute(
+            'INSERT INTO daily_hour_usage (day, hour, count) VALUES (?, ?, ?)',
+            (day_key, hour, count),
         )
 
     conn.execute('DELETE FROM daily_effort_usage WHERE day = ?', (day_key,))

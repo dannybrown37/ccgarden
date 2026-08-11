@@ -27,6 +27,7 @@ from ccgarden.claude_stats import (
     cartoon_lines,
     collect_stats,
     collect_stats_by_repo,
+    collect_stats_from_logs,
     compute_cost,
     daily_series,
     ensure_schema,
@@ -38,6 +39,7 @@ from ccgarden.claude_stats import (
     load_pricing,
     merge_stats,
     parse_cartoon_stats,
+    parse_timestamp,
     peek_cwd,
     percentile,
     record_day,
@@ -2045,3 +2047,77 @@ def test_stats_as_dict_has_no_cartoon_stats_without_them() -> None:
     data = stats_as_dict(_stats_with_full_report_data())
 
     assert data['cartoon'] is None
+
+
+def test_prompt_hours_are_tallied_in_local_time(tmp_path: Path) -> None:
+    """The sky is about when *you* were typing, so hours are local."""
+    log = _write_log(
+        tmp_path,
+        [
+            _prompt('early', timestamp='2026-01-02T03:30:00Z'),
+            _prompt('also early', timestamp='2026-01-02T03:59:00Z'),
+            _prompt('later', timestamp='2026-01-02T14:05:00Z'),
+        ],
+    )
+
+    stats = collect_stats_from_logs([log])
+
+    expected = Counter()
+    for raw in (
+        '2026-01-02T03:30:00Z',
+        '2026-01-02T03:59:00Z',
+        '2026-01-02T14:05:00Z',
+    ):
+        expected[parse_timestamp(raw).astimezone().hour] += 1
+    assert stats.hours == expected
+
+
+def test_only_prompts_count_toward_hours(tmp_path: Path) -> None:
+    """A long agentic run isn't evidence you were awake for it."""
+    log = _write_log(
+        tmp_path,
+        [
+            _prompt('typed', timestamp='2026-01-02T09:00:00Z'),
+            _prompt(
+                'tool output',
+                timestamp='2026-01-02T09:30:00Z',
+                toolUseResult={'stdout': 'x'},
+            ),
+        ],
+    )
+
+    stats = collect_stats_from_logs([log])
+
+    assert sum(stats.hours.values()) == 1
+
+
+def test_recorded_hours_round_trip_through_the_db() -> None:
+    stats = UsageStats(session_ids={'s1'}, hours=Counter({2: 3, 14: 1}))
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+
+    record_day(conn, date(2026, 1, 2), stats, None)
+
+    rows = conn.execute(
+        'SELECT hour, count FROM daily_hour_usage ORDER BY hour'
+    ).fetchall()
+    assert rows == [(2, 3), (14, 1)]
+
+
+def test_re_recording_a_day_replaces_its_hours() -> None:
+    """Hours are day-keyed and idempotent, like every other daily table."""
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    day = date(2026, 1, 2)
+
+    record_day(
+        conn, day, UsageStats(session_ids={'s1'}, hours=Counter({2: 3})), None
+    )
+    record_day(
+        conn, day, UsageStats(session_ids={'s1'}, hours=Counter({9: 1})), None
+    )
+
+    rows = conn.execute(
+        'SELECT hour, count FROM daily_hour_usage ORDER BY hour'
+    ).fetchall()
+    assert rows == [(9, 1)]

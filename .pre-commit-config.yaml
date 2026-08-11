@@ -2,7 +2,7 @@ repos:
   # ruff and pytest live in git-a-grip so every repo shares one copy, rather
   # than each keeping its own `bash -c '... && git add "$@"'` wrapper.
   - repo: https://github.com/dannybrown37/git-a-grip
-    rev: v0.5.0
+    rev: v0.8.1
     hooks:
       - id: ruff-check
       - id: ruff-format
