@@ -72,6 +72,16 @@ BRANCH_TOKENS_SATURATION = 2_500_000
 # decides everything *about* a limb -- its length, thickness and foliage --
 # so more work is still a bigger tree; it just always reads as a tree.
 MIN_LIMBS = 6
+# A limb count alone doesn't buy a tree. Someone whose work is one real repo
+# plus five repos they ran two prompts against already clears MIN_LIMBS, and
+# gets a garden with one limb of substance and five twigs -- the pole
+# problem wearing a disguise. So the busiest repos keep splitting past the
+# minimum until no single limb carries more than this share of the tree's
+# weight, which is what makes a lopsided garden read as a crown.
+LIMB_MAX_SHARE = 0.3
+# Ceiling on how far one repo can be split, so a garden with a truly
+# runaway repo terminates instead of shaving it into filaments.
+MAX_LIMBS_PER_REPO = 8
 # Each successive limb cut from the same repo carries this much of the
 # previous one's share, so a split repo gets one dominant leader and
 # progressively smaller siblings instead of a fan of identical twins. Kept
@@ -1758,23 +1768,44 @@ class _Limb(NamedTuple):
     start: float = 0.0
 
 
+def _limb_lead_weight(weight: float, count: int) -> float:
+    """What the *largest* of `count` limbs cut from a repo carries.
+
+    The shares fall off geometrically, so the leader takes
+    `1 / sum(falloff)` of the repo however many ways it is cut. This is the
+    number that decides whether a tree looks balanced -- the leader is the
+    limb everything else is compared against.
+    """
+    return weight / sum(LIMB_SHARE_FALLOFF**rank for rank in range(count))
+
+
 def _limb_counts(weights: list[float], minimum: int) -> list[int]:
     """How many limbs each repo is split across, biggest repo first.
 
-    Highest-averages apportionment: each extra limb goes to whichever repo
-    is currently carrying the most work per limb, so a garden dominated by
-    one repo splits that repo hardest while a handful of comparable repos
-    share the extras evenly.
+    Each extra limb goes to whichever repo currently carries the heaviest
+    single limb, which is both the highest-averages answer to "who is owed
+    the next seat" and, literally, the limb unbalancing the tree. Splitting
+    stops once *both* rules are met: at least `minimum` limbs, and no limb
+    over `LIMB_MAX_SHARE` of the whole tree.
     """
     counts = [1] * len(weights)
-    for _ in range(minimum - len(weights)):
-        counts[
-            max(
-                range(len(weights)),
-                key=lambda index: weights[index] / (counts[index] + 1),
-            )
-        ] += 1
-    return counts
+    cap = LIMB_MAX_SHARE * sum(weights)
+    while True:
+        splittable = [
+            index
+            for index in range(len(weights))
+            if counts[index] < MAX_LIMBS_PER_REPO
+        ]
+        if not splittable:
+            return counts
+        leader = max(
+            splittable,
+            key=lambda index: _limb_lead_weight(weights[index], counts[index]),
+        )
+        lopsided = _limb_lead_weight(weights[leader], counts[leader]) > cap
+        if sum(counts) >= minimum and not lopsided:
+            return counts
+        counts[leader] += 1
 
 
 def _plan_limbs(repos: list[tuple[str, float]]) -> list[_Limb]:

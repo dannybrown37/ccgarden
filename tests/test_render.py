@@ -70,8 +70,11 @@ from ccgarden.render import (
     LIMB_SHARE_FALLOFF,
     _Limb,
     _limb_counts,
+    _limb_lead_weight,
     _limb_share_of,
     _plan_limbs,
+    LIMB_MAX_SHARE,
+    MAX_LIMBS_PER_REPO,
     MIN_LIMBS,
     _bird_positions,
     _bird_slots,
@@ -1304,7 +1307,45 @@ def test_limb_counts_gives_every_repo_at_least_one_limb() -> None:
 
     assert len(counts) == 3
     assert min(counts) >= 1
-    assert sum(counts) == MIN_LIMBS
+    assert sum(counts) >= MIN_LIMBS
+
+
+@pytest.mark.parametrize(
+    'weights',
+    [
+        [20000.0, 60.0, 40.0, 30.0, 20.0, 10.0],
+        [9000.0, 400.0, 20.0],
+        [5000.0],
+        [float(1000 - 100 * i) for i in range(8)],
+    ],
+)
+def test_limb_counts_leaves_no_limb_dominating_the_tree(
+    weights: list[float],
+) -> None:
+    counts = _limb_counts(weights, MIN_LIMBS)
+
+    leads = [
+        _limb_lead_weight(weight, count)
+        for weight, count in zip(weights, counts, strict=True)
+    ]
+
+    assert max(leads) <= LIMB_MAX_SHARE * sum(weights)
+
+
+def test_limb_counts_splits_a_dominant_repo_past_the_minimum() -> None:
+    # Enough repos to clear MIN_LIMBS on their own, but all the work is in
+    # one of them -- the six-limb skeleton would be one limb and five twigs.
+    counts = _limb_counts([20000.0, 60.0, 40.0, 30.0, 20.0, 10.0], MIN_LIMBS)
+
+    assert counts[0] > 1
+    assert sum(counts) > MIN_LIMBS
+    assert counts[1:] == [1] * 5
+
+
+def test_limb_counts_stops_splitting_a_runaway_repo() -> None:
+    counts = _limb_counts([1e9, 1.0], MIN_LIMBS)
+
+    assert max(counts) <= MAX_LIMBS_PER_REPO
 
 
 def test_limb_counts_leaves_a_wide_garden_untouched() -> None:
@@ -1325,7 +1366,7 @@ def test_plan_limbs_never_builds_a_sparse_skeleton(repo_count: int) -> None:
 
     limbs = _plan_limbs(repos)
 
-    assert len(limbs) == max(repo_count, MIN_LIMBS)
+    assert len(limbs) >= max(repo_count, MIN_LIMBS)
     assert len({limb.key for limb in limbs}) == len(limbs)
     for repo, _ in repos:
         shares = [limb.share for limb in limbs if limb.repo == repo]

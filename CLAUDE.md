@@ -78,7 +78,8 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   `_clear_of_sun`, bushes use `_bush_footprints`. Preserve those checks when
   moving things.
 - The tree's skeleton is **limbs, not repos**. `_plan_limbs` apportions at
-  least `MIN_LIMBS` limbs across the repos (busiest repos split hardest),
+  least `MIN_LIMBS` limbs across the repos and keeps splitting the busiest
+  past that until no limb carries more than `LIMB_MAX_SHARE` of the tree,
   and `_limb_share_of` cuts each repo's totals on cumulative boundaries so
   its limbs sum back to the repo exactly — leaf counts still equal
   `sessions * LEAVES_PER_SESSION`. Both renderers derive limbs from the
