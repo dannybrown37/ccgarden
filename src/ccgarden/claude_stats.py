@@ -490,6 +490,12 @@ def collect_stats(
 
 
 UNKNOWN_REPO = '(unknown)'
+SCRATCH_DIRS = (
+    Path('/tmp'),  # noqa: S108
+    Path('/var/tmp'),  # noqa: S108
+    Path('/dev/shm'),  # noqa: S108
+    Path('/'),
+)
 WORKTREES_SUFFIX = '-worktrees'
 GITDIR_PREFIX = 'gitdir:'
 
@@ -553,6 +559,11 @@ def worktree_sibling_root(cwd: Path) -> Path | None:
     return None
 
 
+def is_scratch_dir(cwd: Path) -> bool:
+    """True for dirs that are launch pads, not repos -- /tmp, $HOME, /."""
+    return cwd in SCRATCH_DIRS or cwd == Path.home()
+
+
 def enclosing_root(cwd: Path, roots: set[Path]) -> Path | None:
     """The deepest already-known repo root that contains `cwd`."""
     matches = [root for root in roots if root == cwd or root in cwd.parents]
@@ -566,7 +577,9 @@ def resolve_repo_roots(cwds: Iterable[str]) -> dict[str, Path]:
 
     Layered because most historical cwds have been deleted: an on-disk `.git`
     wins, then the `-worktrees/` naming convention, then containment inside a
-    root some other cwd already resolved to.
+    root some other cwd already resolved to. A cwd that matches none of those
+    and is itself a scratch dir is dropped rather than invented into a repo
+    named after it.
     """
     distinct = sorted({cwd for cwd in cwds if cwd})
     resolved: dict[str, Path] = {}
@@ -583,7 +596,10 @@ def resolve_repo_roots(cwds: Iterable[str]) -> dict[str, Path]:
     known = set(resolved.values())
     for cwd in unresolved:
         path = Path(cwd)
-        resolved[cwd] = enclosing_root(path, known) or path
+        root = enclosing_root(path, known)
+        if root is None and is_scratch_dir(path):
+            continue
+        resolved[cwd] = root or path
 
     return resolved
 

@@ -34,6 +34,7 @@ from ccgarden.claude_stats import (
     find_model_price,
     format_report,
     git_root_on_disk,
+    group_logs_by_repo,
     iter_days,
     label_repo_roots,
     load_pricing,
@@ -1447,6 +1448,32 @@ def test_resolve_repo_roots_keeps_an_unattributable_path_as_its_own_root(
     resolved = resolve_repo_roots([str(stray)])
 
     assert resolved == {str(stray): stray}
+
+
+@pytest.mark.parametrize(
+    'cwd',
+    ['/tmp', '/var/tmp', '/dev/shm', '/'],  # noqa: S108
+)
+def test_resolve_repo_roots_drops_scratch_dirs(cwd: str) -> None:
+    """A session launched in /tmp is not a repo called "tmp"."""
+    assert resolve_repo_roots([cwd]) == {}
+
+
+def test_resolve_repo_roots_drops_the_home_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv('HOME', str(tmp_path))
+
+    assert resolve_repo_roots([str(tmp_path)]) == {}
+
+
+def test_group_logs_by_repo_labels_a_scratch_session_unknown(
+    tmp_path: Path,
+) -> None:
+    log = _write_log(tmp_path, [{'type': 'user', 'cwd': '/tmp'}])  # noqa: S108
+
+    assert set(group_logs_by_repo([log])) == {UNKNOWN_REPO}
 
 
 def test_label_repo_roots_uses_basenames_when_unambiguous() -> None:
