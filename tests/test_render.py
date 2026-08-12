@@ -1695,6 +1695,27 @@ def test_the_sun_crosses_the_sky_even_while_the_totals_are_frozen() -> None:
     assert xs[0] < xs[1] < xs[2]
 
 
+def test_the_sun_travels_at_one_speed_whatever_the_data_does() -> None:
+    """A lapse must not stall the climb any more than it stalls the sweep.
+
+    Frame times are deliberately non-uniform (dormant days dwell), so the
+    test measures distance per unit of replay time, not per frame.
+    """
+    key_times = [0.0, 0.1, 0.6, 0.8, 1.0]
+    # Grows, then flatlines through a lapse, then grows again.
+    tokens = [1_000, 4_000, 4_000, 4_000, 9_000]
+
+    values = _sun_day_values(tokens, 9_000, key_times)
+    speeds = [
+        math.dist((x1, y1), (x2, y2)) / (t2 - t1)
+        for (x1, y1, _), (x2, y2, _), t1, t2 in zip(
+            values, values[1:], key_times, key_times[1:], strict=False
+        )
+    ]
+
+    assert speeds == pytest.approx([speeds[0]] * len(speeds))
+
+
 def test_the_moon_takes_over_from_the_sun_after_dark() -> None:
     day_sun, day_moon = _sky_body_opacities(0.0, 1.0)
     night_sun, night_moon = _sky_body_opacities(1.0, 1.0)

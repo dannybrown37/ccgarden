@@ -91,15 +91,21 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   replay is still alive.
 - A lapse freezes every cumulative shape *by definition*, so it is the
   one stretch that has to be carried entirely by non-cumulative channels.
-  Four do it: the sun keeps crossing the sky (`_sun_sweep_x` is keyed to
-  the *replay's* elapsed fraction — the `key_times` themselves — not to
-  any statistic, which is the only reason anything in the sky still moves
-  when the totals are frozen; only its height and radius stay on the token
-  total), the sun dims behind the weather (`_sun_storm_opacity`), the rain
-  falls, and `_render_storm` blows — gusts, tumbling leaves, scud and lightning, on
+  Four do it: the sun keeps crossing the sky (both `x` and `y` in
+  `_sun_day_values` are keyed to the *replay's* elapsed fraction — the
+  `key_times` themselves — not to any statistic, which is the only reason
+  anything in the sky still moves when the totals are frozen), the sun
+  dims behind the weather (`_sun_storm_opacity`), the rain falls, and
+  `_render_storm` blows — gusts, tumbling leaves, scud and lightning, on
   `_storm_opacity` (the rain intensity square-rooted, so a short gap's
   faint drizzle still gets visible wind). Idle wind alone can't cover it:
   its periods are tens of seconds and a lapse is a few.
+- Tokens set where the sun *ends up* (`_sun_position`) and how big it is,
+  never the pace along the path — and `_sun_sweep_x` clamps the path's two
+  endpoints against the final radius rather than clamping each frame, so
+  the sun does not crawl through whichever end its halo overhangs. Speed
+  must come out constant in px per second of replay, not per frame: frame
+  times are deliberately uneven.
 - Sun and moon are one body: `_render_sky_body` draws both at the same
   point and cross-fades them on nightness (`_sky_body_opacities`), so the
   sweep is continuous across a night. Both are dimmed by the same storm

@@ -1940,11 +1940,17 @@ def _sun_sweep_x(progress: float, radius: float) -> float:
     Keyed to elapsed replay time rather than to any statistic, so it is
     the one thing on screen that keeps moving through a lapse, when every
     cumulative shape is frozen and only the weather is left.
+
+    `radius` shortens the *path*, not the individual frame -- clamping
+    each frame separately would leave the sun crawling through whichever
+    end of the sweep the halo overhangs, and an even pace is the whole
+    point. Callers pass the sun's final radius for every frame.
     """
     span = min(max(progress, 0.0), 1.0)
-    x = SUN_X_START + (SUN_X_END - SUN_X_START) * span
     halo_radius = radius * SUN_HALO_RADIUS_FACTOR
-    return min(max(x, halo_radius), VIEWBOX_WIDTH - halo_radius)
+    start = max(SUN_X_START, halo_radius)
+    end = min(SUN_X_END, VIEWBOX_WIDTH - halo_radius)
+    return start + (max(end, start) - start) * span
 
 
 def _sun_height(total_tokens: int, radius: float) -> float:
@@ -3116,8 +3122,8 @@ LEGEND_ROWS = (
         'Sun',
         (
             'crosses the sky as it',
-            'replays; rises + grows',
-            'w/ tokens; moon at night',
+            'replays; ends higher +',
+            'bigger w/ total tokens',
         ),
         'sun',
     ),
@@ -3128,7 +3134,11 @@ LEGEND_ROWS = (
     ),
     (
         'Sky',
-        ('darkens with prompts', 'typed after 22:00'),
+        (
+            'darkens with prompts',
+            'typed after 22:00;',
+            'the sun turns to a moon',
+        ),
         'sky',
     ),
     (
@@ -4155,23 +4165,29 @@ def _sun_day_values(
 ) -> list[tuple[float, float, float]]:
     """Per-frame (x, y, radius) for the sun.
 
-    Two channels, deliberately separate: `x` comes from `key_times` -- the
-    fraction of the *replay* elapsed, so the sweep is at a constant speed
-    across the screen and never stops -- while `y` and the radius grow
-    with the token total as a share of the sun's final state (not the
+    Position and size are deliberately on different clocks. *Both* `x` and
+    `y` come from `key_times` -- the fraction of the replay elapsed -- so
+    the sun travels one straight, constant-speed path from where it rises
+    to where it ends up, and a lapse cannot bend or stall it. Only the
+    radius is on the data, as a share of the sun's final size (not the
     absolute-tokens formula re-evaluated per day; see the identical
     reasoning in `_render_timeline_branches_and_leaves`).
+
+    Keying the height to tokens instead was the subtler half of the sun
+    freezing through a storm: the sweep kept going but the climb stopped,
+    so the sun changed direction exactly when everything else stopped.
+    Tokens still decide how high it gets -- they set the far end of the
+    path, not the pace along it.
     """
     _, final_y = _sun_position(final_tokens)
     final_radius = _sun_radius(final_tokens)
     values = []
     for day_tokens, progress in zip(days_tokens, key_times, strict=True):
-        fraction = min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
         radius = _grown_size(
             day_tokens, final_tokens, SUN_RADIUS_MIN, final_radius
         )
-        x = _sun_sweep_x(progress, radius)
-        y = SUN_Y_START + (final_y - SUN_Y_START) * fraction
+        x = _sun_sweep_x(progress, final_radius)
+        y = SUN_Y_START + (final_y - SUN_Y_START) * progress
         values.append((x, y, radius))
     return values
 
