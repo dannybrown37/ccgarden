@@ -89,16 +89,27 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   `animateTransform` — CSS transform wins over both — always nest a new
   group. Wind runs on its own clock, so a finished, paused or scrubbed
   replay is still alive.
-- Storm motion (`_render_storm_wind`: gusts, tumbling leaves, scud cloud)
-  lives *inside* the rain group, which already animates its own per-day
-  opacity: anything that should appear only during a lapse goes there
-  rather than getting a second animation gated to the gap.
-- A lapse freezes every cumulative shape by definition, so anything big
-  enough to notice needs a *non-cumulative* channel to keep changing on —
-  the sun, whose height is frozen with the token total, fades out behind
-  the storm instead (`_sun_storm_opacity`). Idle wind is too slow to
-  cover for that on its own: its periods are tens of seconds and a lapse
-  is a few.
+- A lapse freezes every cumulative shape *by definition*, so it is the
+  one stretch that has to be carried entirely by non-cumulative channels.
+  Four do it: the sun keeps crossing the sky (`_sun_sweep_x` is keyed to
+  the *replay's* elapsed fraction — the `key_times` themselves — not to
+  any statistic, which is the only reason anything in the sky still moves
+  when the totals are frozen; only its height and radius stay on the token
+  total), the sun dims behind the weather (`_sun_storm_opacity`), the rain
+  falls, and `_render_storm` blows — gusts, tumbling leaves, scud and lightning, on
+  `_storm_opacity` (the rain intensity square-rooted, so a short gap's
+  faint drizzle still gets visible wind). Idle wind alone can't cover it:
+  its periods are tens of seconds and a lapse is a few.
+- Sun and moon are one body: `_render_sky_body` draws both at the same
+  point and cross-fades them on nightness (`_sky_body_opacities`), so the
+  sweep is continuous across a night. Both are dimmed by the same storm
+  factor — cloud thick enough to swallow a sun swallows a moon too.
+- Frame pacing is not uniform, and weather is why: `_frame_weights` adds
+  `WEATHER_SWING_DWELL` × the change in `_weather_load` (sky + rain +
+  smothered sun) to any frame, so a day that repaints the whole canvas
+  gets the seconds that change needs instead of slamming through in one
+  ordinary day's slot. Never damp the data to smooth a transition — give
+  the frame more time.
 - The timeline starts on a synthetic empty day (`_with_seed_day`) and every
   shape is sized through `_grown_size`, which is zero — not the min — before
   a shape's first day of data, so the timelapse grows out of bare ground.
@@ -150,7 +161,14 @@ fixtures beyond `tmp_path`, no golden-image comparison.
 
 To eyeball a change, render to the scratchpad and screenshot it headless
 (`google-chrome --headless --screenshot ... file://...`) rather than
-diffing SVG text by hand.
+diffing SVG text by hand. `--virtual-time-budget` **hangs** on this
+document — infinite CSS animations mean virtual time never idles. To see
+a chosen moment, inline the SVG into a scratch HTML file and, in a
+script, `pauseAnimations()` + `setCurrentTime(t)` for SMIL and
+`document.getAnimations().forEach(a => {a.pause(); a.currentTime = p})`
+for the CSS wind. Two shots a quarter-second apart, pixel-diffed, are
+the only reliable way to answer "does anything actually move here" —
+that is how the dead frame in the middle of a lapse was found.
 
 ## Release
 

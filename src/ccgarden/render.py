@@ -178,11 +178,24 @@ CLOUD_STORM_STOPS = ('#4d5566', '#333c4d', '#1c222e')
 SUN_RADIUS_MIN = 26.0
 SUN_RADIUS_MAX = 68.0
 SUN_TOKENS_SATURATION = 200_000_000
-SUN_X_START = 130.0
+# The sun crosses the sky with the *replay*, not with your token total:
+# height still tells you how far the totals have come, but a lapse
+# freezes every cumulative channel, and a sun frozen mid-sky while rain
+# hammers the garden is the one thing that always read as a broken
+# animation. Time always passes, so the sweep always moves.
+SUN_X_START = 96.0
+SUN_X_END = 704.0
 SUN_Y_START = 640.0
-SUN_X_END = 660.0
 SUN_Y_END = 95.0
 SUN_RAY_COUNT = 12
+# The moon is the same body seen on a night shift -- same sweep, same
+# size, cross-faded on the day's nightness -- rather than a second thing
+# to place, which would need its own keepout from everything the sun
+# already avoids.
+MOON_GRADIENT_STOPS = ('#fdfdf7', '#dee4f3', '#aeb8d2')
+MOON_HALO_COLOR = '#cdd8f2'
+MOON_CRATER_COLOR = '#c3cbe0'
+MOON_CRATERS = ((-0.30, -0.22, 0.20), (0.26, 0.10, 0.26), (-0.10, 0.36, 0.15))
 # The halo is the sun's widest part -- wider than the rays -- so it sets how
 # much clearance `_sun_position` has to keep from the top and sides.
 SUN_HALO_RADIUS_FACTOR = 1.9
@@ -687,6 +700,17 @@ def _render_defs(
         f'<stop offset="0%" stop-color="{SUN_HALO_COLOR}" '
         'stop-opacity="0.55" />'
         f'<stop offset="100%" stop-color="{SUN_HALO_COLOR}" '
+        'stop-opacity="0" />'
+        '</radialGradient>'
+        '<radialGradient id="moonGradient" cx="38%" cy="34%" r="62%">'
+        f'<stop offset="0%" stop-color="{MOON_GRADIENT_STOPS[0]}" />'
+        f'<stop offset="58%" stop-color="{MOON_GRADIENT_STOPS[1]}" />'
+        f'<stop offset="100%" stop-color="{MOON_GRADIENT_STOPS[2]}" />'
+        '</radialGradient>'
+        '<radialGradient id="moonHaloGradient" cx="50%" cy="50%" r="50%">'
+        f'<stop offset="0%" stop-color="{MOON_HALO_COLOR}" '
+        'stop-opacity="0.45" />'
+        f'<stop offset="100%" stop-color="{MOON_HALO_COLOR}" '
         'stop-opacity="0" />'
         '</radialGradient>'
         '<radialGradient id="bushGradient" cx="35%" cy="25%" r="75%">'
@@ -1910,22 +1934,93 @@ def _sun_radius(total_tokens: int) -> float:
     return SUN_RADIUS_MIN + (SUN_RADIUS_MAX - SUN_RADIUS_MIN) * growth
 
 
-def _sun_position(total_tokens: int) -> tuple[float, float]:
-    """Where the sun sits.
+def _sun_sweep_x(progress: float, radius: float) -> float:
+    """How far across the sky the sun has got, `progress` 0..1 of the replay.
 
-    Rises from a low horizon point toward its zenith as the garden's
-    total token count grows toward saturation, clamped so its halo never
-    crosses the top or sides of the viewBox. The bottom is deliberately not
-    clamped: at low token counts the sun sits half-buried below the horizon,
-    which is the intended sunrise.
+    Keyed to elapsed replay time rather than to any statistic, so it is
+    the one thing on screen that keeps moving through a lapse, when every
+    cumulative shape is frozen and only the weather is left.
+    """
+    span = min(max(progress, 0.0), 1.0)
+    x = SUN_X_START + (SUN_X_END - SUN_X_START) * span
+    halo_radius = radius * SUN_HALO_RADIUS_FACTOR
+    return min(max(x, halo_radius), VIEWBOX_WIDTH - halo_radius)
+
+
+def _sun_height(total_tokens: int, radius: float) -> float:
+    """How high the sun has climbed, on the garden's total token count.
+
+    Still the token channel: only the horizontal sweep was taken off it.
+    Clamped at the top so the halo never leaves the viewBox, and
+    deliberately *not* at the bottom -- a garden with few tokens gets a
+    sun half-buried below the horizon, which is the intended sunrise.
     """
     growth = _sun_growth(total_tokens)
-    x = SUN_X_START + (SUN_X_END - SUN_X_START) * growth
     y = SUN_Y_START + (SUN_Y_END - SUN_Y_START) * growth
-    halo_radius = _sun_radius(total_tokens) * SUN_HALO_RADIUS_FACTOR
-    x = min(max(x, halo_radius), VIEWBOX_WIDTH - halo_radius)
-    y = max(y, halo_radius)
-    return x, y
+    return max(y, radius * SUN_HALO_RADIUS_FACTOR)
+
+
+def _sun_position(total_tokens: int) -> tuple[float, float]:
+    """Where the sun ends up: the far end of the sweep, at its final height."""
+    radius = _sun_radius(total_tokens)
+    return _sun_sweep_x(1.0, radius), _sun_height(total_tokens, radius)
+
+
+def _render_moon(cx: float, cy: float, radius: float) -> str:
+    """The night shift's sun: same place, same size, no rays.
+
+    Craters are fixed offsets rather than seeded jitter -- there is only
+    ever one moon, and a face that changed between renders would read as
+    a different moon rather than as the same garden.
+    """
+    craters = ''.join(
+        f'<circle cx="{radius * dx:.2f}" cy="{radius * dy:.2f}" '
+        f'r="{radius * dr:.2f}" fill="{MOON_CRATER_COLOR}" opacity="0.55" />'
+        for dx, dy, dr in MOON_CRATERS
+    )
+    return (
+        f'<g transform="translate({cx:.1f},{cy:.1f})">'
+        + _wind_group('ccg-pulse', 'moon-halo')
+        + f'<circle r="{radius * SUN_HALO_RADIUS_FACTOR * 0.8:.2f}" '
+        f'fill="url(#moonHaloGradient)" />'
+        f'</g>'
+        f'<circle r="{radius:.2f}" fill="url(#moonGradient)" />'
+        f'{craters}'
+        f'</g>'
+    )
+
+
+def _sky_body_opacities(
+    nightness: float, vitality: float
+) -> tuple[float, float]:
+    """(sun, moon) opacity for one frame -- they cross-fade on nightness.
+
+    Both are then dimmed by the same storm factor: cloud thick enough to
+    swallow a sun swallows a moon too.
+    """
+    night = _saturated_nightness(nightness)
+    storm = _sun_storm_opacity(vitality)
+    return storm * (1.0 - night), storm * night
+
+
+def _render_sky_body(
+    cx: float,
+    cy: float,
+    radius: float,
+    nightness: float,
+    vitality: float,
+    *,
+    sun_animate: str = '',
+    moon_animate: str = '',
+) -> str:
+    """The sun and the moon at the same point, cross-faded on nightness."""
+    sun_opacity, moon_opacity = _sky_body_opacities(nightness, vitality)
+    return (
+        f'<g class="sun-disc" opacity="{sun_opacity:.3f}">'
+        f'{sun_animate}{_render_sun(cx, cy, radius)}</g>'
+        f'<g class="moon-disc" opacity="{moon_opacity:.3f}">'
+        f'{moon_animate}{_render_moon(cx, cy, radius)}</g>'
+    )
 
 
 def _sun_rays_d(radius: float) -> list[str]:
@@ -3019,7 +3114,11 @@ LEGEND_ROWS = (
     ),
     (
         'Sun',
-        ('rises + grows w/', 'total all-in tokens'),
+        (
+            'crosses the sky as it',
+            'replays; rises + grows',
+            'w/ tokens; moon at night',
+        ),
         'sun',
     ),
     (
@@ -3267,11 +3366,16 @@ def render_svg(garden: GardenData) -> str:
             _saturated_nightness(garden.nightness),
             title=_night_title(garden.nightness, garden.hour_counts),
         )
-        + f'<g class="sun" opacity="{_sun_storm_opacity(garden.vitality):.3f}"'
-        f'>{sun_title}'
+        + f'<g class="sun">{sun_title}'
         + _wind_group('ccg-bob', 'sun')
-        + f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}'
-        f'</g></g>'
+        + _render_sky_body(
+            sun_x,
+            sun_y,
+            _sun_radius(garden.total_tokens),
+            garden.nightness,
+            garden.vitality,
+        )
+        + '</g></g>'
         + _render_clouds(garden.model_efforts)
         + _render_birds(
             garden.birds,
@@ -4045,23 +4149,29 @@ def _render_timeline_leaves(  # noqa: PLR0915
 
 
 def _sun_day_values(
-    days_tokens: list[int], final_tokens: int
+    days_tokens: list[int],
+    final_tokens: int,
+    key_times: list[float],
 ) -> list[tuple[float, float, float]]:
-    """Per-day (x, y, radius), grown as a share of the sun's *final* state.
+    """Per-frame (x, y, radius) for the sun.
 
-    Not the same absolute-tokens formula re-evaluated per day -- see the
-    identical reasoning in `_render_timeline_branches_and_leaves`.
+    Two channels, deliberately separate: `x` comes from `key_times` -- the
+    fraction of the *replay* elapsed, so the sweep is at a constant speed
+    across the screen and never stops -- while `y` and the radius grow
+    with the token total as a share of the sun's final state (not the
+    absolute-tokens formula re-evaluated per day; see the identical
+    reasoning in `_render_timeline_branches_and_leaves`).
     """
-    final_x, final_y = _sun_position(final_tokens)
+    _, final_y = _sun_position(final_tokens)
     final_radius = _sun_radius(final_tokens)
     values = []
-    for day_tokens in days_tokens:
+    for day_tokens, progress in zip(days_tokens, key_times, strict=True):
         fraction = min(day_tokens / final_tokens, 1.0) if final_tokens else 1.0
-        x = SUN_X_START + (final_x - SUN_X_START) * fraction
-        y = SUN_Y_START + (final_y - SUN_Y_START) * fraction
         radius = _grown_size(
             day_tokens, final_tokens, SUN_RADIUS_MIN, final_radius
         )
+        x = _sun_sweep_x(progress, radius)
+        y = SUN_Y_START + (final_y - SUN_Y_START) * fraction
         values.append((x, y, radius))
     return values
 
@@ -4073,8 +4183,8 @@ def _render_timeline_sun(
 ) -> str:
     cumulative = timeline.cumulative_total_tokens
     final_tokens = cumulative[-1] if cumulative else 0
-    day_tokens = cumulative or [final_tokens]
-    day_values = _sun_day_values(day_tokens, final_tokens)
+    day_tokens = cumulative or [final_tokens] * len(key_times)
+    day_values = _sun_day_values(day_tokens, final_tokens, key_times)
     final_x, final_y, final_radius = day_values[-1]
 
     translate_values = [f'{x:.2f},{y:.2f}' for x, y, _ in day_values]
@@ -4088,21 +4198,41 @@ def _render_timeline_sun(
     day_labels = [f'Sun — {tokens:,} tokens (all-in)' for tokens in day_tokens]
     title = _title(day_labels[-1])
     tt = _tt_attr(day_labels)
-    sun_shape = _render_sun(0, 0, final_radius)
     vitality = timeline.daily_vitality or [1.0] * len(day_tokens)
-    storm_animate = _animate_tag(
+    nightness = timeline.daily_nightness or [0.0] * len(day_tokens)
+    opacities = [
+        _sky_body_opacities(night, life)
+        for night, life in zip(nightness, vitality, strict=True)
+    ]
+    sun_animate = _animate_tag(
         'opacity',
-        [f'{_sun_storm_opacity(value):.3f}' for value in vitality],
+        [f'{sun:.3f}' for sun, _ in opacities],
         key_times,
         duration,
         smooth=True,
     )
+    moon_animate = _animate_tag(
+        'opacity',
+        [f'{moon:.3f}' for _, moon in opacities],
+        key_times,
+        duration,
+        smooth=True,
+    )
+    body = _render_sky_body(
+        0,
+        0,
+        final_radius,
+        nightness[-1],
+        vitality[-1],
+        sun_animate=sun_animate,
+        moon_animate=moon_animate,
+    )
     return (
-        f'<g class="sun" {tt} opacity="{_sun_storm_opacity(vitality[-1]):.3f}"'
+        f'<g class="sun" {tt}'
         f' transform="translate({final_x:.1f},{final_y:.1f})">'
-        f'{title}{storm_animate}{translate_animate}'
+        f'{title}{translate_animate}'
         + _wind_group('ccg-bob', 'sun')
-        + f'<g transform="scale(1)">{scale_animate}{sun_shape}</g>'
+        + f'<g transform="scale(1)">{scale_animate}{body}</g>'
         f'</g></g>'
     )
 

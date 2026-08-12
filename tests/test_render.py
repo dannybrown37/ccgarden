@@ -109,8 +109,13 @@ from ccgarden.render import (
     _cloud_positions,
     _cloud_radius,
     _cloud_y_max,
+    SUN_X_END,
+    SUN_X_START,
+    _sky_body_opacities,
+    _sun_day_values,
     _sun_position,
     _sun_radius,
+    _sun_sweep_x,
     _sunflower_height,
     _sunflower_x_positions,
     render_svg,
@@ -949,11 +954,21 @@ def test_timeline_sun_stays_inside_the_viewbox_on_every_frame() -> None:
     translate_values = re.search(
         r'type="translate"[^>]*values="([^"]+)"', sun_group.group(0)
     )
+    scale_values = re.search(
+        r'type="scale"[^>]*values="([^"]+)"', sun_group.group(0)
+    )
     assert translate_values is not None
-    for frame in translate_values.group(1).split(';'):
+    assert scale_values is not None
+    frames = zip(
+        translate_values.group(1).split(';'),
+        scale_values.group(1).split(';'),
+        strict=True,
+    )
+    for frame, scale in frames:
         x, y = (float(v) for v in frame.strip().split(','))
-        # Worst case is the last frame, where the sun is at full size.
-        halo = final_radius * SUN_HALO_RADIUS_FACTOR
+        # The sun sweeps while it grows, so each frame has to fit at the
+        # size it is on that frame, not at the final size.
+        halo = final_radius * float(scale) * SUN_HALO_RADIUS_FACTOR
         assert x - halo >= 0
         assert x + halo <= VIEWBOX_WIDTH
         assert y - halo >= 0
@@ -1654,6 +1669,75 @@ def test_the_timeline_sun_fades_rather_than_freezing_through_a_lapse() -> None:
     assert first == pytest.approx(1.0)
     assert lapsed < 0.5
     assert last == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ('progress', 'expected'),
+    [
+        (0.0, SUN_X_START),
+        (0.5, (SUN_X_START + SUN_X_END) / 2),
+        (1.0, SUN_X_END),
+    ],
+)
+def test_the_sun_sweeps_on_replay_progress_not_on_data(
+    progress: float, expected: float
+) -> None:
+    assert _sun_sweep_x(progress, 1.0) == pytest.approx(expected)
+
+
+def test_the_sun_crosses_the_sky_even_while_the_totals_are_frozen() -> None:
+    """The one channel a lapse cannot stop: it is keyed to the clock."""
+    frozen = [5_000, 5_000, 5_000]
+    key_times = [0.0, 0.5, 1.0]
+
+    xs = [x for x, _, _ in _sun_day_values(frozen, 5_000, key_times)]
+
+    assert xs[0] < xs[1] < xs[2]
+
+
+def test_the_moon_takes_over_from_the_sun_after_dark() -> None:
+    day_sun, day_moon = _sky_body_opacities(0.0, 1.0)
+    night_sun, night_moon = _sky_body_opacities(1.0, 1.0)
+
+    assert day_sun > day_moon
+    assert night_moon > night_sun
+    assert day_sun + day_moon == pytest.approx(night_sun + night_moon)
+
+
+def test_the_storm_dims_the_moon_as_well_as_the_sun() -> None:
+    clear_sun, clear_moon = _sky_body_opacities(1.0, 1.0)
+    stormy_sun, stormy_moon = _sky_body_opacities(1.0, 0.0)
+
+    assert stormy_moon < clear_moon
+    assert stormy_sun <= clear_sun
+
+
+@pytest.mark.parametrize('renderer', ['static', 'timeline'])
+def test_a_night_garden_draws_a_moon(renderer: str) -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02'],
+        daily_sessions=[1, 1],
+        cumulative_sessions=[1, 2],
+        branch_order=[],
+        branch_days={},
+        cumulative_total_tokens=[1_000, 2_000],
+        daily_nightness=[1.0, 1.0],
+    )
+    svg = (
+        render_timeline_svg(timeline)
+        if renderer == 'timeline'
+        else render_svg(
+            GardenData(
+                rings=[], branches=[], total_tokens=2_000, nightness=1.0
+            )
+        )
+    )
+
+    moon = svg.split('class="moon-disc"')[1].split('</svg>')[0]
+    assert 'url(#moonGradient)' in moon
+    assert float(
+        re.search(r'class="moon-disc" opacity="([\d.]+)"', svg).group(1)
+    ) > float(re.search(r'class="sun-disc" opacity="([\d.]+)"', svg).group(1))
 
 
 def test_the_storm_blows_harder_than_the_rain_is_wet() -> None:
