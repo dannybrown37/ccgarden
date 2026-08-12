@@ -3721,11 +3721,23 @@ def _render_timeline_bark(
 def _render_timeline_rings(
     timeline: GardenTimeline,
     final_base_half_width: float,
+    base_half_width_by_day: list[float],
     key_times: list[float],
     duration: float,
 ) -> str:
+    """The day rings, drawn at the trunk's final width and scaled down.
+
+    A ring has to be as wide as the trunk it sits in *that day*, or the
+    day it first appears it juts out either side of a sapling. Since
+    `_half_width_at` is linear in the trunk's base width, every ring's
+    width is the same fraction of the trunk on any given day -- so one
+    horizontal scale around the trunk's centre, on the group, fits them
+    all. That keeps this O(days) rather than the O(days squared) an
+    animated `d` per ring would cost, which on a long history is
+    megabytes of path data.
+    """
     day_count = len(timeline.days)
-    if day_count == 0:
+    if day_count == 0 or final_base_half_width <= 0:
         return ''
     elements = []
     for index, sessions in enumerate(timeline.daily_sessions):
@@ -3757,7 +3769,23 @@ def _render_timeline_rings(
             f'stroke-width="{target_width:.3f}" stroke-linecap="round" '
             f'opacity="0.22">{title}{animate}</path>'
         )
-    return ''.join(elements)
+    if not elements:
+        return ''
+    cx = TRUNK_CENTER_X
+    scale_values = [
+        f'{width / final_base_half_width:.4f} 1'
+        for width in base_half_width_by_day
+    ]
+    scale = _animate_transform_tag('scale', scale_values, key_times, duration)
+    # translate out, scale, translate back: `animateTransform` replaces the
+    # whole transform of the element it sits on, so the pivot has to live
+    # on groups of its own.
+    return (
+        f'<g transform="translate({cx:.2f},0)"><g>{scale}'
+        f'<g transform="translate({-cx:.2f},0)">'
+        + ''.join(elements)
+        + '</g></g></g>'
+    )
 
 
 def _render_timeline_crown(
@@ -4902,7 +4930,11 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
         + '</g>'
         + _render_timeline_rings(
-            timeline, final_base_half_width, key_times, duration
+            timeline,
+            final_base_half_width,
+            base_half_width_by_day,
+            key_times,
+            duration,
         )
         + _render_timeline_branches_and_leaves(
             timeline,

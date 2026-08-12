@@ -126,6 +126,12 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
 - Layout is deterministic given the data: positions come from seeded/derived
   jitter helpers, never `random` at render time, so the same db renders the
   same garden.
+- Anything drawn *inside* the trunk has to grow with it, not just appear
+  in it. The day rings are laid out at the trunk's final width and the
+  whole group is scaled horizontally about `TRUNK_CENTER_X` per day
+  (`_render_timeline_rings`) — `_half_width_at` is linear in the base
+  width, so one shared scale fits every ring, where an animated `d` per
+  ring would be O(days²) of path data.
 - Shapes stay off each other: clouds honor the tree keepout, birds check
   `_clear_of_sun`, bushes use `_bush_footprints`. Preserve those checks when
   moving things.

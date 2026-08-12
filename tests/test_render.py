@@ -219,6 +219,40 @@ def test_render_svg_draws_one_ring_per_day(ring_count: int) -> None:
     assert svg.count('class="ring"') == ring_count
 
 
+def test_the_rings_grow_with_the_trunk_they_sit_in() -> None:
+    """A ring is a slice of the trunk, so it can't outgrow it.
+
+    The rings are drawn once at the trunk's final width, so without a
+    matching scale the first ring appears full width across a sapling.
+    """
+    timeline = GardenTimeline(
+        days=['2026-07-20', '2026-07-21', '2026-07-22'],
+        daily_sessions=[1, 20, 200],
+        cumulative_sessions=[1, 21, 221],
+        branch_order=[],
+        branch_days={},
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    first_ring = svg.index('class="ring"')
+    rings = svg[first_ring:]
+    # The rings share one scale, on the group that wraps them.
+    scale = [
+        match
+        for match in re.finditer(r'type="scale"[^>]*values="([^"]+)"', svg)
+        if match.start() < first_ring
+    ][-1]
+    values = scale.group(1).split(';')
+    factors = [float(value.split()[0]) for value in values]
+    assert factors == sorted(factors)
+    assert factors[0] < factors[-1]
+    assert factors[-1] == pytest.approx(1.0)
+    # The x scale must not squash the rings vertically off their trunk row.
+    assert all(value.split()[1] == '1' for value in values)
+    assert 'type="scale"' not in rings
+
+
 @pytest.mark.parametrize('repo_count', [1, 3, 5, 9])
 def test_render_svg_draws_a_limb_for_every_repo(repo_count: int) -> None:
     branches = [branch(f'repo-{i}') for i in range(repo_count)]
@@ -1080,7 +1114,7 @@ def test_render_timeline_svg_drifts_the_flock_without_growing_it() -> None:
 
     svg = render_timeline_svg(timeline)
 
-    flock = svg.split('class="birds"')[1].split('class="bush"')[0]
+    flock = svg.split('class="birds"')[1].split('class="trunk-group"')[0]
     assert svg.count('class="bird"') == 2
     # Per bird: the @keyframes, its class rule, the animation: reference, and
     # the class on the element itself.
@@ -1099,7 +1133,8 @@ def test_render_timeline_svg_drifts_the_flock_without_smil() -> None:
     svg = render_timeline_svg(timeline)
 
     assert 'repeatCount="indefinite"' not in svg
-    assert '<animateTransform' not in svg.split('class="birds"')[1]
+    flock = svg.split('class="birds"')[1].split('class="trunk-group"')[0]
+    assert '<animateTransform' not in flock
     assert 'animation:bird-drift-0' in svg
     assert '@keyframes bird-drift-0' in svg
 
