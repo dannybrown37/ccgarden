@@ -39,7 +39,7 @@ pair → legend icon + entry.
 
 Two channels are deliberately **not** cumulative, because they describe
 the day rather than the total: `daily_nightness` (share of that day's
-prompts typed after 22:00, which drives the sky) and `daily_vitality`
+prompts typed after 21:00, which drives the sky) and `daily_vitality`
 (decays with days since you last worked, which drives both the season and
 the rain — `_rain_intensity` inverts vitality back into days away, so the
 thresholds are in days rather than in a raw vitality number). Vitality
@@ -88,7 +88,9 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   on an element that already has a `transform` attribute or an
   `animateTransform` — CSS transform wins over both — always nest a new
   group. Wind runs on its own clock, so a finished, paused or scrubbed
-  replay is still alive.
+  replay is still alive. The legend is the one exception: its icons are
+  the garden's own renderers, so `_wind_style` cancels every animation
+  under `.legend` — a key is a table, not a scene.
 - A lapse freezes every cumulative shape *by definition*, so it is the
   one stretch that has to be carried entirely by non-cumulative channels.
   Four do it: the sun keeps crossing the sky (both `x` and `y` in

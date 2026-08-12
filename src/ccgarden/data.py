@@ -206,7 +206,7 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
-NIGHT_HOURS = frozenset({22, 23, 0, 1, 2, 3, 4, 5})
+NIGHT_HOURS = frozenset({21, 22, 23, 0, 1, 2, 3, 4, 5})
 
 
 def _nightness(hour_counts: dict[int, int]) -> float:

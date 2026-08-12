@@ -27,7 +27,7 @@ fill in as you work.)*
 | **Sun** | Rises and brightens with your all-in token total (output + input + cache read + cache write) |
 | **Bushes** | One per tool (Bash, Edit, Read, ...); bigger bushes mean more calls |
 | **Sunflowers** | One per repo; taller stalks mean more prompts |
-| **Sky** | Darkens toward night with the share of prompts you type after 22:00 — stars come out for a committed night owl |
+| **Sky** | Darkens toward night with the share of prompts you type after 21:00 — stars come out for a committed night owl |
 | **Season** | Leaves turn gold and thin out the longer the garden goes untended, and green back up when you return |
 | **Birds** | One per `cartoon` adapter that saved tokens; bigger birds mean more tokens saved. Only appears if `cartoon` is installed |
 

@@ -27,7 +27,7 @@ GROUND_Y = 728
 # The legend gets its own band below the garden rather than sharing the thin
 # strip of grass under GROUND_Y -- eight entries squeezed into 64px of height
 # left each column too narrow, so the descriptions ran into their neighbours.
-LEGEND_BAND_HEIGHT = 100.0
+LEGEND_BAND_HEIGHT = 118.0
 LEGEND_BAND_BOTTOM = VIEWBOX_HEIGHT + LEGEND_BAND_HEIGHT
 TRUNK_HEIGHT = 300
 TRUNK_TOP_Y = GROUND_Y - TRUNK_HEIGHT
@@ -871,6 +871,12 @@ def _wind_style() -> str:
         '<style>'
         + ''.join(rules)
         + f'{wind_classes}{{transform-box:view-box;will-change:transform}}'
+        # The legend reuses the garden's own shape renderers for its icons,
+        # which brings their idle motion along with them. A key is a table,
+        # not a scene: kill every animation inside it, by descendant
+        # selector so a new icon can't reintroduce one. The extra class
+        # selector outranks the `.ccg-*` rules above without !important.
+        + '.legend [class*="ccg-"]{animation:none}'
         + '@media (prefers-reduced-motion:reduce)'
         + f'{{{wind_classes},.ccg-twinkle,.ccg-fall{{animation:none}}}}'
         + '</style>'
@@ -929,11 +935,11 @@ def _render_grass() -> str:
 
 
 # The sky darkens with the share of that day's prompts typed between
-# 22:00 and 06:00 local. Unlike every other dimension this one isn't a
+# 21:00 and 06:00 local. Unlike every other dimension this one isn't a
 # saturating growth curve -- it's already a 0..1 ratio -- so it only needs
 # a ceiling, to keep even an all-night garden readable rather than black.
 NIGHT_VEIL_MAX_OPACITY = 0.62
-# Almost nobody types a majority of their prompts after 22:00, so a raw
+# Almost nobody types a majority of their prompts after 21:00, so a raw
 # ratio would leave every garden in permanent daylight. Saturating at 45%
 # means a genuine night owl gets a genuinely dark sky, while an ordinary
 # evening habit still shows as dusk rather than noon.
@@ -3082,21 +3088,29 @@ LEGEND_Y = VIEWBOX_HEIGHT + LEGEND_MARGIN
 LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
 LEGEND_X = 14.0
 LEGEND_WIDTH = VIEWBOX_WIDTH - LEGEND_X * 2
-LEGEND_PADDING = 10.0
-LEGEND_GRID_ROWS = 2
-LEGEND_LABEL_DY = 13.0
+LEGEND_PADDING = 9.0
+# Three shallow rows rather than two deep ones: five columns give a
+# description line the ~130px it needs, where seven left every third line
+# spilling over its neighbour's divider. Every entry is capped at two
+# lines so all three rows fit the band.
+LEGEND_GRID_ROWS = 3
+LEGEND_ICON_DX = 8.0
+LEGEND_TEXT_DX = 20.0
+LEGEND_LABEL_DY = 11.0
 LEGEND_LINE_HEIGHT = 10.0
+LEGEND_LABEL_SIZE = 10.5
+LEGEND_DESC_SIZE = 8.6
 LEGEND_ROWS = (
     ('Trunk', ('width grows with', 'total sessions'), 'trunk'),
     ('Rings', ('one per day worked;', 'bolder = busier day'), 'ring'),
     (
         'Branches',
-        ('grouped by repo;', 'longer = more lines;', 'thicker = more tokens'),
+        ('grouped by repo; longer =', 'more lines, thicker = tokens'),
         'branch',
     ),
     (
         'Leaves',
-        ('one per session;', 'more = busier repo;', 'bigger = deeper turns'),
+        ('one per session; more =', 'busier repo, bigger = turns'),
         'leaf',
     ),
     (
@@ -3106,11 +3120,7 @@ LEGEND_ROWS = (
     ),
     (
         'Clouds',
-        (
-            'one per model + effort;',
-            'bigger = more tokens;',
-            'darker = more effort',
-        ),
+        ('one per model + effort;', 'bigger + darker = more'),
         'cloud',
     ),
     (
@@ -3120,11 +3130,7 @@ LEGEND_ROWS = (
     ),
     (
         'Sun',
-        (
-            'crosses the sky as it',
-            'replays; ends higher +',
-            'bigger w/ total tokens',
-        ),
+        ('crosses the sky as it replays;', 'ends higher + bigger w/ tokens'),
         'sun',
     ),
     (
@@ -3134,11 +3140,7 @@ LEGEND_ROWS = (
     ),
     (
         'Sky',
-        (
-            'darkens with prompts',
-            'typed after 22:00;',
-            'the sun turns to a moon',
-        ),
+        ('darkens with prompts after', '21:00; sun becomes a moon'),
         'sky',
     ),
     (
@@ -3287,10 +3289,14 @@ def _render_legend(
     """A key panel explaining what each part of the tree represents.
 
     Sits in its own band below the garden viewBox, so it can never overlap
-    the tree. Always two rows, with the column count derived from how many
-    entries survive the drops below -- a fixed column count leaves the last
-    row ragged and half empty as soon as an entry is dropped, and two rows
-    is all the band's height affords a three-line description.
+    the tree. Always three rows, with the column count derived from how
+    many entries survive the drops below -- a fixed column count leaves the
+    last row ragged and half empty as soon as an entry is dropped.
+
+    Columns are left-aligned rather than centred on a short last row: a
+    centred row lands its text on the dividers drawn for the rows above,
+    and the dividers themselves are drawn per row, only where there's an
+    entry to the right of them, so the grid reads as one aligned table.
 
     The birds, sky, season and rain entries are dropped unless there's
     actually a bird, a night, a turned leaf or a downpour to explain: a
@@ -3322,37 +3328,40 @@ def _render_legend(
             f'opacity="0.88" />'
         )
     ]
-    for divider in range(1, columns):
-        divider_x = LEGEND_X + column_width * divider
-        parts.append(
-            f'<line x1="{divider_x:.1f}" y1="{LEGEND_Y + 6:.1f}" '
-            f'x2="{divider_x:.1f}" '
-            f'y2="{LEGEND_Y + LEGEND_HEIGHT - 6:.1f}" '
-            f'stroke="#3a2412" stroke-width="0.4" opacity="0.18" />'
-        )
+    for row_index in range(row_count):
+        row_top = LEGEND_Y + row_height * row_index
+        for divider in range(1, columns):
+            if row_index * columns + divider >= len(rows):
+                break
+            divider_x = LEGEND_X + column_width * divider
+            parts.append(
+                f'<line x1="{divider_x:.1f}" y1="{row_top + 4:.1f}" '
+                f'x2="{divider_x:.1f}" '
+                f'y2="{row_top + row_height - 4:.1f}" '
+                f'stroke="#3a2412" stroke-width="0.4" opacity="0.18" />'
+            )
     for index, (label, desc_lines, icon) in enumerate(rows):
         row_index = index // columns
         column_index = index % columns
-        # The last row can come up short; centre it instead of leaving a
-        # hole on the right.
-        in_row = min(len(rows) - row_index * columns, columns)
-        indent = (columns - in_row) * column_width / 2
-        col_x = LEGEND_X + indent + column_width * column_index
+        col_x = LEGEND_X + column_width * column_index
         row_top = LEGEND_Y + row_height * row_index
         label_y = row_top + LEGEND_LABEL_DY
-        icon_cx = col_x + LEGEND_PADDING + 8
-        text_x = col_x + LEGEND_PADDING + 22
-        parts.append(_render_legend_icon(icon, icon_cx, label_y + 4))
+        icon_cx = col_x + LEGEND_PADDING + LEGEND_ICON_DX
+        text_x = col_x + LEGEND_PADDING + LEGEND_TEXT_DX
+        parts.append(_render_legend_icon(icon, icon_cx, label_y + 3))
         parts.append(
             f'<text x="{text_x:.1f}" y="{label_y:.1f}" '
-            f'font-family="Georgia, serif" font-size="10.5" '
+            f'font-family="Georgia, serif" font-size="{LEGEND_LABEL_SIZE}" '
             f'font-weight="bold" fill="#2f3b23">{label}</text>'
         )
         for line_index, desc_line in enumerate(desc_lines):
-            line_y = label_y + 11 + line_index * LEGEND_LINE_HEIGHT
+            line_y = (
+                label_y + LEGEND_LINE_HEIGHT + line_index * LEGEND_LINE_HEIGHT
+            )
             parts.append(
                 f'<text x="{text_x:.1f}" y="{line_y:.1f}" '
-                f'font-family="Georgia, serif" font-size="8.6" '
+                f'font-family="Georgia, serif" '
+                f'font-size="{LEGEND_DESC_SIZE}" '
                 f'fill="#4a4a3a">{desc_line}</text>'
             )
     parts.append('</g>')

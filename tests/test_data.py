@@ -6,6 +6,7 @@ import pytest
 
 from ccgarden.data import (
     ALL_DAYS,
+    NIGHT_HOURS,
     CartoonBird,
     DayRange,
     DayRing,
@@ -811,6 +812,11 @@ def test_load_garden_data_without_cartoon_still_loads(
 def test_nightness_is_the_share_of_prompts_typed_at_night() -> None:
     # 3 of 12 prompts fall in NIGHT_HOURS (23:00 and 02:00).
     assert _nightness({9: 6, 14: 3, 23: 2, 2: 1}) == pytest.approx(0.25)
+
+
+def test_night_starts_at_nine_pm() -> None:
+    assert 21 in NIGHT_HOURS
+    assert 20 not in NIGHT_HOURS
 
 
 def test_nightness_of_a_day_with_no_prompts_is_zero() -> None:

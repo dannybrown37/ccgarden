@@ -22,6 +22,10 @@ from ccgarden.data import (
 )
 from ccgarden.render import (
     AUTUMN_COLORS,
+    LEGEND_BAND_BOTTOM,
+    LEGEND_GRID_ROWS,
+    LEGEND_LINE_HEIGHT,
+    LEGEND_ROWS,
     LEAF_COLORS,
     LEAF_OPACITY_DORMANT,
     LEAF_OPACITY_LIVING,
@@ -1248,6 +1252,64 @@ def test_the_veil_stops_above_the_legend_band() -> None:
 
     veil = re.search(r'<rect class="night"[^>]*>', svg)
     assert f'height="{VIEWBOX_HEIGHT}"' in veil.group(0)
+
+
+def legend_label_positions(svg: str) -> dict[str, tuple[float, float]]:
+    labels = {label for label, _, _ in LEGEND_ROWS}
+    found = {}
+    for match in re.finditer(
+        r'<text x="([\d.]+)" y="([\d.]+)"[^>]*font-weight="bold"[^>]*>'
+        r'([^<]+)</text>',
+        svg,
+    ):
+        if match.group(3) in labels:
+            found[match.group(3)] = (
+                float(match.group(1)),
+                float(match.group(2)),
+            )
+    return found
+
+
+def test_the_legend_icons_hold_still() -> None:
+    """The icons are the garden's own renderers, wind and all.
+
+    A key is a table, not a scene -- a drifting cloud in a legend cell is
+    just a distraction, so the band cancels the idle motion its icons
+    inherit.
+    """
+    svg = render_svg(GardenData(rings=[], branches=[]))
+
+    assert '.legend [class*="ccg-"]{animation:none}' in svg
+    legend = svg[svg.index('<g class="legend">') :]
+    assert '<animate' not in legend
+
+
+def test_legend_columns_line_up_across_rows() -> None:
+    # A short last row used to be centred, which put its text on top of the
+    # dividers drawn for the rows above it.
+    svg = render_svg(GardenData(rings=[], branches=[]))
+
+    positions = legend_label_positions(svg)
+    rows: dict[float, set[float]] = {}
+    for x, y in positions.values():
+        rows.setdefault(y, set()).add(x)
+    assert len(rows) == LEGEND_GRID_ROWS
+    columns = set.union(*rows.values())
+    for row_columns in rows.values():
+        assert row_columns <= columns
+        assert row_columns == set(sorted(columns)[: len(row_columns)])
+
+
+def test_every_legend_entry_stays_inside_the_band() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[]))
+
+    bottoms = [
+        y + LEGEND_LINE_HEIGHT * len(desc)
+        for label, (x, y) in legend_label_positions(svg).items()
+        for name, desc, _ in LEGEND_ROWS
+        if name == label
+    ]
+    assert max(bottoms) < LEGEND_BAND_BOTTOM
 
 
 def test_the_star_field_is_deterministic() -> None:
