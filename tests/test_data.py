@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -922,8 +923,8 @@ def test_the_default_day_range_selects_everything() -> None:
     assert ALL_DAYS.params == ()
 
 
-def test_a_long_gap_gets_a_dormant_frame_of_its_own(tmp_path: Path) -> None:
-    """Without one, a months-long lapse is a single frame boundary."""
+def test_a_long_gap_gets_dormant_frames_of_its_own(tmp_path: Path) -> None:
+    """Without them, a months-long lapse is a single frame boundary."""
     db_path = make_db(
         tmp_path,
         totals_rows=[
@@ -938,13 +939,53 @@ def test_a_long_gap_gets_a_dormant_frame_of_its_own(tmp_path: Path) -> None:
     assert timeline.days == [
         '2025-12-31',  # seed
         '2026-01-01',
-        '2026-01-31',  # dormant midpoint
+        # A 60-day gap, condensed to the frame budget.
+        '2026-01-10',
+        '2026-01-18',
+        '2026-01-27',
+        '2026-02-04',
+        '2026-02-13',
+        '2026-02-21',
         '2026-03-02',
     ]
-    dormant = timeline.daily_vitality[2]
-    assert dormant < 0.2
+    dormancy = timeline.daily_vitality[2:-1]
+    # The lapse deepens across the gap rather than arriving all at once.
+    assert dormancy == sorted(dormancy, reverse=True)
+    assert dormancy[-1] < 0.2
     # The garden comes back to life when you do.
     assert timeline.daily_vitality[-1] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ('gap_days', 'expected_frames'),
+    [
+        (3, 0),  # a weekend, not a dormancy
+        (4, 3),  # every missed day gets a frame...
+        (5, 4),
+        (7, 6),
+        (8, 6),  # ...until the budget runs out
+        (30, 6),
+        (600, 6),  # condensed -- the budget is the cap
+    ],
+)
+def test_dormant_frames_scale_with_the_gap_then_stop(
+    tmp_path: Path, gap_days: int, expected_frames: int
+) -> None:
+    start = date(2026, 1, 1)
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row(str(start), 1, 0, 0),
+            totals_row(str(start + timedelta(days=gap_days)), 1, 0, 0),
+        ],
+        repo_rows=[],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    # Seed day, the two real days, and the dormant frames between them.
+    assert len(timeline.days) == 3 + expected_frames
+    assert timeline.days == sorted(set(timeline.days))
 
 
 def test_a_weekend_is_not_a_dormancy(tmp_path: Path) -> None:
@@ -978,7 +1019,7 @@ def test_a_dormant_frame_holds_growth_rather_than_reversing_it(
 
     timeline = load_garden_timeline(db_path, cartoon_since='')
 
-    assert timeline.cumulative_sessions == [0, 3, 3, 5]
+    assert timeline.cumulative_sessions == [0, 3, *([3] * 6), 5]
 
 
 def test_vitality_decays_with_days_since_the_last_active_day() -> None:

@@ -7,6 +7,8 @@ import pytest
 
 
 from ccgarden.data import (
+    DORMANCY_HALF_LIFE_DAYS,
+    DORMANCY_MIN_GAP_DAYS,
     CartoonBird,
     DayRing,
     GardenData,
@@ -26,13 +28,36 @@ from ccgarden.render import (
     LEAF_PAINT_ID,
     LIVING_CANOPY_STOPS,
     LIVING_GROUND_STOPS,
+    RAIN_DROP_COUNT,
+    RAIN_FULL_DAYS,
+    RAIN_MAX_OPACITY,
+    RAIN_MIN_INTENSITY,
+    RAIN_ONSET_DAYS,
     _blend_hex,
+    _days_away,
     _leaf_color,
     _leaf_opacity,
+    DORMANT_FRAME_DWELL,
+    STORM_GUST_COUNT,
+    STORM_SCUD_COUNT,
+    SUN_STORM_MIN_OPACITY,
+    _sun_storm_opacity,
+    _storm_opacity,
+    STORM_LEAF_COUNT,
+    _wind_style,
+    RECOVERY_FRAME_DWELL,
+    _frame_weights,
+    _weighted_key_times,
+    _timeline_duration,
+    _rain_field,
+    _render_rain,
+    _rain_intensity,
+    _rain_opacity,
     NIGHTNESS_SATURATION,
     NIGHT_VEIL_MAX_OPACITY,
     _saturated_nightness,
     _star_field,
+    STAR_COUNT,
     BIRD_MARGIN,
     BRANCH_ANGLE_JITTER_DEGREES,
     BRANCH_LENGTH_MAX,
@@ -1036,7 +1061,7 @@ def test_render_timeline_svg_drifts_the_flock_without_growing_it() -> None:
 
     svg = render_timeline_svg(timeline)
 
-    flock = svg.split('class="birds"')[1].split('</g></g></g>')[0]
+    flock = svg.split('class="birds"')[1].split('class="bush"')[0]
     assert svg.count('class="bird"') == 2
     # Per bird: the @keyframes, its class rule, the animation: reference, and
     # the class on the element itself.
@@ -1214,6 +1239,41 @@ def test_the_star_field_is_deterministic() -> None:
     assert _star_field() == _star_field()
 
 
+def test_stars_twinkle_on_css_not_smil() -> None:
+    """70 stars is 70 main-thread SMIL timelines that never settle.
+
+    Idle motion is CSS keyframes here, and twinkle is idle motion.
+    """
+    timeline = GardenTimeline(
+        days=['2026-01-01'],
+        daily_sessions=[1],
+        cumulative_sessions=[1],
+        branch_order=[],
+        branch_days={},
+        daily_nightness=[1.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+    stars = re.search(r'<g class="stars".*?</g>', svg, re.S).group(0)
+
+    assert '<animate' not in stars
+    assert stars.count('class="ccg-twinkle"') == STAR_COUNT
+    assert '@keyframes ccg-twinkle' in svg
+    # Phase offset per star, or all 70 blink in lockstep.
+    assert stars.count('animation-delay:-') == STAR_COUNT
+
+
+def test_rain_falls_on_css_not_smil() -> None:
+    """Same reason as the stars, and a downpour is more drops than stars."""
+    svg = _render_rain(opacity=1.0)
+
+    assert '<animateTransform' not in svg
+    drops = re.findall(r'<line[^>]*class="ccg-fall"[^>]*>', svg)
+    assert len(drops) == len(_rain_field())
+    # Phase offset per drop, or the whole field falls as one sheet.
+    assert all('animation-delay:-' in drop for drop in drops)
+
+
 def test_timeline_animates_the_sky_day_by_day() -> None:
     timeline = GardenTimeline(
         days=['2026-01-01', '2026-01-02', '2026-01-03'],
@@ -1300,6 +1360,341 @@ def test_a_still_garden_is_rendered_in_the_season_it_has_reached() -> None:
     # A garden still being tended has no season to explain.
     assert 'longer you are away' in autumn
     assert 'longer you are away' not in spring
+
+
+def _vitality_after(days: float) -> float:
+    return 0.5 ** (days / DORMANCY_HALF_LIFE_DAYS)
+
+
+@pytest.mark.parametrize(
+    ('days', 'expected'),
+    [
+        (0.0, 0.0),
+        (RAIN_ONSET_DAYS - 0.5, 0.0),
+        (RAIN_ONSET_DAYS, RAIN_MIN_INTENSITY),
+        (RAIN_FULL_DAYS, 1.0),
+        (90.0, 1.0),
+    ],
+)
+def test_rain_starts_only_once_a_gap_is_a_real_lapse(
+    days: float, expected: float
+) -> None:
+    intensity = _rain_intensity(_vitality_after(days))
+
+    assert intensity == pytest.approx(expected)
+
+
+def test_the_shortest_real_lapse_already_rains_visibly() -> None:
+    """`_with_dormant_days` can never hand us a gap shorter than this."""
+    frame = _vitality_after(DORMANCY_MIN_GAP_DAYS // 2)
+
+    assert _rain_intensity(frame) >= RAIN_MIN_INTENSITY
+
+
+def test_rain_thickens_the_longer_the_garden_is_left() -> None:
+    short = _rain_opacity(_vitality_after(3))
+    long_gap = _rain_opacity(_vitality_after(8))
+
+    assert short < long_gap <= RAIN_MAX_OPACITY
+
+
+def test_days_away_inverts_the_vitality_decay() -> None:
+    assert _days_away(1.0) == 0
+    assert _days_away(0.5) == round(DORMANCY_HALF_LIFE_DAYS)
+    assert _days_away(0.25) == round(DORMANCY_HALF_LIFE_DAYS * 2)
+    # A garden long enough gone to have zero vitality has no day count.
+    assert _days_away(0.0) is None
+
+
+def test_a_tended_garden_never_rains() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], vitality=1.0))
+
+    assert 'class="rain"' not in svg
+    assert 'you never showed up' not in svg
+
+
+def test_an_abandoned_garden_rains_and_says_so() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], vitality=0.1))
+
+    assert 'class="rain"' in svg
+    assert svg.count('<line') >= RAIN_DROP_COUNT
+    # The lapse is named in the tooltip, and the legend explains it.
+    assert 'no sessions for' in svg
+    assert 'you never showed up' in svg
+
+
+def test_the_overcast_wash_never_swallows_a_tooltip() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[], vitality=0.0))
+
+    wash = svg.split('class="rain"')[1].split('<line')[0]
+    assert 'pointer-events="none"' in wash
+
+
+def test_timeline_rains_only_on_the_days_the_garden_was_left() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-15', '2026-01-16'],
+        daily_sessions=[1, 0, 1],
+        cumulative_sessions=[1, 1, 2],
+        branch_order=[],
+        branch_days={},
+        daily_vitality=[1.0, 0.2, 1.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'class="rain"' in svg
+    assert f'0.000;{RAIN_MAX_OPACITY:.3f};0.000' in svg
+
+
+def test_a_timeline_with_no_lapse_draws_no_rain() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02'],
+        daily_sessions=[1, 1],
+        cumulative_sessions=[1, 2],
+        branch_order=[],
+        branch_days={},
+        daily_vitality=[1.0, 1.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    assert 'class="rain"' not in svg
+
+
+def test_dormant_frames_are_held_longer_than_working_days() -> None:
+    key_times = _weighted_key_times([1, 1, 0, 1, 1])
+
+    working = key_times[1] - key_times[0]
+    dormant = key_times[2] - key_times[1]
+    recovery = key_times[3] - key_times[2]
+    assert dormant == pytest.approx(working * DORMANT_FRAME_DWELL)
+    # Coming back takes about as long as going away, or the garden
+    # snaps from drought to summer between two ordinary days.
+    assert recovery == pytest.approx(working * RECOVERY_FRAME_DWELL)
+    assert key_times[4] - key_times[3] == pytest.approx(working)
+    assert key_times[0] == 0.0
+    assert key_times[-1] == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    'attribute_marker',
+    ['class="rain"', 'class="stars"', 'id="leafPaint0"'],
+)
+def test_weather_and_season_are_eased_rather_than_ramped_linearly(
+    attribute_marker: str,
+) -> None:
+    """These channels hold for days and then swing -- corners show."""
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-08', '2026-01-15', '2026-01-16'],
+        daily_sessions=[1, 0, 0, 1],
+        cumulative_sessions=[1, 1, 1, 2],
+        branch_order=[],
+        branch_days={},
+        daily_vitality=[1.0, 0.5, 0.2, 1.0],
+        daily_nightness=[0.1, 0.0, 0.0, 0.8],
+    )
+
+    svg = render_timeline_svg(timeline)
+    animate = re.search(
+        rf'{re.escape(attribute_marker)}.*?(<animate [^>]*>)', svg, re.S
+    ).group(1)
+
+    assert 'calcMode="spline"' in animate
+    splines = re.search(r'keySplines="([^"]+)"', animate).group(1)
+    key_times = re.search(r'keyTimes="([^"]+)"', animate).group(1)
+    assert len(splines.split(';')) == len(key_times.split(';')) - 1
+
+
+def test_growth_stays_linear_so_it_does_not_pulse_daily() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02', '2026-01-03'],
+        daily_sessions=[1, 2, 3],
+        cumulative_sessions=[1, 3, 6],
+        branch_order=[],
+        branch_days={},
+    )
+
+    svg = render_timeline_svg(timeline)
+    trunk = re.search(r'class="trunk".*?(<animate [^>]*>)', svg, re.S).group(1)
+
+    assert 'calcMode="linear"' in trunk
+
+
+@pytest.mark.parametrize(
+    'daily_sessions', [[], [3], [1, 1, 1], [0, 0, 0], [2, 0, 5, 0, 1]]
+)
+def test_key_times_stay_a_sorted_unit_interval(
+    daily_sessions: list[int],
+) -> None:
+    key_times = _weighted_key_times(daily_sessions)
+
+    assert len(key_times) == max(len(daily_sessions), 1)
+    assert key_times == sorted(key_times)
+    assert key_times[0] == 0.0
+    assert key_times[-1] == pytest.approx(1.0 if len(key_times) > 1 else 0.0)
+
+
+def test_a_lapse_lengthens_the_replay_rather_than_squeezing_it() -> None:
+    """Dwelling on a gap must not cost the working days their time."""
+    worked = [1] * 12
+    lapsed = [*[1] * 11, 0]
+
+    assert _timeline_duration(
+        1.0 + sum(_frame_weights(lapsed))
+    ) > _timeline_duration(1.0 + sum(_frame_weights(worked)))
+
+
+def test_the_rain_gets_a_real_share_of_the_replay() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-08', '2026-01-15', '2026-01-16'],
+        daily_sessions=[1, 0, 0, 1],
+        cumulative_sessions=[1, 1, 1, 2],
+        branch_order=[],
+        branch_days={},
+        daily_vitality=[1.0, 0.5, 0.2, 1.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+
+    key_times = [
+        float(value)
+        for value in re.search(
+            r'class="rain"[^>]*>.*?keyTimes="([^"]+)"', svg, re.S
+        )
+        .group(1)
+        .split(';')
+    ]
+    rainy_share = key_times[3] - key_times[1]
+    assert rainy_share > 0.5
+
+
+@pytest.mark.parametrize(
+    'css_class',
+    [
+        'ccg-sway-limb',
+        'ccg-sway-stalk',
+        'ccg-sway-bush',
+        'ccg-drift',
+        'ccg-bob',
+        'ccg-spin',
+        'ccg-pulse',
+        'ccg-flap',
+        'ccg-gust',
+        'ccg-tumble',
+    ],
+)
+def test_every_wind_class_has_keyframes_and_stops_for_reduced_motion(
+    css_class: str,
+) -> None:
+    style = _wind_style()
+
+    assert f'@keyframes {css_class}{{' in style
+    reduced = style.split('prefers-reduced-motion:reduce)')[1]
+    assert f'.{css_class}' in reduced
+
+
+@pytest.mark.parametrize('renderer', ['static', 'timeline'])
+def test_the_sun_keeps_moving_after_it_stops_climbing(renderer: str) -> None:
+    """It reaches its final height early and then has nowhere to go."""
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-02'],
+        daily_sessions=[1, 1],
+        cumulative_sessions=[1, 2],
+        branch_order=[],
+        branch_days={},
+        cumulative_total_tokens=[1_000, 2_000],
+    )
+    svg = (
+        render_timeline_svg(timeline)
+        if renderer == 'timeline'
+        else render_svg(GardenData(rings=[], branches=[], total_tokens=2_000))
+    )
+
+    sun = svg.split('class="sun"')[1].split('</svg>')[0]
+    assert 'ccg-bob' in sun
+    assert 'ccg-spin' in sun
+    assert 'ccg-pulse' in sun
+
+
+@pytest.mark.parametrize(
+    ('vitality', 'expected'),
+    [
+        (1.0, 1.0),
+        # Half a day away is not yet weather; twelve is a downpour.
+        (0.5 ** (0.5 / DORMANCY_HALF_LIFE_DAYS), 1.0),
+        (0.5, SUN_STORM_MIN_OPACITY),
+        (0.0, SUN_STORM_MIN_OPACITY),
+    ],
+)
+def test_the_sun_is_swallowed_by_the_storm_and_comes_back(
+    vitality: float, expected: float
+) -> None:
+    """Its height is frozen through a lapse; its brightness isn't."""
+    assert _sun_storm_opacity(vitality) == pytest.approx(expected)
+
+
+def test_the_timeline_sun_fades_rather_than_freezing_through_a_lapse() -> None:
+    timeline = GardenTimeline(
+        days=['2026-01-01', '2026-01-08', '2026-01-16'],
+        daily_sessions=[1, 0, 1],
+        cumulative_sessions=[1, 1, 2],
+        branch_order=[],
+        branch_days={},
+        cumulative_total_tokens=[1_000, 1_000, 2_000],
+        daily_vitality=[1.0, 0.1, 1.0],
+    )
+
+    svg = render_timeline_svg(timeline)
+    sun = svg.split('class="sun"')[1].split('</svg>')[0]
+    opacity = re.search(
+        r'<animate attributeName="opacity"[^>]*values="([^"]+)"', sun
+    ).group(1)
+
+    first, lapsed, last = (float(value) for value in opacity.split(';'))
+    assert first == pytest.approx(1.0)
+    assert lapsed < 0.5
+    assert last == pytest.approx(1.0)
+
+
+def test_the_storm_blows_harder_than_the_rain_is_wet() -> None:
+    """At a short gap the rain is faint -- the wind still has to read."""
+    garden = GardenData(rings=[], branches=[], vitality=0.0)
+
+    svg = render_svg(garden)
+
+    assert svg.count('class="ccg-gust"') == STORM_GUST_COUNT
+    assert svg.count('class="ccg-tumble"') == STORM_LEAF_COUNT
+    assert svg.count('class="ccg-scud"') == STORM_SCUD_COUNT
+    assert 'class="storm"' in svg
+    drizzle = _vitality_after(3)
+    assert _storm_opacity(drizzle) > _rain_opacity(drizzle)
+
+
+def test_a_tended_garden_gets_no_storm_layer_at_all() -> None:
+    svg = render_svg(GardenData(rings=[], branches=[]))
+
+    assert 'class="storm"' not in svg
+    assert 'class="rain"' not in svg
+
+
+def test_wind_groups_hinge_at_their_own_root_not_their_bounding_box() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[branch('dotfiles', sessions=2)],
+        tools=[ToolBush(tool='Bash', count=10)],
+    )
+
+    svg = render_svg(garden)
+
+    for opener in re.findall(r'<g class="ccg-[a-z-]+"[^>]*>', svg):
+        assert 'transform-origin:' in opener
+        assert 'animation-delay:-' in opener
+    assert 'transform-box:view-box' in svg
+
+
+def test_the_downpour_is_deterministic() -> None:
+    assert _rain_field() == _rain_field()
+    assert len(_rain_field()) == RAIN_DROP_COUNT
 
 
 def test_limb_counts_gives_every_repo_at_least_one_limb() -> None:

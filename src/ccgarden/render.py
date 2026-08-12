@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import itertools
 import json
 import math
 import random
@@ -8,6 +9,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from ccgarden.data import (
+    DORMANCY_HALF_LIFE_DAYS,
     CartoonBird,
     DayRing,
     GardenData,
@@ -270,13 +272,70 @@ BIRD_DRIFT_X = 26.0
 BIRD_DRIFT_Y = 9.0
 BIRD_DRIFT_SECONDS = 11.0
 
+# Wind. Every other motion in the garden is tied to the day frames, so a
+# lapse -- when nothing grows -- used to leave the whole picture standing
+# still, and the frozen final frame with it. This is the garden's idle
+# breath: a slow sway on anything rooted, a drift on anything in the sky,
+# running on its own clock so a paused, finished or scrubbed replay is
+# still alive.
+#
+# CSS keyframes rather than SMIL, for the same compositor reason as the
+# birds' drift (see `_bird_drift_rule`) -- a permanent SMIL transform on a
+# limb holding thousands of leaves would repaint the document forever on
+# the main thread. Each sway pivots at its own root, so a limb hinges
+# where it meets the trunk and a sunflower at the soil, never about the
+# middle of its own bounding box: hence `transform-box: view-box` plus an
+# explicit `transform-origin` on every wind group.
+# Each tier is (degrees of swing, seconds per full sway).
+WIND_SWAY_TIERS = {
+    'limb': (0.85, 7.4),
+    'stalk': (2.4, 4.3),
+    'bush': (1.1, 5.6),
+}
+# Sky motion is a slide, not a hinge: clouds cross, the sun breathes.
+WIND_CLOUD_DRIFT_X = 13.0
+WIND_CLOUD_DRIFT_SECONDS = 24.0
+# The sun climbs with your token total and then, at the end of the
+# replay, has nowhere left to go -- so it needs an idle of its own or it
+# reads as a sticker. A bob alone is too small to notice at this scale:
+# it wanders a little, its rays turn, and its halo breathes.
+WIND_SUN_WANDER_X = 9.0
+WIND_SUN_WANDER_Y = 6.0
+WIND_SUN_BOB_SECONDS = 19.0
+WIND_SUN_SPIN_SECONDS = 64.0
+WIND_SUN_PULSE_SECONDS = 7.5
+WIND_SUN_PULSE_SCALE = 1.07
+WIND_BIRD_FLAP_Y = 2.6
+WIND_BIRD_FLAP_SECONDS = 0.62
+# Storm motion lives *inside* the rain group, so it inherits the rain's
+# own per-day opacity for free: no second animation has to be gated to
+# the lapse, and when the garden is being tended it costs nothing but a
+# handful of invisible paths.
+STORM_GUST_COUNT = 12
+STORM_GUST_SECONDS = 2.4
+STORM_LEAF_COUNT = 14
+STORM_LEAF_SECONDS = 3.6
+# Torn cloud running ahead of the weather. The garden's own clouds are
+# per-model shapes pinned to their slots -- these are scenery, and their
+# job is to cross the sky fast enough that a lapse never looks paused.
+STORM_SCUD_COUNT = 7
+STORM_SCUD_SECONDS = 9.0
+# Lightning. A lapse is the one stretch where every cumulative shape is
+# frozen by definition, so without something large and fast the picture
+# reads as a stall no matter how the frames are paced. This is the
+# storm's own heartbeat -- and because it lives inside the rain group its
+# peak is multiplied by the rain's opacity, so a four-day gap only
+# flickers while a month away really does flash.
+STORM_FLASH_SECONDS = 6.0
+STORM_FLASH_PEAK = 0.34
+
 TOOLTIP_PAD = 8.0
 TOOLTIP_FONT_SIZE = 13.0
 TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
 
 TIMELINE_PER_DAY_SECONDS = 0.6
 TIMELINE_MIN_DURATION_S = 5.0
-TIMELINE_MAX_DURATION_S = 16.0
+TIMELINE_MAX_DURATION_S = 18.0
 TIMELINE_MIN_DAYS_TO_ANIMATE = 2
 
 # Extra strip below the legend, holding the scrubber that appears once the
@@ -522,6 +581,7 @@ def _season_animations(
             [_leaf_color(index, value) for value in vitality],
             key_times,
             duration,
+            smooth=True,
         )
         for index in range(len(LEAF_COLORS))
     ]
@@ -531,6 +591,7 @@ def _season_animations(
             [_blend_hex(dormant, living, value) for value in vitality],
             key_times,
             duration,
+            smooth=True,
         )
         for dormant, living in zip(
             DORMANT_GROUND_STOPS, LIVING_GROUND_STOPS, strict=True
@@ -542,6 +603,7 @@ def _season_animations(
             [_blend_hex(dormant, living, value) for value in vitality],
             key_times,
             duration,
+            smooth=True,
         )
         for dormant, living in zip(
             DORMANT_CANOPY_STOPS, LIVING_CANOPY_STOPS, strict=True
@@ -663,6 +725,168 @@ def _render_background() -> str:
     )
 
 
+def _wind_style() -> str:
+    """Every idle-motion keyframe in the document, emitted once.
+
+    One rule per tier rather than one per element: the phase offset that
+    stops the garden swaying in lockstep is a per-element
+    `animation-delay`, which needs no keyframes of its own.
+    """
+    rules = []
+    for tier, (degrees, seconds) in WIND_SWAY_TIERS.items():
+        rules.append(
+            f'@keyframes ccg-sway-{tier}{{'
+            f'0%,100%{{transform:rotate({-degrees:.2f}deg)}}'
+            f'50%{{transform:rotate({degrees:.2f}deg)}}}}'
+            f'.ccg-sway-{tier}{{animation:ccg-sway-{tier} {seconds:.2f}s '
+            f'ease-in-out infinite}}'
+        )
+    rules.append(
+        f'@keyframes ccg-drift{{'
+        f'0%,100%{{transform:translateX({-WIND_CLOUD_DRIFT_X:.1f}px)}}'
+        f'50%{{transform:translateX({WIND_CLOUD_DRIFT_X:.1f}px)}}}}'
+        f'.ccg-drift{{animation:ccg-drift '
+        f'{WIND_CLOUD_DRIFT_SECONDS:.1f}s ease-in-out infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-bob{{'
+        f'0%,100%{{transform:translate({-WIND_SUN_WANDER_X:.1f}px,'
+        f'{WIND_SUN_WANDER_Y:.1f}px)}}'
+        f'25%{{transform:translate(0px,{-WIND_SUN_WANDER_Y:.1f}px)}}'
+        f'50%{{transform:translate({WIND_SUN_WANDER_X:.1f}px,'
+        f'{WIND_SUN_WANDER_Y * 0.4:.1f}px)}}'
+        f'75%{{transform:translate(0px,{-WIND_SUN_WANDER_Y * 0.6:.1f}px)}}}}'
+        f'.ccg-bob{{animation:ccg-bob '
+        f'{WIND_SUN_BOB_SECONDS:.1f}s ease-in-out infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-spin{{'
+        f'0%{{transform:rotate(0deg)}}100%{{transform:rotate(360deg)}}}}'
+        f'.ccg-spin{{animation:ccg-spin '
+        f'{WIND_SUN_SPIN_SECONDS:.1f}s linear infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-pulse{{'
+        f'0%,100%{{transform:scale(1)}}'
+        f'50%{{transform:scale({WIND_SUN_PULSE_SCALE:.2f})}}}}'
+        f'.ccg-pulse{{animation:ccg-pulse '
+        f'{WIND_SUN_PULSE_SECONDS:.1f}s ease-in-out infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-flap{{'
+        f'0%,100%{{transform:translateY(0)}}'
+        f'50%{{transform:translateY({-WIND_BIRD_FLAP_Y:.1f}px)}}}}'
+        f'.ccg-flap{{animation:ccg-flap '
+        f'{WIND_BIRD_FLAP_SECONDS:.2f}s ease-in-out infinite}}'
+    )
+    rules.append(
+        # Two quick strikes, then a long dark wait: infrequent and brief
+        # on purpose -- a full-canvas flicker is exactly the pattern
+        # photosensitive viewers need protecting from, and it is disabled
+        # outright under prefers-reduced-motion below.
+        f'@keyframes ccg-flash{{'
+        f'0%,3%{{opacity:0}}'
+        f'4%{{opacity:{STORM_FLASH_PEAK:.2f}}}'
+        f'6%{{opacity:0.06}}'
+        f'8%{{opacity:{STORM_FLASH_PEAK * 0.7:.2f}}}'
+        f'13%,100%{{opacity:0}}}}'
+        f'.ccg-flash{{animation:ccg-flash {STORM_FLASH_SECONDS:.1f}s '
+        f'linear infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-scud{{'
+        f'0%{{transform:translateX(-320px)}}'
+        f'100%{{transform:translateX({VIEWBOX_WIDTH + 320:.0f}px)}}}}'
+        f'.ccg-scud{{animation:ccg-scud {STORM_SCUD_SECONDS:.1f}s '
+        f'linear infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-gust{{'
+        f'0%{{transform:translateX(-140px);opacity:0}}'
+        f'25%{{opacity:0.9}}'
+        f'100%{{transform:translateX({VIEWBOX_WIDTH + 160:.0f}px);'
+        f'opacity:0}}}}'
+        f'.ccg-gust{{animation:ccg-gust {STORM_GUST_SECONDS:.2f}s '
+        f'linear infinite}}'
+    )
+    rules.append(
+        f'@keyframes ccg-tumble{{'
+        f'0%{{transform:translate(-60px,0) rotate(0deg);opacity:0}}'
+        f'20%{{opacity:1}}'
+        f'100%{{transform:translate({VIEWBOX_WIDTH + 90:.0f}px,-40px) '
+        f'rotate(900deg);opacity:0}}}}'
+        f'.ccg-tumble{{animation:ccg-tumble {STORM_LEAF_SECONDS:.2f}s '
+        f'linear infinite}}'
+    )
+    # Every drop falls the same distance, so the travel lives in the one
+    # keyframe rule and only speed and phase vary per drop.
+    fall_travel = VIEWBOX_HEIGHT + RAIN_STREAK_MAX * 2
+    rules.append(
+        f'@keyframes ccg-fall{{'
+        f'from{{transform:translate(0,0)}}'
+        f'to{{transform:translate({fall_travel * RAIN_SLANT:.1f}px,'
+        f'{fall_travel:.1f}px)}}}}'
+        f'.ccg-fall{{animation:ccg-fall 1s linear infinite}}'
+    )
+    # Opacity, not transform, so it stays out of `wind_classes` below --
+    # `will-change: transform` on 70 stars buys nothing and asks the
+    # compositor for 70 layers. Duration and phase ride inline per star.
+    rules.append(
+        f'@keyframes ccg-twinkle{{'
+        f'0%,100%{{opacity:{STAR_TWINKLE_MIN_OPACITY}}}'
+        f'50%{{opacity:1}}}}'
+        f'.ccg-twinkle{{animation:ccg-twinkle 4s ease-in-out infinite}}'
+    )
+    wind_classes = (
+        '.ccg-sway-'
+        + ',.ccg-sway-'.join(WIND_SWAY_TIERS)
+        + ',.ccg-drift,.ccg-bob,.ccg-spin,.ccg-pulse'
+        + ',.ccg-flap,.ccg-gust,.ccg-tumble,.ccg-scud,.ccg-flash'
+    )
+    return (
+        '<style>'
+        + ''.join(rules)
+        + f'{wind_classes}{{transform-box:view-box;will-change:transform}}'
+        + '@media (prefers-reduced-motion:reduce)'
+        + f'{{{wind_classes},.ccg-twinkle,.ccg-fall{{animation:none}}}}'
+        + '</style>'
+    )
+
+
+WIND_PERIODS = {
+    **{
+        f'ccg-sway-{tier}': seconds
+        for tier, (_, seconds) in WIND_SWAY_TIERS.items()
+    },
+    'ccg-drift': WIND_CLOUD_DRIFT_SECONDS,
+    'ccg-bob': WIND_SUN_BOB_SECONDS,
+    'ccg-spin': WIND_SUN_SPIN_SECONDS,
+    'ccg-pulse': WIND_SUN_PULSE_SECONDS,
+    'ccg-flap': WIND_BIRD_FLAP_SECONDS,
+}
+
+
+def _wind_group(
+    css_class: str,
+    seed: str,
+    pivot: tuple[float, float] = (0.0, 0.0),
+) -> str:
+    """Open a wind group hinged at `pivot`, phase-shifted by `seed`.
+
+    The negative delay starts each element part-way into the shared loop,
+    so a hedge of bushes ripples instead of pulsing as one.
+    """
+    phase = random.Random(f'ccgarden-wind:{seed}').uniform(
+        0.0, WIND_PERIODS[css_class]
+    )
+    x, y = pivot
+    return (
+        f'<g class="{css_class}" '
+        f'style="transform-origin:{x:.1f}px {y:.1f}px;'
+        f'animation-delay:-{phase:.2f}s">'
+    )
+
+
 def _render_grass() -> str:
     rng = random.Random('ccgarden-grass')
     elements = []
@@ -700,6 +924,7 @@ STAR_COLOR = '#fdfbf0'
 # night garden reads as "lit from behind" rather than as speckled foliage.
 STAR_TWINKLE_MIN_S = 2.4
 STAR_TWINKLE_MAX_S = 6.5
+STAR_TWINKLE_MIN_OPACITY = 0.35
 
 
 def _star_field() -> list[tuple[float, float, float, float, float]]:
@@ -745,12 +970,11 @@ def _render_stars(
     stars = []
     for x, y, radius, twinkle, phase in _star_field():
         stars.append(
-            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{radius:.2f}" '
-            f'fill="{STAR_COLOR}">'
-            f'<animate attributeName="opacity" values="0.35;1;0.35" '
-            f'dur="{twinkle:.2f}s" begin="-{phase * twinkle:.2f}s" '
-            f'repeatCount="indefinite" />'
-            f'</circle>'
+            f'<circle class="ccg-twinkle" '
+            f'cx="{x:.1f}" cy="{y:.1f}" r="{radius:.2f}" '
+            f'fill="{STAR_COLOR}" '
+            f'style="animation-duration:{twinkle:.2f}s;'
+            f'animation-delay:-{phase * twinkle:.2f}s" />'
         )
     return (
         f'<g class="stars" opacity="{opacity:.3f}" {group_attrs}>'
@@ -815,11 +1039,13 @@ def _render_timeline_night(
 
     if veil:
         values = [f'{_night_veil_opacity(value):.3f}' for value in nightness]
-        animate = _animate_tag('opacity', values, key_times, duration)
+        animate = _animate_tag(
+            'opacity', values, key_times, duration, smooth=True
+        )
         return _render_night_veil(nightness[-1], animate)
 
     values = [f'{_saturated_nightness(value):.3f}' for value in nightness]
-    animate = _animate_tag('opacity', values, key_times, duration)
+    animate = _animate_tag('opacity', values, key_times, duration, smooth=True)
     day_labels = [
         f'Sky — {_format_day(day)}: {value:.0%} of prompts typed at night'
         for day, value in zip(timeline.days, nightness, strict=True)
@@ -830,6 +1056,294 @@ def _render_timeline_night(
         _title(day_labels[-1]),
         _tt_attr(day_labels),
     )
+
+
+# Rain. The cumulative shapes hold their value across a gap, so a lapse
+# would otherwise read as the animation stalling rather than as time
+# passing. Rain rides the same vitality signal as the season, but it is
+# the part a viewer notices *immediately*: colour drifts, weather starts.
+# Thresholds are in days away rather than in raw vitality, because
+# that's the unit the gap is actually in -- `data.py` spends several
+# frames crossing a gap, so the renderer sees a lapse deepen day by day
+# and the onset has to land on a day count, not on a raw vitality number
+# it would straddle by accident.
+#
+# One day, not two: the renderer only ever sees a dormant frame at all
+# when the gap was long enough to count as a lapse, and the first of
+# those frames is the one held longest (`DORMANT_FRAME_DWELL`). With the
+# onset at two days that frame had no rain, no dimmed sun and a season
+# tint too faint to see -- the single longest interval in the replay was
+# also the only one in which nothing whatsoever happened.
+RAIN_ONSET_DAYS = 1.0
+RAIN_FULL_DAYS = 10.0
+# Rain that fades in from nothing spends its first frames looking like a
+# compression artefact, so the first rainy day already gets a real
+# drizzle and the ramp thickens it from there.
+RAIN_MIN_INTENSITY = 0.28
+# What's left of the sun at the height of a downpour.
+SUN_STORM_MIN_OPACITY = 0.15
+RAIN_MAX_OPACITY = 0.7
+RAIN_DROP_COUNT = 150
+RAIN_COLOR = '#cfe0ef'
+RAIN_OVERCAST_COLOR = '#5d707e'
+RAIN_OVERCAST_OPACITY = 0.34
+RAIN_STREAK_MIN = 10.0
+RAIN_STREAK_MAX = 26.0
+# Wind blows the streaks rightward; the same ratio drives both the line's
+# slant and its fall vector, or the drops would slide sideways.
+RAIN_SLANT = 0.22
+RAIN_FALL_MIN_S = 0.55
+RAIN_FALL_MAX_S = 1.15
+
+
+def _exact_days_away(vitality: float) -> float:
+    """Invert `_daily_vitality`'s decay back into days of silence."""
+    if vitality >= 1.0:
+        return 0.0
+    if vitality <= 0.0:
+        return math.inf
+    return -math.log2(vitality) * DORMANCY_HALF_LIFE_DAYS
+
+
+def _days_away(vitality: float) -> int | None:
+    """Whole days of silence, or None for a garden gone past measuring."""
+    days = _exact_days_away(vitality)
+    return round(days) if math.isfinite(days) else None
+
+
+def _rain_intensity(vitality: float) -> float:
+    """0 while the garden is being tended, ramping to 1 once it's gone."""
+    days = _exact_days_away(vitality)
+    # Tolerantly: a day's vitality round-trips through a log and lands a
+    # hair under its own day count, which at the onset is the difference
+    # between a drizzle and a frame where nothing happens at all.
+    if days < RAIN_ONSET_DAYS - EPSILON:
+        return 0.0
+    if days >= RAIN_FULL_DAYS:
+        return 1.0
+    ramp = (days - RAIN_ONSET_DAYS) / (RAIN_FULL_DAYS - RAIN_ONSET_DAYS)
+    return RAIN_MIN_INTENSITY + (1.0 - RAIN_MIN_INTENSITY) * ramp
+
+
+def _rain_opacity(vitality: float) -> float:
+    return _rain_intensity(vitality) * RAIN_MAX_OPACITY
+
+
+def _sun_storm_opacity(vitality: float) -> float:
+    """How much of the sun survives the cloud, 1.0 in clear weather.
+
+    The sun's height is driven by your token total, which -- like every
+    cumulative shape -- holds still through a lapse. Everything else on
+    screen is moving by then (rain, scud, the wind), so a sun that just
+    stops mid-sky reads as a broken animation rather than as weather.
+    Fading it out is what a storm actually does to a sun, and it is a
+    change the sun can go on making while its position is frozen.
+    """
+    return 1.0 - (1.0 - SUN_STORM_MIN_OPACITY) * _rain_intensity(vitality)
+
+
+def _rain_field() -> list[tuple[float, float, float, float, float]]:
+    """Deterministic (x, length, width, fall duration, phase) per drop.
+
+    Seeded like the grass and the stars, so the same db always renders
+    the same downpour. Every drop starts above the top edge and falls
+    clear past the bottom one, so nothing pops in or out mid-frame --
+    the spread comes from the phase offsets, not from staggered starts.
+    """
+    rng = random.Random('ccgarden-rain')
+    drops = []
+    for _ in range(RAIN_DROP_COUNT):
+        drops.append(
+            (
+                rng.uniform(-VIEWBOX_WIDTH * RAIN_SLANT, VIEWBOX_WIDTH),
+                rng.uniform(RAIN_STREAK_MIN, RAIN_STREAK_MAX),
+                rng.uniform(0.7, 1.4),
+                rng.uniform(RAIN_FALL_MIN_S, RAIN_FALL_MAX_S),
+                rng.uniform(0.0, 1.0),
+            )
+        )
+    return drops
+
+
+def _render_rain(
+    opacity: float,
+    animate: str = '',
+    title: str = '',
+    group_attrs: str = '',
+) -> str:
+    """Falling streaks plus an overcast wash, faded in as a whole.
+
+    `animate` carries the group's per-day opacity <animate> in the
+    timeline render; the static render bakes the value in. The wash is
+    `pointer-events="none"` -- it covers the entire garden, and would
+    otherwise swallow every shape's tooltip -- while the streaks
+    themselves stay hoverable, which is what carries the rain's own
+    tooltip.
+    """
+    drops = []
+    for x, length, width, fall, phase in _rain_field():
+        top_y = -RAIN_STREAK_MAX - length
+        drops.append(
+            f'<line x1="{x:.1f}" y1="{top_y:.1f}" '
+            f'x2="{x + length * RAIN_SLANT:.1f}" '
+            f'y2="{top_y + length:.1f}" '
+            f'stroke="{RAIN_COLOR}" stroke-width="{width:.2f}" '
+            f'stroke-linecap="round" class="ccg-fall" '
+            f'style="animation-duration:{fall:.2f}s;'
+            f'animation-delay:-{phase * fall:.2f}s" />'
+        )
+    return (
+        f'<g class="rain" opacity="{opacity:.3f}" {group_attrs}>'
+        f'{title}'
+        f'{animate}'
+        f'<rect x="0" y="0" width="{VIEWBOX_WIDTH}" '
+        f'height="{VIEWBOX_HEIGHT}" fill="{RAIN_OVERCAST_COLOR}" '
+        f'opacity="{RAIN_OVERCAST_OPACITY}" pointer-events="none" />'
+        f'{"".join(drops)}</g>'
+    )
+
+
+def _storm_opacity(vitality: float) -> float:
+    """How present the blowing weather is, on the rain's own signal.
+
+    Deliberately *not* the rain's opacity. A lapse freezes every
+    cumulative shape, so the storm is all the motion those frames have --
+    and at a short gap the rain is only a quarter opaque, which left the
+    gusts and the scud so faint that the replay still read as paused
+    (measured: 5% of pixels changing per quarter-second against 19%
+    during growth). Square-rooting the intensity brings a drizzle's
+    wind up to something you can see without touching how wet it looks.
+    """
+    return math.sqrt(_rain_intensity(vitality))
+
+
+def _render_storm(opacity: float, animate: str = '') -> str:
+    """Gust streaks, torn-off leaves, scud and lightning.
+
+    Rain alone falls straight through a still garden, which reads as
+    weather happening *to* a photograph. These blow across it.
+    """
+    rng = random.Random('ccgarden-storm')
+    lightning = (
+        f'<rect class="ccg-flash" x="0" y="0" width="{VIEWBOX_WIDTH}" '
+        f'height="{VIEWBOX_HEIGHT}" fill="#f2f7ff" opacity="0" '
+        f'style="transform-origin:0px 0px" />'
+    )
+    parts = [lightning]
+    for index in range(STORM_SCUD_COUNT):
+        cy = rng.uniform(50.0, 250.0)
+        radius = rng.uniform(46.0, 88.0)
+        speed = STORM_SCUD_SECONDS * rng.uniform(0.7, 1.5)
+        delay = rng.uniform(0.0, speed)
+        puffs = ''.join(
+            f'<path d="{d}" fill="{RAIN_OVERCAST_COLOR}" opacity="0.72" />'
+            for d in _cloud_puffs_d(radius, f'ccgarden-scud:{index}')
+        )
+        parts.append(
+            f'<g class="ccg-scud" '
+            f'style="transform-origin:0px 0px;'
+            f'animation-duration:{speed:.2f}s;'
+            f'animation-delay:-{delay:.2f}s">'
+            f'<g transform="translate(0,{cy:.1f})">{puffs}</g></g>'
+        )
+    for _index in range(STORM_GUST_COUNT):
+        y = rng.uniform(40.0, GROUND_Y - 20.0)
+        length = rng.uniform(70.0, 190.0)
+        dip = rng.uniform(-14.0, 14.0)
+        delay = rng.uniform(0.0, STORM_GUST_SECONDS)
+        speed = STORM_GUST_SECONDS * rng.uniform(0.8, 1.35)
+        parts.append(
+            f'<path class="ccg-gust" d="M0,{y:.1f} '
+            f'q{length / 2:.1f},{dip:.1f} {length:.1f},0" fill="none" '
+            f'stroke="{RAIN_COLOR}" stroke-width="{rng.uniform(1.0, 2.2):.2f}"'
+            f' stroke-linecap="round" opacity="0.85" '
+            f'style="transform-origin:0px 0px;'
+            f'animation-duration:{speed:.2f}s;'
+            f'animation-delay:-{delay:.2f}s" />'
+        )
+    for index in range(STORM_LEAF_COUNT):
+        y = rng.uniform(GROUND_Y * 0.35, GROUND_Y - 10.0)
+        size = rng.uniform(3.0, 6.0)
+        color = LEAF_COLORS[index % len(LEAF_COLORS)]
+        delay = rng.uniform(0.0, STORM_LEAF_SECONDS)
+        speed = STORM_LEAF_SECONDS * rng.uniform(0.75, 1.4)
+        parts.append(
+            f'<ellipse class="ccg-tumble" cx="0" cy="{y:.1f}" '
+            f'rx="{size:.1f}" ry="{size * 0.45:.1f}" fill="{color}" '
+            f'opacity="0.9" '
+            f'style="transform-origin:0px {y:.1f}px;'
+            f'animation-duration:{speed:.2f}s;'
+            f'animation-delay:-{delay:.2f}s" />'
+        )
+    return (
+        f'<g class="storm" opacity="{opacity:.3f}" pointer-events="none">'
+        f'{animate}{"".join(parts)}</g>'
+    )
+
+
+def _lapse_phrase(vitality: float) -> str:
+    days = _days_away(vitality)
+    if days is None:
+        return 'a very long time'
+    return f'{days} {"day" if days == 1 else "days"}'
+
+
+def _rain_title(vitality: float) -> str:
+    return _title(
+        f'Rain — no sessions for {_lapse_phrase(vitality)}; '
+        f'the garden is going thirsty'
+    )
+
+
+def _render_timeline_rain(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    """The downpour, animated over the same vitality the season rides.
+
+    A garden that has never been left alone never rains, and emits no
+    rain layer at all rather than a permanently invisible one.
+    """
+    vitality = timeline.daily_vitality
+    if not vitality or not any(
+        _rain_intensity(value) > 0 for value in vitality
+    ):
+        return ''
+
+    values = [f'{_rain_opacity(value):.3f}' for value in vitality]
+    animate = _animate_tag('opacity', values, key_times, duration, smooth=True)
+    day_labels = [
+        f'Rain — {_format_day(day)}: {_lapse_phrase(value)} since a session'
+        for day, value in zip(timeline.days, vitality, strict=True)
+    ]
+    return _render_rain(
+        _rain_opacity(vitality[-1]),
+        animate,
+        _title(day_labels[-1]),
+        _tt_attr(day_labels),
+    )
+
+
+def _render_timeline_storm(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    """The blowing half of the weather, on its own opacity curve.
+
+    Split from `_render_timeline_rain` rather than nested inside it so
+    the wind can come up faster than the wet does -- see `_storm_opacity`.
+    """
+    vitality = timeline.daily_vitality
+    if not vitality or not any(
+        _rain_intensity(value) > 0 for value in vitality
+    ):
+        return ''
+
+    values = [f'{_storm_opacity(value):.3f}' for value in vitality]
+    animate = _animate_tag('opacity', values, key_times, duration, smooth=True)
+    return _render_storm(_storm_opacity(vitality[-1]), animate)
 
 
 def _cache_efficiency_flower_count(
@@ -1038,7 +1552,11 @@ def _render_cloud(
         f'<path d="{d}" fill="url(#{gradient_id})" opacity="0.88" />'
         for d in _cloud_puffs_d(radius, seed)
     )
-    return f'<g transform="translate({cx:.1f},{cy:.1f})">{puffs}</g>'
+    return (
+        f'<g transform="translate({cx:.1f},{cy:.1f})">'
+        + _wind_group('ccg-drift', seed)
+        + f'{puffs}</g></g>'
+    )
 
 
 def _cloud_bands() -> tuple[tuple[float, float], tuple[float, float]]:
@@ -1364,8 +1882,11 @@ def _render_birds(
     slots = _bird_slots(flock, sun)
     elements = [
         f'<g class="bird">{_title(_bird_label(bird, since))}'
-        f'{_render_bird(x, y, size)}</g>'
-        for bird, (x, y, size) in zip(flock, slots, strict=True)
+        + _wind_group('ccg-flap', f'bird:{index}')
+        + f'{_render_bird(x, y, size)}</g></g>'
+        for index, (bird, (x, y, size)) in enumerate(
+            zip(flock, slots, strict=True)
+        )
     ]
     return f'<g class="birds">{"".join(elements)}</g>'
 
@@ -1432,9 +1953,12 @@ def _render_sun(cx: float, cy: float, radius: float) -> str:
     )
     return (
         f'<g transform="translate({cx:.1f},{cy:.1f})">'
-        f'<circle r="{halo_radius:.2f}" fill="url(#sunHaloGradient)" />'
-        f'{rays}'
-        f'<circle r="{radius:.2f}" fill="url(#sunGradient)" />'
+        + _wind_group('ccg-pulse', 'sun-halo')
+        + f'<circle r="{halo_radius:.2f}" fill="url(#sunHaloGradient)" />'
+        f'</g>'
+        + _wind_group('ccg-spin', 'sun-rays')
+        + f'{rays}</g>'
+        + f'<circle r="{radius:.2f}" fill="url(#sunGradient)" />'
         f'</g>'
     )
 
@@ -1537,7 +2061,8 @@ def _render_bushes(tools: list[ToolBush]) -> str:
         (
             '<g class="bush">'
             f'{_title(f"{tool_bush.tool} — used {tool_bush.count:,} times")}'
-            f'{_render_bush(x, GROUND_Y, radius, tool_bush.tool)}</g>'
+            + _wind_group('ccg-sway-bush', tool_bush.tool, (x, GROUND_Y))
+            + f'{_render_bush(x, GROUND_Y, radius, tool_bush.tool)}</g></g>'
         )
         for (x, radius), tool_bush in zip(footprints, tools, strict=True)
     )
@@ -1676,7 +2201,8 @@ def _render_sunflowers(branches: list[RepoBranch]) -> str:
         parts.append(
             '<g class="sunflower">'
             f'{_title(f"{branch.repo} — {branch.prompts:,} prompts")}'
-            f'{plant}</g>'
+            + _wind_group('ccg-sway-stalk', branch.repo, (x, GROUND_Y))
+            + f'{plant}</g></g>'
         )
     return ''.join(parts)
 
@@ -2189,7 +2715,9 @@ def _render_branches_and_leaves(
             repo_branch, origin_x, origin_y, end_x, end_y, seed=limb.key
         )
         elements.append(
-            f'<g class="repo-group">{title}{collar}{branch_path}{leaves}</g>'
+            f'<g class="repo-group">{title}'
+            + _wind_group('ccg-sway-limb', limb.key, (origin_x, origin_y))
+            + f'{collar}{branch_path}{leaves}</g></g>'
         )
     return ''.join(elements)
 
@@ -2505,6 +3033,11 @@ LEGEND_ROWS = (
         'sky',
     ),
     (
+        'Rain',
+        ('falls on the days', 'you never showed up'),
+        'rain',
+    ),
+    (
         'Sunflowers',
         ('one per repo;', 'taller = more prompts'),
         'sunflower',
@@ -2598,6 +3131,17 @@ def _legend_icon_sky(cx: float, cy: float) -> str:
     )
 
 
+def _legend_icon_rain(cx: float, cy: float) -> str:
+    cloud = _render_cloud(cx, cy - 3.0, 5.5, 'legend-rain')
+    streaks = ''.join(
+        f'<line x1="{cx + offset:.1f}" y1="{cy + 2.0:.1f}" '
+        f'x2="{cx + offset + 1.4:.1f}" y2="{cy + 7.5:.1f}" '
+        f'stroke="#5b86ad" stroke-width="1.2" stroke-linecap="round" />'
+        for offset in (-4.0, 0.0, 4.0)
+    )
+    return cloud + streaks
+
+
 def _legend_icon_bird(cx: float, cy: float) -> str:
     # Dark, unlike the sky birds: the legend panel is a pale cream card.
     return _render_bird(cx, cy + 2.0, 6.0, BIRD_LEGEND_COLOR)
@@ -2615,6 +3159,7 @@ LEGEND_ICON_RENDERERS = {
     'sunflower': _legend_icon_sunflower,
     'sky': _legend_icon_sky,
     'season': _legend_icon_season,
+    'rain': _legend_icon_rain,
     'bird': _legend_icon_bird,
 }
 
@@ -2628,6 +3173,7 @@ def _render_legend(
     with_birds: bool = False,
     with_night: bool = False,
     with_seasons: bool = False,
+    with_rain: bool = False,
 ) -> str:
     """A key panel explaining what each part of the tree represents.
 
@@ -2637,9 +3183,9 @@ def _render_legend(
     row ragged and half empty as soon as an entry is dropped, and two rows
     is all the band's height affords a three-line description.
 
-    The birds, sky and season entries are dropped unless there's actually
-    a bird, a night or a turned leaf to explain: a key to something the
-    garden isn't doing is just a puzzle.
+    The birds, sky, season and rain entries are dropped unless there's
+    actually a bird, a night, a turned leaf or a downpour to explain: a
+    key to something the garden isn't doing is just a puzzle.
     """
     dropped = set()
     if not with_birds:
@@ -2648,6 +3194,8 @@ def _render_legend(
         dropped.add('sky')
     if not with_seasons:
         dropped.add('season')
+    if not with_rain:
+        dropped.add('rain')
     rows = [row for row in LEGEND_ROWS if row[2] not in dropped]
     columns = math.ceil(len(rows) / LEGEND_GRID_ROWS)
     column_width = LEGEND_WIDTH / columns
@@ -2719,8 +3267,11 @@ def render_svg(garden: GardenData) -> str:
             _saturated_nightness(garden.nightness),
             title=_night_title(garden.nightness, garden.hour_counts),
         )
-        + f'<g class="sun">{sun_title}'
-        f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}</g>'
+        + f'<g class="sun" opacity="{_sun_storm_opacity(garden.vitality):.3f}"'
+        f'>{sun_title}'
+        + _wind_group('ccg-bob', 'sun')
+        + f'{_render_sun(sun_x, sun_y, _sun_radius(garden.total_tokens))}'
+        f'</g></g>'
         + _render_clouds(garden.model_efforts)
         + _render_birds(
             garden.birds,
@@ -2741,12 +3292,24 @@ def render_svg(garden: GardenData) -> str:
             garden.cache_read_tokens,
             garden.cache_write_tokens,
         )
-        # The veil goes over the garden but under the legend.
+        # Weather goes over the garden but under the legend, and the
+        # night veil goes over the rain -- rain lit brighter than the
+        # sky it falls out of reads as a rendering bug.
+        + (
+            _render_rain(
+                _rain_opacity(garden.vitality),
+                title=_rain_title(garden.vitality),
+            )
+            + _render_storm(_storm_opacity(garden.vitality))
+            if _rain_intensity(garden.vitality) > 0
+            else ''
+        )
         + _render_night_veil(garden.nightness)
         + _render_legend(
             with_birds=bool(garden.birds),
             with_night=garden.nightness > 0,
             with_seasons=garden.vitality < 1.0,
+            with_rain=_rain_intensity(garden.vitality) > 0,
         )
         + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
     )
@@ -2756,6 +3319,7 @@ def render_svg(garden: GardenData) -> str:
         f'viewBox="0 0 {VIEWBOX_WIDTH} {LEGEND_BAND_BOTTOM:.1f}" '
         f'width="{VIEWBOX_WIDTH}" height="{LEGEND_BAND_BOTTOM:.1f}">'
         f'{_render_defs(vitality=garden.vitality)}'
+        f'{_wind_style()}'
         f'{_render_background()}'
         f'{body}'
         f'</svg>'
@@ -2774,7 +3338,13 @@ def render_svg(garden: GardenData) -> str:
 # no SMIL support just sees the finished tree instead of nothing.
 
 
-def _timeline_duration(day_count: int) -> float:
+def _timeline_duration(day_count: float) -> float:
+    """Seconds of replay for a timeline `day_count` frame-weights long.
+
+    Takes a weight rather than a count so the dwell dormant frames get
+    (see `_frame_weights`) buys extra runtime instead of being taken out
+    of the working days' share.
+    """
     return min(
         max(day_count * TIMELINE_PER_DAY_SECONDS, TIMELINE_MIN_DURATION_S),
         TIMELINE_MAX_DURATION_S,
@@ -2787,15 +3357,122 @@ def _key_times(count: int) -> list[float]:
     return [index / (count - 1) for index in range(count)]
 
 
+# How much longer a dormant frame is held than a working one. A lapse
+# only exists in the timelapse as the frames `data.py` inserts for it, and
+# at an even cadence those go by faster than the weather they carry reads
+# -- the rain arrives and is gone before the eye finds it. Dwelling on
+# them buys the lapse the time it actually took, without spending frames.
+DORMANT_FRAME_DWELL = 2.5
+
+
+# The frame you come back on gets a dwell of its own. Without it the
+# garden spends seconds drying out and then snaps green again between two
+# ordinary days, which reads as a glitch rather than as a recovery: the
+# way out of a lapse has to take about as long as the way in.
+RECOVERY_FRAME_DWELL = 2.0
+# Extra frame-time per unit of weather change. Sky, rain and sun cover
+# the whole canvas, so a day that swings one of them from nothing to full
+# repaints the entire picture -- at an ordinary day's pace that lands as a
+# slam, however smoothly it is interpolated. Rather than damp the change
+# (the day really was a night shift, or really was the day you came back)
+# the frame simply gets the time the change needs.
+WEATHER_SWING_DWELL = 3.5
+
+
+def _weather_load(nightness: float, vitality: float) -> float:
+    """Total canvas-wide weather on one frame, for pacing purposes.
+
+    Deliberately a sum of the three full-bleed channels rather than any
+    one of them: what makes a transition jarring is how much of the
+    picture it repaints, and darkness, rain and a smothered sun all
+    repaint the same sky.
+    """
+    return (
+        _saturated_nightness(nightness)
+        + _rain_opacity(vitality)
+        + (1.0 - _sun_storm_opacity(vitality))
+    )
+
+
+def _frame_weights(
+    daily_sessions: list[int],
+    daily_nightness: list[float] | None = None,
+    daily_vitality: list[float] | None = None,
+) -> list[float]:
+    """Relative time spent arriving at each frame after the first."""
+    count = len(daily_sessions)
+    nightness = daily_nightness or [0.0] * count
+    vitality = daily_vitality or [1.0] * count
+    loads = [
+        _weather_load(night, life)
+        for night, life in zip(nightness, vitality, strict=True)
+    ]
+    weights = []
+    for index, (previous, sessions) in enumerate(
+        itertools.pairwise(daily_sessions)
+    ):
+        if sessions <= 0:
+            weight = DORMANT_FRAME_DWELL
+        elif previous <= 0:
+            weight = RECOVERY_FRAME_DWELL
+        else:
+            weight = 1.0
+        swing = abs(loads[index + 1] - loads[index])
+        weights.append(weight + WEATHER_SWING_DWELL * swing)
+    return weights
+
+
+def _weighted_key_times(
+    daily_sessions: list[int],
+    daily_nightness: list[float] | None = None,
+    daily_vitality: list[float] | None = None,
+) -> list[float]:
+    """Frame times with the dormant frames held longer than the rest.
+
+    Days you worked all get the same slice; a day with no sessions is a
+    day `data.py` inserted to stand for silence, so it gets `DORMANT_
+    FRAME_DWELL` of one. The seed day carries no interval of its own, so
+    a frame's weight is the time spent *arriving* at it.
+    """
+    if len(daily_sessions) <= 1:
+        return [0.0]
+    weights = _frame_weights(daily_sessions, daily_nightness, daily_vitality)
+    total = sum(weights)
+    times = [0.0]
+    elapsed = 0.0
+    for weight in weights:
+        elapsed += weight
+        times.append(elapsed / total)
+    return times
+
+
+# Ease-in-out, for the channels that sit still and then swing: weather
+# and season hold one value for days and then move, so a linear segment
+# starts and stops with a visible corner. Geometry is deliberately left
+# linear -- growth moves on nearly every frame, and easing each day
+# individually would turn steady growth into a pulse.
+EASE_IN_OUT_SPLINE = '0.42 0 0.58 1'
+
+
+def _spline_attrs(key_times: list[float], *, smooth: bool) -> str:
+    if not smooth or len(key_times) < TIMELINE_MIN_DAYS_TO_ANIMATE:
+        return 'calcMode="linear" '
+    splines = ';'.join([EASE_IN_OUT_SPLINE] * (len(key_times) - 1))
+    return f'calcMode="spline" keySplines="{splines}" '
+
+
 def _animate_tag(
     attribute: str,
     values: list[str],
     key_times: list[float],
     duration: float,
+    *,
+    smooth: bool = False,
 ) -> str:
     return (
         f'<animate attributeName="{attribute}" dur="{duration:.3f}s" '
-        f'begin="0s" fill="freeze" calcMode="linear" '
+        f'begin="0s" fill="freeze" '
+        f'{_spline_attrs(key_times, smooth=smooth)}'
         f'keyTimes="{";".join(f"{t:.4f}" for t in key_times)}" '
         f'values="{";".join(values)}" />'
     )
@@ -3173,8 +3850,9 @@ def _render_timeline_branches_and_leaves(
             vitality=vitality,
         )
         elements.append(
-            f'<g class="repo-group" {tt}>'
-            f'{title}{collar}{branch_path}{leaves}</g>'
+            f'<g class="repo-group" {tt}>{title}'
+            + _wind_group('ccg-sway-limb', limb.key, (origin_x, origin_y))
+            + f'{collar}{branch_path}{leaves}</g></g>'
         )
     return ''.join(elements)
 
@@ -3411,12 +4089,21 @@ def _render_timeline_sun(
     title = _title(day_labels[-1])
     tt = _tt_attr(day_labels)
     sun_shape = _render_sun(0, 0, final_radius)
+    vitality = timeline.daily_vitality or [1.0] * len(day_tokens)
+    storm_animate = _animate_tag(
+        'opacity',
+        [f'{_sun_storm_opacity(value):.3f}' for value in vitality],
+        key_times,
+        duration,
+        smooth=True,
+    )
     return (
-        f'<g class="sun" {tt} '
-        f'transform="translate({final_x:.1f},{final_y:.1f})">'
-        f'{title}{translate_animate}'
-        f'<g transform="scale(1)">{scale_animate}{sun_shape}</g>'
-        f'</g>'
+        f'<g class="sun" {tt} opacity="{_sun_storm_opacity(vitality[-1]):.3f}"'
+        f' transform="translate({final_x:.1f},{final_y:.1f})">'
+        f'{title}{storm_animate}{translate_animate}'
+        + _wind_group('ccg-bob', 'sun')
+        + f'<g transform="scale(1)">{scale_animate}{sun_shape}</g>'
+        f'</g></g>'
     )
 
 
@@ -3468,9 +4155,11 @@ def _render_timeline_clouds(
         title = _title(day_labels[-1])
         tt = _tt_attr(day_labels)
         elements.append(
-            f'<g class="cloud" {tt} transform="translate({cx:.1f},{cy:.1f})">'
-            f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
-            f'</g>'
+            f'<g class="cloud" {tt} '
+            f'transform="translate({cx:.1f},{cy:.1f})">{title}'
+            + _wind_group('ccg-drift', model)
+            + f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'</g></g>'
         )
     return ''.join(elements)
 
@@ -3510,7 +4199,8 @@ def _render_timeline_birds(timeline: GardenTimeline) -> str:
             f'<g class="bird">'
             f'{_title(_bird_label(bird, timeline.cartoon_since))}'
             f'<g class="bird-drift bird-drift-{index}">'
-            f'{_render_bird(x, y, size)}</g></g>'
+            + _wind_group('ccg-flap', f'bird:{index}')
+            + f'{_render_bird(x, y, size)}</g></g></g>'
         )
     style = _bird_drift_style(rules)
     return f'<g class="birds">{style}{"".join(elements)}</g>'
@@ -3562,9 +4252,10 @@ def _render_timeline_bushes(
         tt = _tt_attr(day_labels)
         elements.append(
             f'<g class="bush" {tt} '
-            f'transform="translate({x:.1f},{GROUND_Y})">'
-            f'{title}<g transform="scale(1)">{animate}{puffs}</g>'
-            f'</g>'
+            f'transform="translate({x:.1f},{GROUND_Y})">{title}'
+            + _wind_group('ccg-sway-bush', tool)
+            + f'<g transform="scale(1)">{animate}{puffs}</g>'
+            f'</g></g>'
         )
     return ''.join(elements)
 
@@ -3728,9 +4419,10 @@ def _render_timeline_sunflowers(
         tt = _tt_attr(day_labels)
         elements.append(
             f'<g class="sunflower" {tt} '
-            f'transform="translate({x:.1f},{GROUND_Y})">'
-            f'{title}<g transform="scale(1)">{animate}{plant}</g>'
-            f'</g>'
+            f'transform="translate({x:.1f},{GROUND_Y})">{title}'
+            + _wind_group('ccg-sway-stalk', branch.repo)
+            + f'<g transform="scale(1)">{animate}{plant}</g>'
+            f'</g></g>'
         )
     return ''.join(elements)
 
@@ -4029,8 +4721,12 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     if day_count < TIMELINE_MIN_DAYS_TO_ANIMATE:
         return render_svg(_timeline_final_garden(timeline))
 
-    duration = _timeline_duration(day_count)
-    key_times = _key_times(day_count)
+    daily_sessions = timeline.daily_sessions or [1] * day_count
+    weather = (timeline.daily_nightness, timeline.daily_vitality)
+    duration = _timeline_duration(
+        1.0 + sum(_frame_weights(daily_sessions, *weather))
+    )
+    key_times = _weighted_key_times(daily_sessions, *weather)
     base_half_width_by_day = _trunk_half_widths_for_timeline(
         timeline.cumulative_sessions
     )
@@ -4065,11 +4761,16 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_bushes(timeline, key_times, duration)
         + _render_timeline_flowers_on_bushes(timeline, key_times, duration)
         # Over the garden but under the legend -- as in `render_svg`.
+        + _render_timeline_rain(timeline, key_times, duration)
+        + _render_timeline_storm(timeline, key_times, duration)
         + _render_timeline_night(timeline, key_times, duration, veil=True)
         + _render_legend(
             with_birds=bool(timeline.birds),
             with_night=any(timeline.daily_nightness),
             with_seasons=any(value < 1.0 for value in timeline.daily_vitality),
+            with_rain=any(
+                _rain_intensity(value) > 0 for value in timeline.daily_vitality
+            ),
         )
         + _render_scrubber(timeline, key_times, duration)
         + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)
@@ -4085,6 +4786,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         f'{
             _render_defs(leaf_animations, ground_animations, canopy_animations)
         }'
+        f'{_wind_style()}'
         f'{_render_background()}'
         f'{body}'
         f'</svg>'

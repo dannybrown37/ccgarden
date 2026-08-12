@@ -353,19 +353,46 @@ DORMANCY_MIN_GAP_DAYS = 4
 DORMANCY_HALF_LIFE_DAYS = 12.0
 # It takes two days to have a gap between them.
 MIN_DAYS_WITH_A_GAP = 2
+# Frames a single gap may spend. Every missed day gets one until the
+# budget runs out, then the gap is sampled instead -- a year away can't
+# buy a year of frames, since each one costs an entry in every animated
+# attribute in the SVG. Past the budget it's the vitality decay, not the
+# frame count, that says how long you were gone.
+DORMANT_FRAMES_MAX = 6
+
+
+def _dormant_days_in_gap(previous: date, current: date) -> list[date]:
+    """Evenly spaced stand-in days for the silence between two workdays.
+
+    One frame per missed day is right for a long weekend and absurd for
+    a sabbatical, so short gaps get every day and longer ones are
+    sampled across the whole span -- the dates still walk the calendar
+    through the lapse, they just skip.
+    """
+    gap = (current - previous).days
+    if gap < DORMANCY_MIN_GAP_DAYS:
+        return []
+    count = min(gap - 1, DORMANT_FRAMES_MAX)
+    days = {
+        previous + timedelta(days=round(index * gap / (count + 1)))
+        for index in range(1, count + 1)
+    }
+    return sorted(days - {previous, current})
 
 
 def _with_dormant_days(
     day_rows: list[tuple[str, int, int, int, int, int]],
 ) -> list[tuple[str, int, int, int, int, int]]:
-    """Insert an all-zero frame into the middle of every real gap.
+    """Insert all-zero frames across every real gap.
 
-    The db only holds days you actually worked, so without this a
+    The db only holds days you actually worked, so without these a
     three-month break is just one frame boundary and the timelapse
-    skips straight over it. A single synthetic day per gap gives the
-    animation somewhere to *be* dormant, and because it carries no rows
-    in any other table, every cumulative shape simply holds its value
-    there rather than growing -- which is exactly what a gap means.
+    skips straight over it. Synthetic days give the animation somewhere
+    to *be* dormant, and because they carry no rows in any other table,
+    every cumulative shape simply holds its value there rather than
+    growing -- which is exactly what a gap means. Frames are the
+    timelapse's unit of time, so spending several on a gap is what gives
+    the lapse (and its rain) weight proportional to how long it ran.
     """
     if len(day_rows) < MIN_DAYS_WITH_A_GAP:
         return day_rows
@@ -374,10 +401,10 @@ def _with_dormant_days(
     for row in day_rows[1:]:
         previous = date.fromisoformat(expanded[-1][0])
         current = date.fromisoformat(row[0])
-        gap = (current - previous).days
-        if gap >= DORMANCY_MIN_GAP_DAYS:
-            midpoint = previous + timedelta(days=gap // 2)
-            expanded.append((str(midpoint), 0, 0, 0, 0, 0))
+        expanded.extend(
+            (str(day), 0, 0, 0, 0, 0)
+            for day in _dormant_days_in_gap(previous, current)
+        )
         expanded.append(row)
     return expanded
 

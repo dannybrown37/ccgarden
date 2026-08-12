@@ -40,12 +40,23 @@ pair → legend icon + entry.
 Two channels are deliberately **not** cumulative, because they describe
 the day rather than the total: `daily_nightness` (share of that day's
 prompts typed after 22:00, which drives the sky) and `daily_vitality`
-(decays with days since you last worked, which drives the season). Vitality
+(decays with days since you last worked, which drives both the season and
+the rain — `_rain_intensity` inverts vitality back into days away, so the
+thresholds are in days rather than in a raw vitality number). Vitality
 is the only value in the whole pipeline that can fall. Because the db only
-holds days you actually worked, `_with_dormant_days` inserts one all-zero
-frame into the middle of every gap ≥ 4 days so a lapse has somewhere to be
-visible; those frames carry no rows in any other table, so every cumulative
-shape correctly holds its value there instead of growing.
+holds days you actually worked, `_with_dormant_days` inserts all-zero
+frames across every gap ≥ 4 days so a lapse has somewhere to be visible —
+one per missed day up to `DORMANT_FRAMES_MAX`, then sampled across the
+span, so a sabbatical costs no more frames than a fortnight but still walks
+the calendar. Those frames carry no rows in any other table, so every
+cumulative shape correctly holds its value there instead of growing. The
+renderer then holds each of them `DORMANT_FRAME_DWELL`× longer than a
+working day, and the day you come back on `RECOVERY_FRAME_DWELL`× longer
+(`_weighted_key_times`, and `_timeline_duration` takes that total weight
+rather than a day count so the dwell adds runtime instead of stealing it)
+— frames are the timelapse's unit of time, so that's what gives a lapse
+and its rain weight on screen, and going away and coming back have to
+take comparable time or the recovery reads as a glitch.
 
 New tables must be tolerated when absent — `daily_hour_usage` postdates the
 first released schema, so its loaders check `_table_exists` and degrade to
@@ -65,7 +76,29 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   running off-canvas. Tune the constant, don't special-case the data.
 - Animation is declarative SMIL (`_animate_tag`, `_animate_transform_tag`)
   over `_key_times` — no JS timers. The scrubber and tap-tooltip are the
-  only inline-script parts.
+  only inline-script parts. Pass `smooth=True` only for channels that sit
+  still for days and then swing (rain, season, sky): those get eased
+  `calcMode="spline"` segments, while geometry stays linear, since easing
+  every day of steady growth turns it into a pulse.
+- Idle motion (wind) is **CSS keyframes, never SMIL** — same compositor
+  reason as the birds' drift. `_wind_style` emits every keyframe once and
+  `_wind_group` opens a phase-shifted group per element; each one must
+  carry `transform-origin` (with `transform-box: view-box`) so a limb
+  hinges at the trunk and a sunflower at the soil. Never put a wind class
+  on an element that already has a `transform` attribute or an
+  `animateTransform` — CSS transform wins over both — always nest a new
+  group. Wind runs on its own clock, so a finished, paused or scrubbed
+  replay is still alive.
+- Storm motion (`_render_storm_wind`: gusts, tumbling leaves, scud cloud)
+  lives *inside* the rain group, which already animates its own per-day
+  opacity: anything that should appear only during a lapse goes there
+  rather than getting a second animation gated to the gap.
+- A lapse freezes every cumulative shape by definition, so anything big
+  enough to notice needs a *non-cumulative* channel to keep changing on —
+  the sun, whose height is frozen with the token total, fades out behind
+  the storm instead (`_sun_storm_opacity`). Idle wind is too slow to
+  cover for that on its own: its periods are tens of seconds and a lapse
+  is a few.
 - The timeline starts on a synthetic empty day (`_with_seed_day`) and every
   shape is sized through `_grown_size`, which is zero — not the min — before
   a shape's first day of data, so the timelapse grows out of bare ground.
