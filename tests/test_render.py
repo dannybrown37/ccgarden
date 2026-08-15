@@ -741,8 +741,12 @@ def test_render_timeline_svg_starts_every_shape_at_nothing() -> None:
     assert bush_scale[0] == '0.0000'
     sun_scale = _first_values(svg.split('class="sun"')[1], 'scale')
     assert sun_scale[0] == '0.0000'
-    # The trunk is the exception: it's visible at its minimum width from
-    # the seed day, so the tree doesn't pop into existence all at once.
+    # The trunk's own animation only carries width -- height comes from
+    # the ground-hinged growth scale, which is what holds it to nothing
+    # on the seed day.
+    tree_scale = _first_values(svg.split('class="tree-growth"')[1], 'scale')
+    assert tree_scale[0] == '0.0000 0.0000'
+    assert tree_scale[-1] == '1.0000 1.0000'
     trunk = svg.split('class="trunk"')[1]
     trunk_d = _first_values(trunk, 'd')
     assert f'M {TRUNK_CENTER_X - TRUNK_BASE_HALF_WIDTH_MIN:.2f},' in trunk_d[0]
@@ -1114,7 +1118,7 @@ def test_render_timeline_svg_drifts_the_flock_without_growing_it() -> None:
 
     svg = render_timeline_svg(timeline)
 
-    flock = svg.split('class="birds"')[1].split('class="trunk-group"')[0]
+    flock = svg.split('class="birds"')[1].split('class="tree-growth"')[0]
     assert svg.count('class="bird"') == 2
     # Per bird: the @keyframes, its class rule, the animation: reference, and
     # the class on the element itself.
@@ -1133,7 +1137,7 @@ def test_render_timeline_svg_drifts_the_flock_without_smil() -> None:
     svg = render_timeline_svg(timeline)
 
     assert 'repeatCount="indefinite"' not in svg
-    flock = svg.split('class="birds"')[1].split('class="trunk-group"')[0]
+    flock = svg.split('class="birds"')[1].split('class="tree-growth"')[0]
     assert '<animateTransform' not in flock
     assert 'animation:bird-drift-0' in svg
     assert '@keyframes bird-drift-0' in svg

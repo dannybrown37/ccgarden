@@ -132,6 +132,15 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   (`_render_timeline_rings`) — `_half_width_at` is linear in the base
   width, so one shared scale fits every ring, where an animated `d` per
   ring would be O(days²) of path data.
+- The tree's *height* is not in any path. Trunk, rings, branches and
+  leaves all sit inside one group scaled uniformly about
+  (`TRUNK_CENTER_X`, `GROUND_Y`) per day (`_render_tree_growth` /
+  `_tree_growth_scales`), so the whole tree rises out of the soil for
+  O(days) of animation values instead of every path being re-emitted at a
+  new height. It composes with the trunk's width curve — that curve is a
+  full-grown trunk's width, the scale is what makes early days a sapling.
+  The scale is uniform, not vertical-only: stretching y alone gives a
+  stubby full-width stump hung with elliptical leaves.
 - Shapes stay off each other: clouds honor the tree keepout, birds check
   `_clear_of_sun`, bushes use `_bush_footprints`. Preserve those checks when
   moving things.

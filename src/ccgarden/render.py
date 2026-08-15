@@ -36,6 +36,7 @@ TRUNK_BASE_HALF_WIDTH_MIN = 9.0
 TRUNK_BASE_HALF_WIDTH_MAX = 30.0
 TRUNK_SESSIONS_SATURATION = 400
 TRUNK_TOP_TAPER = 0.72
+TREE_GROWTH_SCALE_MIN = 0.12
 BRANCH_ZONE_HEIGHT = 220
 BRANCH_LENGTH_MIN = 30.0
 BRANCH_LENGTH_MAX = 230.0
@@ -448,11 +449,10 @@ def _trunk_half_widths_for_timeline(
     re-deriving an absolute value per day; do the same here so the trunk
     always starts near the minimum and grows into the real final width.
 
-    The trunk is the one shape that does *not* start from nothing on the
-    timeline's seed day: everything else hangs off it, so growing it out of
-    bare ground makes the first real day pop a full-height tree (and its
-    first branch) into existence at once. It sits at its minimum from the
-    very first frame instead, and only its width animates.
+    Width only: the tree's *height* is not in this curve at all, it comes
+    from the whole-tree scale in `_tree_growth_scales` — so the widths
+    here are the widths of a full-grown trunk, which that scale then
+    shrinks back down to a sapling's on early days.
     """
     final_width = _trunk_half_width(cumulative_sessions[-1])
     return [
@@ -467,6 +467,56 @@ def _trunk_half_widths_for_timeline(
         )
         for sessions in cumulative_sessions
     ]
+
+
+def _tree_growth_scales(cumulative_sessions: list[int]) -> list[float]:
+    """Per-day uniform scale for the whole tree, hinged on the ground.
+
+    The tree used to stand at its final height from frame one and only
+    widen, which read as a full-grown trunk being *filled in* rather than
+    a tree growing. One scale about (`TRUNK_CENTER_X`, `GROUND_Y`) on the
+    group carrying trunk, rings, branches and leaves lifts all of it out
+    of the soil together, and costs O(days) of animation values instead
+    of re-emitting every path per day at a new height.
+
+    It is uniform, not vertical-only: a trunk stretched in y alone is a
+    stubby full-width stump, and the leaves on it would be ellipses.
+    Because it multiplies the width curve above, the two compose --
+    early days are a thin short sapling, the last frame is exactly the
+    static garden.
+    """
+    final = cumulative_sessions[-1] if cumulative_sessions else 0
+    return [
+        _grown_size(sessions, final, TREE_GROWTH_SCALE_MIN, 1.0)
+        for sessions in cumulative_sessions
+    ]
+
+
+def _render_tree_growth(
+    body: str,
+    scales: list[float],
+    key_times: list[float],
+    duration: float,
+) -> str:
+    """Wrap the tree in the ground-hinged growth scale.
+
+    translate out, scale, translate back -- `animateTransform` replaces
+    the whole transform of the element it sits on, so the pivot needs
+    groups of its own (same shape as `_render_timeline_rings`).
+    """
+    cx = TRUNK_CENTER_X
+    scale = _animate_transform_tag(
+        'scale',
+        [f'{value:.4f} {value:.4f}' for value in scales],
+        key_times,
+        duration,
+    )
+    return (
+        f'<g class="tree-growth" '
+        f'transform="translate({cx:.2f},{GROUND_Y:.2f})"><g>{scale}'
+        f'<g transform="translate({-cx:.2f},{-GROUND_Y:.2f})">'
+        f'{body}</g></g></g>'
+    )
 
 
 def _ring_stroke_width(sessions: int) -> float:
@@ -4926,20 +4976,27 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         + _render_timeline_sun(timeline, key_times, duration)
         + _render_timeline_clouds(timeline, key_times, duration)
         + _render_timeline_birds(timeline)
-        + f'<g class="trunk-group" {trunk_tt}>{trunk_title}'
-        + _render_timeline_trunk(base_half_width_by_day, key_times, duration)
-        + '</g>'
-        + _render_timeline_rings(
-            timeline,
-            final_base_half_width,
-            base_half_width_by_day,
-            key_times,
-            duration,
-        )
-        + _render_timeline_branches_and_leaves(
-            timeline,
-            final_base_half_width,
-            base_half_width_by_day,
+        + _render_tree_growth(
+            f'<g class="trunk-group" {trunk_tt}>{trunk_title}'
+            + _render_timeline_trunk(
+                base_half_width_by_day, key_times, duration
+            )
+            + '</g>'
+            + _render_timeline_rings(
+                timeline,
+                final_base_half_width,
+                base_half_width_by_day,
+                key_times,
+                duration,
+            )
+            + _render_timeline_branches_and_leaves(
+                timeline,
+                final_base_half_width,
+                base_half_width_by_day,
+                key_times,
+                duration,
+            ),
+            _tree_growth_scales(timeline.cumulative_sessions),
             key_times,
             duration,
         )
