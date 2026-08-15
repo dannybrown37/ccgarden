@@ -15,6 +15,11 @@ repos:
         fail_fast: true
       - id: ruff-check
       - id: ruff-format
+      # `src` only: the tests lean on loose dataclass building and
+      # monkeypatch idioms mypy reads as errors. Named here rather than in a
+      # [tool.mypy] block so the hook stays configured in one file.
+      - id: mypy
+        args: [src]
       - id: pytest
         args: [-q]
       - id: block-private-terms

@@ -1455,12 +1455,12 @@ def _render_flower(
             f'<circle cx="{petal_x:.1f}" cy="{petal_y:.1f}" '
             f'r="{petal_radius:.2f}" fill="{petal_color}" opacity="0.92" />'
         )
-    petals = ''.join(petals)
+    petal_markup = ''.join(petals)
     center = (
         f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{size * 0.28:.2f}" '
         f'fill="{FLOWER_CENTER_COLOR}" opacity="0.95" />'
     )
-    return petals + center
+    return petal_markup + center
 
 
 def _render_flowers_on_bushes(

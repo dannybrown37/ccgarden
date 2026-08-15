@@ -24,7 +24,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 
 DEFAULT_LOG_ROOT = Path.home() / '.claude' / 'projects'
 DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
@@ -212,7 +212,7 @@ class TurnTracker:
         return (dominant[0][0] if dominant else None), model_ms
 
 
-def percentile(values: list[float], fraction: float) -> float | None:
+def percentile(values: Sequence[float], fraction: float) -> float | None:
     """Nearest-rank percentile, or None for an empty sample."""
     if not values:
         return None
@@ -572,7 +572,7 @@ def enclosing_root(cwd: Path, roots: set[Path]) -> Path | None:
     return max(matches, key=lambda root: len(root.parts))
 
 
-def resolve_repo_roots(cwds: Iterable[str]) -> dict[str, Path]:
+def resolve_repo_roots(cwds: Iterable[str | None]) -> dict[str, Path]:
     """Map each launch directory to the repo root it belongs to.
 
     Layered because most historical cwds have been deleted: an on-disk `.git`
@@ -1349,7 +1349,7 @@ TURN_LABEL_WIDTH = 30
 TURN_STAT_WIDTH = 8
 
 
-def turn_duration_row(label: str, durations: list[float]) -> str:
+def turn_duration_row(label: str, durations: Sequence[float]) -> str:
     p50 = percentile(durations, P50) or 0.0
     p95 = percentile(durations, P95) or 0.0
     return (
