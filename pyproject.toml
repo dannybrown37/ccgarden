@@ -33,6 +33,16 @@ ccstats = "ccgarden.claude_stats:main"
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+major_version_zero = true
+update_changelog_on_bump = true
+annotated_tag = true
+# `version` above is the single source of truth -- publish.yml builds from the
+# tag `cz bump` writes, so nothing else may carry a copy of the number.
+version_provider = "pep621"
+
 [tool.ruff]
 line-length = 79
 show-fixes = true
