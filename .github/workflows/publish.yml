@@ -1,23 +1,67 @@
 name: Publish to PyPI
 
+# Bump, tag and publish all live in one run: a tag pushed with GITHUB_TOKEN
+# does not start another workflow, so `on: push: tags` would never fire for
+# a bump CI made itself. The filename is also the PyPI trusted publisher's
+# identity -- renaming this file breaks publishing.
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.cz.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Bump version
+        id: cz
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          set +e
+          uvx --from commitizen cz bump --yes
+          status=$?
+          set -e
+          # 21 is NoneIncrementExit: nothing since the last tag warrants a
+          # release. Any other non-zero is a real failure.
+          if [ $status -eq 21 ]; then
+            echo "no version bump needed"
+            exit 0
+          elif [ $status -ne 0 ]; then
+            exit $status
+          fi
+          git push --follow-tags origin HEAD:main
+          version=$(uvx --from commitizen cz version --project)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: bump
+    if: needs.bump.outputs.version != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.bump.outputs.version }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v9.0.0
+        uses: astral-sh/setup-uv@v10.0.1
 
       - name: Build
         run: uv build
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist
           path: dist/
@@ -29,7 +73,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist
           path: dist/
