@@ -2856,7 +2856,7 @@ def _render_branches_and_leaves(
         title = _title(
             f'{whole_repo.repo} — {whole_repo.sessions} sessions, '
             f'+{whole_repo.lines_added:,}/-{whole_repo.lines_removed:,} '
-            f'lines, {total_tokens:,} tokens, ${whole_repo.cost:,.2f}, '
+            f'lines, {total_tokens:,} tokens, '
             f'{avg_turns:.1f} turns/session'
         )
         collar = _render_branch_collar(
@@ -4069,7 +4069,7 @@ def _branch_day_labels(repo: str, days: list[RepoBranchDay]) -> list[str]:
         labels.append(
             f'{repo} — {day_stat.sessions} sessions, '
             f'+{day_stat.lines_added:,}/-{day_stat.lines_removed:,} '
-            f'lines, {day_tokens:,} tokens, ${day_stat.cost:,.2f}, '
+            f'lines, {day_tokens:,} tokens, '
             f'{avg_turns:.1f} turns/session'
         )
     return labels
