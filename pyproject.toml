@@ -1,6 +1,6 @@
 [project]
 name = "ccgarden"
-version = "0.2.0"
+version = "0.2.1"
 description = "Grow a tree/garden visualization from ccstats.db session history"
 authors = [
     { name = "Danny Brown", email = "dannybrown37@gmail.com" }
