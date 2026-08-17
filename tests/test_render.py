@@ -17,6 +17,7 @@ from ccgarden.data import (
     ModelUsageDay,
     RepoBranch,
     RepoBranchDay,
+    SkillFruit,
     ToolBush,
     ToolUsageDay,
 )
@@ -2053,3 +2054,97 @@ def test_branch_side_balances_the_two_flanks() -> None:
     # Both flanks are used at every size a tree can be.
     for count in range(2, 12):
         assert len({_branch_side(i) for i in range(count)}) == 2
+
+
+def test_render_svg_draws_fruit_when_skills_present() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[SkillFruit(skill='code-review', count=4)],
+    )
+
+    svg = render_svg(garden)
+
+    assert 'class="fruit"' in svg
+
+
+def test_render_svg_draws_no_fruit_without_skills() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[],
+    )
+
+    svg = render_svg(garden)
+
+    assert 'class="fruit"' not in svg
+
+
+def test_render_svg_draws_no_fruit_without_branches() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        skills=[SkillFruit(skill='code-review', count=4)],
+    )
+
+    svg = render_svg(garden)
+
+    assert 'class="fruit"' not in svg
+
+
+def test_render_svg_fruit_legend_shown_with_skills() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[SkillFruit(skill='code-review', count=4)],
+    )
+
+    svg = render_svg(garden)
+
+    assert 'Fruit' in svg
+    assert 'hangs on branches' in svg
+
+
+def test_render_svg_fruit_legend_hidden_without_skills() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        skills=[],
+    )
+
+    svg = render_svg(garden)
+
+    assert 'hangs on branches' not in svg

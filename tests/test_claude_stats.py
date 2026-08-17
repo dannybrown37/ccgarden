@@ -1046,6 +1046,7 @@ DAY = date(2026, 7, 26)
 DAY_REPLIES = 3
 DAY_OUTPUT_TOKENS = 100
 DAY_TOOL_COUNT = 4
+DAY_SKILL_COUNT = 2
 DAY_EFFORT_COUNT = 3
 UPDATED_DAY_REPLIES = 9
 SAMPLE_COST_TOTAL = 1.23
@@ -1073,6 +1074,7 @@ def _day_stats(**overrides: object) -> UsageStats:
         cache_write_tokens=5,
     )
     stats.tools['Read'] = DAY_TOOL_COUNT
+    stats.skills['code-review'] = DAY_SKILL_COUNT
     stats.efforts['high'] = DAY_EFFORT_COUNT
     for key, value in overrides.items():
         setattr(stats, key, value)
@@ -1108,6 +1110,7 @@ def test_ensure_schema_creates_tables() -> None:
         'daily_repo_usage',
         'daily_tool_usage',
         'daily_effort_usage',
+        'daily_skill_usage',
     } <= tables
 
 
@@ -1202,6 +1205,83 @@ def test_record_day_removes_stale_effort_rows_on_replace() -> None:
         )
     }
     assert efforts == {'high'}
+
+
+def test_record_day_writes_per_skill_row() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    row = conn.execute(
+        'SELECT count FROM daily_skill_usage WHERE day = ? AND skill = ?',
+        (DAY.isoformat(), 'code-review'),
+    ).fetchone()
+    assert row == (DAY_SKILL_COUNT,)
+
+
+def test_record_day_removes_stale_skill_rows_on_replace() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    first = _day_stats()
+    first.skills['design'] = 1
+    record_day(conn, DAY, first, cost=None)
+
+    record_day(conn, DAY, _day_stats(), cost=None)
+
+    skills = {
+        row[0]
+        for row in conn.execute(
+            'SELECT skill FROM daily_skill_usage WHERE day = ?',
+            (DAY.isoformat(),),
+        )
+    }
+    assert skills == {'code-review'}
+
+
+def test_tallies_skill_usage_from_skill_tool_calls(
+    tmp_path: Path,
+) -> None:
+    _write_log(
+        tmp_path,
+        [
+            _assistant(
+                message={
+                    'usage': {},
+                    'content': [
+                        {
+                            'type': 'tool_use',
+                            'name': 'Skill',
+                            'input': {'skill': 'code-review'},
+                        },
+                    ],
+                },
+            ),
+            _assistant(
+                message={
+                    'usage': {},
+                    'content': [
+                        {
+                            'type': 'tool_use',
+                            'name': 'Skill',
+                            'input': {'skill': 'code-review'},
+                        },
+                        {
+                            'type': 'tool_use',
+                            'name': 'Skill',
+                            'input': {'skill': 'design'},
+                        },
+                    ],
+                },
+            ),
+        ],
+    )
+
+    stats = collect_stats([tmp_path])
+
+    assert stats.skills['code-review'] == 2
+    assert stats.skills['design'] == 1
+    assert stats.tools['Skill'] == 3
 
 
 def test_record_day_skips_day_without_sessions() -> None:

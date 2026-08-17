@@ -13,6 +13,7 @@ from ccgarden.data import (
     EffortBush,
     ModelCloud,
     RepoBranch,
+    SkillFruit,
     ToolBush,
     load_cartoon_birds,
     load_garden_data,
@@ -96,6 +97,13 @@ CREATE TABLE IF NOT EXISTS daily_hour_usage (
     count INTEGER NOT NULL,
     PRIMARY KEY (day, hour)
 );
+
+CREATE TABLE IF NOT EXISTS daily_skill_usage (
+    day TEXT NOT NULL,
+    skill TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, skill)
+);
 """
 
 
@@ -109,6 +117,7 @@ def make_db(
     effort_rows: list[tuple] | None = None,
     model_effort_rows: list[tuple] | None = None,
     hour_rows: list[tuple] | None = None,
+    skill_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -141,6 +150,10 @@ def make_db(
         'INSERT INTO daily_model_effort_usage VALUES (?,?,?,?,?,?)',
         model_effort_rows or [],
     )
+    conn.executemany(
+        'INSERT INTO daily_skill_usage VALUES (?,?,?)',
+        skill_rows or [],
+    )
     conn.commit()
     conn.close()
     return str(db_path)
@@ -169,6 +182,10 @@ def model_row(
 
 def tool_row(day: str, tool: str, *, count: int = 0) -> tuple:
     return (day, tool, count)
+
+
+def skill_row(day: str, skill: str, *, count: int = 0) -> tuple:
+    return (day, skill, count)
 
 
 def model_effort_row(
@@ -664,6 +681,60 @@ def test_load_efforts_excludes_efforts_with_zero_count(
     garden = load_garden_data(db_path)
 
     assert garden.efforts == []
+
+
+def test_load_skills_aggregates_same_skill_across_days(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        skill_row('2026-07-26', 'code-review', count=3),
+        skill_row('2026-07-27', 'code-review', count=5),
+    ]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=[], skill_rows=rows)
+
+    garden = load_garden_data(db_path)
+
+    assert garden.skills == [SkillFruit(skill='code-review', count=8)]
+
+
+def test_load_skills_sorts_by_count_descending(tmp_path: Path) -> None:
+    rows = [
+        skill_row('2026-07-26', 'design', count=2),
+        skill_row('2026-07-26', 'code-review', count=10),
+    ]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=[], skill_rows=rows)
+
+    garden = load_garden_data(db_path)
+
+    assert [s.skill for s in garden.skills] == ['code-review', 'design']
+
+
+def test_load_skills_excludes_zero_count(tmp_path: Path) -> None:
+    rows = [skill_row('2026-07-26', 'design', count=0)]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=[], skill_rows=rows)
+
+    garden = load_garden_data(db_path)
+
+    assert garden.skills == []
+
+
+def test_load_skills_degrades_on_missing_table(tmp_path: Path) -> None:
+    schema_no_skills = SCHEMA.replace(
+        'CREATE TABLE IF NOT EXISTS daily_skill_usage'
+        ' (\n    day TEXT NOT NULL,\n    skill TEXT NOT NULL,'
+        '\n    count INTEGER NOT NULL,'
+        '\n    PRIMARY KEY (day, skill)\n);',
+        '',
+    )
+    db_path = tmp_path / 'ccstats.db'
+    conn = sqlite3.connect(db_path)
+    conn.executescript(schema_no_skills)
+    conn.commit()
+    conn.close()
+
+    garden = load_garden_data(str(db_path))
+
+    assert garden.skills == []
 
 
 def test_load_model_efforts_aggregates_same_pairing_across_days(

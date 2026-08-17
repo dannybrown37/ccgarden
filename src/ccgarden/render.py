@@ -15,11 +15,16 @@ from ccgarden.data import (
     GardenData,
     ModelCloud,
     RepoBranch,
+    SkillFruit,
     ToolBush,
 )
 
 if TYPE_CHECKING:
-    from ccgarden.data import GardenTimeline, RepoBranchDay, ToolUsageDay
+    from ccgarden.data import (
+        GardenTimeline,
+        RepoBranchDay,
+        ToolUsageDay,
+    )
 
 VIEWBOX_WIDTH = 800
 VIEWBOX_HEIGHT = 800
@@ -121,6 +126,24 @@ RING_SESSIONS_SATURATION = 60
 FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
 FLOWER_CENTER_COLOR = '#5a3d1a'
 FLOWER_RADIUS = 5.0
+
+FRUIT_COLORS = (
+    '#e74c3c',
+    '#e67e22',
+    '#f1c40f',
+    '#9b59b6',
+    '#e91e63',
+    '#27ae60',
+    '#3498db',
+    '#d35400',
+)
+FRUIT_RADIUS = 4.5
+FRUIT_STEM_LENGTH = 6.0
+FRUIT_PER_SKILL_USE = 0.5
+FRUIT_SATURATION_COUNT = 60
+FRUIT_ZONE_START = 0.45
+FRUIT_ZONE_END = 1.0
+MAX_FRUIT_PER_LIMB = 12
 
 # One cloud per model used, sized by how many tokens that model produced.
 CLOUD_MARGIN = 24.0
@@ -3133,6 +3156,91 @@ def _render_leaves(
     return ''.join(elements)
 
 
+def _fruit_color(skill: str) -> str:
+    return FRUIT_COLORS[hash(skill) % len(FRUIT_COLORS)]
+
+
+def _fruit_count(total_uses: int) -> int:
+    raw = int(total_uses * FRUIT_PER_SKILL_USE)
+    return min(max(raw, 1), FRUIT_SATURATION_COUNT)
+
+
+def _render_single_fruit(
+    x: float,
+    y: float,
+    color: str,
+    skill: str,
+) -> str:
+    title = _title(f'{_escape_xml(skill)}')
+    return (
+        f'<g class="fruit">{title}'
+        f'<line x1="{x:.1f}" y1="{y - FRUIT_RADIUS:.1f}" '
+        f'x2="{x:.1f}" y2="{y - FRUIT_RADIUS - FRUIT_STEM_LENGTH:.1f}" '
+        f'stroke="#5a3d1a" stroke-width="1" />'
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{FRUIT_RADIUS}" '
+        f'fill="{color}" opacity="0.9" />'
+        f'<circle cx="{x - 1.2:.1f}" cy="{y - 1.2:.1f}" '
+        f'r="{FRUIT_RADIUS * 0.3:.1f}" '
+        f'fill="white" opacity="0.35" />'
+        f'</g>'
+    )
+
+
+def _render_fruit_on_branches(
+    skills: list[SkillFruit],
+    branches: list[RepoBranch],
+    base_half_width: float,
+) -> str:
+    if not skills or not branches:
+        return ''
+
+    total_uses = sum(s.count for s in skills)
+    fruit_total = _fruit_count(total_uses)
+
+    by_repo = {branch.repo: branch for branch in branches}
+    limbs = _plan_limbs([(b.repo, float(b.lines_added)) for b in branches])
+    if not limbs:
+        return ''
+
+    count = len(limbs)
+    rng = random.Random('ccgarden-fruit')
+
+    per_skill: list[tuple[str, str, int]] = []
+    for sf in skills:
+        color = _fruit_color(sf.skill)
+        n = max(1, int(fruit_total * sf.count / total_uses))
+        per_skill.append((sf.skill, color, n))
+
+    elements: list[str] = []
+    fruit_index = 0
+    for skill_name, color, n in per_skill:
+        for _ in range(n):
+            limb = limbs[fruit_index % count]
+            fruit_index += 1
+            whole_repo = by_repo[limb.repo]
+            repo_branch = _limb_share_of(whole_repo, limb)
+            placement = _branch_placement(
+                limbs.index(limb), count, limb.key, base_half_width
+            )
+            length = _branch_length(repo_branch.lines_added)
+            end_x, end_y = _branch_endpoint(
+                placement.origin_x,
+                placement.origin_y,
+                length,
+                placement.side,
+                placement.spread_index,
+                angle_jitter=placement.angle_jitter,
+            )
+            dx = end_x - placement.origin_x
+            dy = end_y - placement.origin_y
+            t = rng.uniform(FRUIT_ZONE_START, FRUIT_ZONE_END)
+            fx = placement.origin_x + t * dx + rng.uniform(-8, 8)
+            fy = placement.origin_y + t * dy + rng.uniform(2, 12)
+            elements.append(_render_single_fruit(fx, fy, color, skill_name))
+
+    return ''.join(elements)
+
+
 LEGEND_MARGIN = 4.0
 LEGEND_Y = VIEWBOX_HEIGHT + LEGEND_MARGIN
 LEGEND_HEIGHT = LEGEND_BAND_HEIGHT - LEGEND_MARGIN * 2
@@ -3197,6 +3305,11 @@ LEGEND_ROWS = (
         'Rain',
         ('falls on the days', 'you never showed up'),
         'rain',
+    ),
+    (
+        'Fruit',
+        ('hangs on branches;', 'color = skill used'),
+        'fruit',
     ),
     (
         'Sunflowers',
@@ -3308,6 +3421,18 @@ def _legend_icon_bird(cx: float, cy: float) -> str:
     return _render_bird(cx, cy + 2.0, 6.0, BIRD_LEGEND_COLOR)
 
 
+def _legend_icon_fruit(cx: float, cy: float) -> str:
+    return (
+        f'<line x1="{cx:.1f}" y1="{cy - 3:.1f}" '
+        f'x2="{cx:.1f}" y2="{cy - 8:.1f}" '
+        f'stroke="#5a3d1a" stroke-width="1" />'
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="5" '
+        f'fill="{FRUIT_COLORS[0]}" />'
+        f'<circle cx="{cx - 1.2:.1f}" cy="{cy - 1.2:.1f}" r="1.5" '
+        f'fill="white" opacity="0.35" />'
+    )
+
+
 LEGEND_ICON_RENDERERS = {
     'trunk': _legend_icon_trunk,
     'ring': _legend_icon_ring,
@@ -3322,6 +3447,7 @@ LEGEND_ICON_RENDERERS = {
     'season': _legend_icon_season,
     'rain': _legend_icon_rain,
     'bird': _legend_icon_bird,
+    'fruit': _legend_icon_fruit,
 }
 
 
@@ -3335,6 +3461,7 @@ def _render_legend(
     with_night: bool = False,
     with_seasons: bool = False,
     with_rain: bool = False,
+    with_fruit: bool = False,
 ) -> str:
     """A key panel explaining what each part of the tree represents.
 
@@ -3361,6 +3488,8 @@ def _render_legend(
         dropped.add('season')
     if not with_rain:
         dropped.add('rain')
+    if not with_fruit:
+        dropped.add('fruit')
     rows = [row for row in LEGEND_ROWS if row[2] not in dropped]
     columns = math.ceil(len(rows) / LEGEND_GRID_ROWS)
     column_width = LEGEND_WIDTH / columns
@@ -3455,6 +3584,9 @@ def render_svg(garden: GardenData) -> str:
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
         + _render_branches_and_leaves(garden.branches, base_half_width)
+        + _render_fruit_on_branches(
+            garden.skills, garden.branches, base_half_width
+        )
         # Sunflowers go down before the bushes so their stalks are rooted
         # behind the shrubbery rather than standing in front of it.
         + _render_sunflowers(garden.branches)
@@ -3483,6 +3615,7 @@ def render_svg(garden: GardenData) -> str:
             with_night=garden.nightness > 0,
             with_seasons=garden.vitality < 1.0,
             with_rain=_rain_intensity(garden.vitality) > 0,
+            with_fruit=bool(garden.skills),
         )
         + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
     )
@@ -4595,6 +4728,113 @@ def _render_timeline_flowers_on_bushes(
     return f'<g class="flowers" {tt}>{title}{"".join(elements)}</g>'
 
 
+def _render_timeline_fruit(
+    timeline: GardenTimeline,
+    base_half_width: float,
+    key_times: list[float],
+    duration: float,
+) -> str:
+    if not timeline.skill_order or not timeline.branch_order:
+        return ''
+
+    final_skills = [
+        SkillFruit(skill=s, count=timeline.skill_days[s][-1].count)
+        for s in timeline.skill_order
+    ]
+    final_branches = [
+        RepoBranch(
+            repo=repo,
+            sessions=timeline.branch_days[repo][-1].sessions,
+            lines_added=timeline.branch_days[repo][-1].lines_added,
+            lines_removed=timeline.branch_days[repo][-1].lines_removed,
+            output_tokens=timeline.branch_days[repo][-1].output_tokens,
+            input_tokens=timeline.branch_days[repo][-1].input_tokens,
+            cost=timeline.branch_days[repo][-1].cost,
+            prompts=timeline.branch_days[repo][-1].prompts,
+        )
+        for repo in timeline.branch_order
+    ]
+
+    total_final = sum(s.count for s in final_skills)
+    if total_final <= 0:
+        return ''
+
+    total_fruit = _fruit_count(total_final)
+    day_totals = [
+        sum(timeline.skill_days[s][i].count for s in timeline.skill_order)
+        for i in range(len(timeline.days))
+    ]
+
+    by_repo = {b.repo: b for b in final_branches}
+    limbs = _plan_limbs(
+        [(b.repo, float(b.lines_added)) for b in final_branches]
+    )
+    if not limbs:
+        return ''
+
+    limb_count = len(limbs)
+    rng = random.Random('ccgarden-fruit')
+    elements: list[str] = []
+    fruit_idx = 0
+
+    for sf in final_skills:
+        color = _fruit_color(sf.skill)
+        n = max(1, int(total_fruit * sf.count / total_final))
+        for piece in range(n):
+            limb = limbs[fruit_idx % limb_count]
+            fruit_idx += 1
+            whole_repo = by_repo[limb.repo]
+            repo_branch = _limb_share_of(whole_repo, limb)
+            placement = _branch_placement(
+                limbs.index(limb),
+                limb_count,
+                limb.key,
+                base_half_width,
+            )
+            length = _branch_length(repo_branch.lines_added)
+            end_x, end_y = _branch_endpoint(
+                placement.origin_x,
+                placement.origin_y,
+                length,
+                placement.side,
+                placement.spread_index,
+                angle_jitter=placement.angle_jitter,
+            )
+            dx = end_x - placement.origin_x
+            dy = end_y - placement.origin_y
+            t = rng.uniform(FRUIT_ZONE_START, FRUIT_ZONE_END)
+            fx = placement.origin_x + t * dx + rng.uniform(-8, 8)
+            fy = placement.origin_y + t * dy + rng.uniform(2, 12)
+
+            threshold = int(total_final * (piece + 1) / n) if n > 1 else 1
+            opacity_values = [
+                '0' if day_totals[i] < threshold else '0.9'
+                for i in range(len(timeline.days))
+            ]
+            animate = _animate_tag(
+                'opacity',
+                opacity_values,
+                key_times,
+                duration,
+            )
+            elements.append(
+                f'<g class="fruit" opacity="0.9">{animate}'
+                f'<line x1="{fx:.1f}" y1="{fy - FRUIT_RADIUS:.1f}" '
+                f'x2="{fx:.1f}" '
+                f'y2="{fy - FRUIT_RADIUS - FRUIT_STEM_LENGTH:.1f}" '
+                f'stroke="#5a3d1a" stroke-width="1" />'
+                f'<circle cx="{fx:.1f}" cy="{fy:.1f}" '
+                f'r="{FRUIT_RADIUS}" '
+                f'fill="{color}" opacity="0.9" />'
+                f'<circle cx="{fx - 1.2:.1f}" cy="{fy - 1.2:.1f}" '
+                f'r="{FRUIT_RADIUS * 0.3:.1f}" '
+                f'fill="white" opacity="0.35" />'
+                f'</g>'
+            )
+
+    return ''.join(elements)
+
+
 def _render_timeline_sunflowers(
     timeline: GardenTimeline,
     key_times: list[float],
@@ -4693,6 +4933,10 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         ToolBush(tool=tool, count=timeline.tool_days[tool][-1].count)
         for tool in timeline.tool_order
     ]
+    skills = [
+        SkillFruit(skill=s, count=timeline.skill_days[s][-1].count)
+        for s in timeline.skill_order
+    ]
     return GardenData(
         rings=rings,
         branches=branches,
@@ -4700,6 +4944,7 @@ def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
         cache_write_tokens=timeline.cache_write_tokens,
         model_efforts=model_efforts,
         tools=tools,
+        skills=skills,
         total_tokens=(
             timeline.cumulative_total_tokens[-1]
             if timeline.cumulative_total_tokens
@@ -5000,6 +5245,9 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
         )
+        + _render_timeline_fruit(
+            timeline, final_base_half_width, key_times, duration
+        )
         # Behind the bushes -- see the same ordering note in `render_svg`.
         + _render_timeline_sunflowers(timeline, key_times, duration)
         + _render_timeline_bushes(timeline, key_times, duration)
@@ -5015,6 +5263,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             with_rain=any(
                 _rain_intensity(value) > 0 for value in timeline.daily_vitality
             ),
+            with_fruit=bool(timeline.skill_order),
         )
         + _render_scrubber(timeline, key_times, duration)
         + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)

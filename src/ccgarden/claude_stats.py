@@ -127,6 +127,7 @@ class UsageStats:
     longest_prompt_chars: int = 0
     models: Counter = field(default_factory=Counter)
     tools: Counter = field(default_factory=Counter)
+    skills: Counter = field(default_factory=Counter)
     # Prompts keyed by local hour (0-23) -- when you were at the keyboard,
     # which drives the garden's time of day. Prompts rather than records,
     # since a long agentic run shouldn't count as hours of presence.
@@ -377,7 +378,12 @@ def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
         if kind == 'thinking':
             stats.thinking_blocks += 1
         elif kind == 'tool_use':
-            stats.tools[block.get('name', 'unknown')] += 1
+            tool_name = block.get('name', 'unknown')
+            stats.tools[tool_name] += 1
+            if tool_name == 'Skill':
+                skill = (block.get('input') or {}).get('skill')
+                if skill:
+                    stats.skills[skill] += 1
 
 
 def track_span(stats: UsageStats, stamp: datetime) -> None:
@@ -677,6 +683,7 @@ def merge_counts(merged: UsageStats, part: UsageStats) -> None:
     )
     merged.models.update(part.models)
     merged.tools.update(part.tools)
+    merged.skills.update(part.skills)
     merged.hours.update(part.hours)
     merged.efforts.update(part.efforts)
     merged.model_effort_counts.update(part.model_effort_counts)
@@ -884,6 +891,13 @@ CREATE TABLE IF NOT EXISTS daily_effort_usage (
     PRIMARY KEY (day, effort)
 );
 
+CREATE TABLE IF NOT EXISTS daily_skill_usage (
+    day TEXT NOT NULL,
+    skill TEXT NOT NULL,
+    count INTEGER NOT NULL,
+    PRIMARY KEY (day, skill)
+);
+
 CREATE TABLE IF NOT EXISTS daily_model_effort_usage (
     day TEXT NOT NULL,
     model_effort TEXT NOT NULL,
@@ -999,6 +1013,14 @@ def record_day(
             'INSERT INTO daily_effort_usage (day, effort, count) '
             'VALUES (?, ?, ?)',
             (day_key, effort, count),
+        )
+
+    conn.execute('DELETE FROM daily_skill_usage WHERE day = ?', (day_key,))
+    for skill, count in stats.skills.items():
+        conn.execute(
+            'INSERT INTO daily_skill_usage (day, skill, count) '
+            'VALUES (?, ?, ?)',
+            (day_key, skill, count),
         )
 
     conn.execute(

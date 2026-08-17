@@ -83,6 +83,14 @@ class EffortBush:
 
 
 @dataclass(frozen=True)
+class SkillFruit:
+    """One skill's total usage — rendered as fruit on branches."""
+
+    skill: str
+    count: int
+
+
+@dataclass(frozen=True)
 class CartoonBird:
     """One cartoon adapter's token savings over the reporting window.
 
@@ -106,6 +114,7 @@ class GardenData:
     efforts: list[EffortBush] = field(default_factory=list)
     model_efforts: list[ModelCloud] = field(default_factory=list)
     total_tokens: int = 0
+    skills: list[SkillFruit] = field(default_factory=list)
     birds: list[CartoonBird] = field(default_factory=list)
     cartoon_since: str = ''
     # Prompts by local hour, and the share of them typed at night.
@@ -155,6 +164,14 @@ class EffortUsageDay:
 
 
 @dataclass(frozen=True)
+class SkillUsageDay:
+    """A skill's cumulative call count as of one day."""
+
+    day: str
+    count: int
+
+
+@dataclass(frozen=True)
 class GardenTimeline:
     """Day-by-day cumulative history, ready to be replayed as a growth."""
 
@@ -178,6 +195,8 @@ class GardenTimeline:
     tool_days: dict[str, list[ToolUsageDay]] = field(default_factory=dict)
     effort_order: list[str] = field(default_factory=list)
     effort_days: dict[str, list[EffortUsageDay]] = field(default_factory=dict)
+    skill_order: list[str] = field(default_factory=list)
+    skill_days: dict[str, list[SkillUsageDay]] = field(default_factory=dict)
     # Cartoon reports a single since-window snapshot rather than daily
     # history, so birds have no per-day frames to replay.
     birds: list[CartoonBird] = field(default_factory=list)
@@ -495,6 +514,9 @@ def _load_timeline(
     effort_order, effort_days = _load_effort_days(
         conn, days, day_index, days_range
     )
+    skill_order, skill_days = _load_skill_days(
+        conn, days, day_index, days_range
+    )
     model_effort_order, model_effort_days = _load_model_effort_days(
         conn, days, day_index, days_range
     )
@@ -525,6 +547,8 @@ def _load_timeline(
         tool_days=tool_days,
         effort_order=effort_order,
         effort_days=effort_days,
+        skill_order=skill_order,
+        skill_days=skill_days,
         model_effort_order=model_effort_order,
         model_effort_days=model_effort_days,
     )
@@ -896,6 +920,77 @@ def _load_efforts(
     ]
 
 
+def _load_skills(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> list[SkillFruit]:
+    if not _table_exists(conn, 'daily_skill_usage'):
+        return []
+    cursor = conn.execute(
+        f"""
+        SELECT skill, SUM(count)
+        FROM daily_skill_usage{days.clause()}
+        GROUP BY skill
+        HAVING SUM(count) > 0
+        ORDER BY SUM(count) DESC
+        """,
+        days.params,
+    )
+    return [
+        SkillFruit(skill=row[0], count=row[1]) for row in cursor.fetchall()
+    ]
+
+
+def _load_skill_days(
+    conn: sqlite3.Connection,
+    days: list[str],
+    day_index: dict[str, int],
+    days_range: DayRange = ALL_DAYS,
+) -> tuple[list[str], dict[str, list[SkillUsageDay]]]:
+    if not _table_exists(conn, 'daily_skill_usage'):
+        return [], {}
+    cursor = conn.execute(
+        'SELECT day, skill, count '
+        f'FROM daily_skill_usage{days_range.clause()} ORDER BY day ASC',
+        days_range.params,
+    )
+
+    day_count = len(days)
+    deltas: dict[str, list[int | None]] = {}
+    count_totals: dict[str, int] = {}
+
+    for day, skill, count in cursor.fetchall():
+        index = day_index.get(day)
+        if index is None:
+            continue
+        deltas.setdefault(skill, [None] * day_count)[index] = count
+        count_totals[skill] = count_totals.get(skill, 0) + count
+
+    skill_order = sorted(
+        (s for s in deltas if count_totals[s] > 0),
+        key=lambda s: count_totals[s],
+        reverse=True,
+    )
+
+    skill_days = {
+        skill: _cumulative_skill_days(days, deltas[skill])
+        for skill in skill_order
+    }
+    return skill_order, skill_days
+
+
+def _cumulative_skill_days(
+    days: list[str],
+    deltas: list[int | None],
+) -> list[SkillUsageDay]:
+    running_count = 0
+    rows = []
+    for day, delta in zip(days, deltas, strict=True):
+        if delta is not None:
+            running_count += delta
+        rows.append(SkillUsageDay(day=day, count=running_count))
+    return rows
+
+
 def load_garden_data(
     db_path: str,
     cartoon_since: str = DEFAULT_CARTOON_SINCE,
@@ -908,6 +1003,7 @@ def load_garden_data(
         models = _load_models(conn, days)
         tools = _load_tools(conn, days)
         efforts = _load_efforts(conn, days)
+        skills = _load_skills(conn, days)
         model_efforts = _load_model_effort_clouds(conn, days)
         cache_read_tokens, cache_write_tokens = _load_cache_totals(conn, days)
         total_tokens = _load_total_tokens(conn, days)
@@ -922,6 +1018,7 @@ def load_garden_data(
         models=models,
         tools=tools,
         efforts=efforts,
+        skills=skills,
         model_efforts=model_efforts,
         total_tokens=total_tokens,
         birds=load_cartoon_birds(cartoon_since),
