@@ -1,3 +1,9 @@
+## v0.3.0 (2026-08-17)
+
+### Feat
+
+- half-baked frut feature, need to enhance later
+
 ## v0.2.1 (2026-08-15)
 
 ### Fix
