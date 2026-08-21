@@ -2087,7 +2087,7 @@ def test_render_svg_draws_fruit_when_skills_present() -> None:
                 prompts=20,
             ),
         ],
-        skills=[SkillFruit(skill='code-review', count=4)],
+        skills=[SkillFruit(skill='code-review', count=8)],
     )
 
     svg = render_svg(garden)
@@ -2122,7 +2122,7 @@ def test_render_svg_draws_no_fruit_without_branches() -> None:
     garden = GardenData(
         rings=[],
         branches=[],
-        skills=[SkillFruit(skill='code-review', count=4)],
+        skills=[SkillFruit(skill='code-review', count=8)],
     )
 
     svg = render_svg(garden)
@@ -2145,7 +2145,7 @@ def test_render_svg_fruit_legend_shown_with_skills() -> None:
                 prompts=20,
             ),
         ],
-        skills=[SkillFruit(skill='code-review', count=4)],
+        skills=[SkillFruit(skill='code-review', count=8)],
     )
 
     svg = render_svg(garden)
@@ -2167,8 +2167,8 @@ def test_render_svg_fruit_legend_hidden_without_skills() -> None:
 
 
 def _timeline_with_skills(**extra: list[int]) -> GardenTimeline:
-    """Four days; `code-review` runs to 4 calls, plus any extra skill."""
-    counts = {'code-review': [1, 2, 3, 4], **extra}
+    """Four days; `code-review` runs to 8 calls, plus any extra skill."""
+    counts = {'code-review': [2, 4, 6, 8], **extra}
     days = ['2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23']
     return GardenTimeline(
         days=days,
@@ -2285,7 +2285,7 @@ def test_timeline_fruit_ripens_only_at_the_end() -> None:
 def test_timeline_fruit_labels_use_final_counts() -> None:
     svg = render_timeline_svg(_timeline_with_skills(latecomer=[0, 0, 0, 9]))
 
-    assert 'code-review — 4 calls' in svg
+    assert 'code-review — 8 calls' in svg
     assert 'latecomer — 9 calls' in svg
 
 
@@ -2436,3 +2436,78 @@ def test_fruit_placement_is_deterministic() -> None:
     garden = _fruit_garden()
 
     assert _fruit_spots(render_svg(garden)) == _fruit_spots(render_svg(garden))
+
+
+def test_fruit_has_its_own_sway_group() -> None:
+    """Each fruit gets a nested sway group so it swings more than its limb."""
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[SkillFruit(skill='code-review', count=8)],
+    )
+    svg = render_svg(garden)
+    assert 'ccg-sway-fruit' in svg
+
+
+def test_fruit_legend_shows_each_skill() -> None:
+    """Per-skill fruit entries appear in the legend."""
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[
+            SkillFruit(skill='code-review', count=8),
+            SkillFruit(skill='simplify', count=6),
+        ],
+    )
+    svg = render_svg(garden)
+    assert 'code-review' in svg
+    assert 'simplify' in svg
+    # Each skill should have its own fruit icon in the legend
+    assert svg.count('class="fruit-key-icon"') >= 2
+
+
+def test_fruit_excluded_below_min_calls() -> None:
+    """Skills with fewer than FRUIT_MIN_CALLS are not shown."""
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[
+            SkillFruit(skill='rare-skill', count=3),
+        ],
+    )
+    svg = render_svg(garden)
+    assert 'class="fruit"' not in svg
+    assert 'fruit-key-icon' not in svg

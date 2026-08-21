@@ -149,6 +149,7 @@ FRUIT_RADIUS_SATURATION = 60
 # a heavier bough than one you tried once, without a 300-call skill burying
 # the tree. A root curve gives 1 fruit at 1 call and ~11 at 100.
 FRUIT_ROOT_SATURATION = 1.1
+FRUIT_MIN_CALLS = 5
 FRUIT_MIN_PER_SKILL = 1
 FRUIT_MAX_PER_SKILL = 14
 FRUIT_TOTAL_MAX = 120
@@ -358,6 +359,7 @@ WIND_SWAY_TIERS = {
     'limb': (0.85, 7.4),
     'stalk': (2.4, 4.3),
     'bush': (1.1, 5.6),
+    'fruit': (2.8, 3.2),
 }
 # Sky motion is a slide, not a hinge: clouds cross, the sun breathes.
 WIND_CLOUD_DRIFT_X = 13.0
@@ -3331,7 +3333,11 @@ def _fruit_count(uses: int) -> int:
 
 def _fruit_plan(skills: list[SkillFruit]) -> list[tuple[SkillFruit, int]]:
     """Fruit per skill, scaled down together if the tree would overflow."""
-    plan = [(sf, _fruit_count(sf.count)) for sf in skills if sf.count > 0]
+    plan = [
+        (sf, _fruit_count(sf.count))
+        for sf in skills
+        if sf.count >= FRUIT_MIN_CALLS
+    ]
     total = sum(n for _, n in plan)
     if total <= FRUIT_TOTAL_MAX or total == 0:
         return plan
@@ -3373,6 +3379,51 @@ FRUIT_SHAPE_BODIES = {
         '<circle cx="-0.45" cy="0.42" r="0.56" fill="{fill}" opacity="0.9" />'
         '<circle cx="0.48" cy="0.48" r="0.52" fill="{fill}" opacity="0.9" />'
     ),
+    'apple': (
+        '<path d="M 0,-0.85 C 0.65,-0.90 1.05,-0.25 0.95,0.25 '
+        'C 0.85,0.80 0.40,1.10 0,1.10 C -0.40,1.10 -0.85,0.80 -0.95,0.25 '
+        'C -1.05,-0.25 -0.65,-0.90 0,-0.85 Z" fill="{fill}" '
+        'opacity="0.9" />'
+        '<path d="M 0,-0.85 Q -0.08,-0.40 0,0.10" stroke="#00000022" '
+        'stroke-width="0.08" fill="none" />'
+    ),
+    'lemon': (
+        '<ellipse cx="0" cy="0" rx="0.60" ry="1.05" fill="{fill}" '
+        'opacity="0.9" />'
+        '<ellipse cx="-0.10" cy="-0.85" rx="0.18" ry="0.25" '
+        'fill="{fill}" opacity="0.9" />'
+        '<ellipse cx="0.08" cy="0.88" rx="0.15" ry="0.22" '
+        'fill="{fill}" opacity="0.9" />'
+    ),
+    'star': (
+        '<path d="M 0,-1.0 L 0.24,-0.30 L 1.0,-0.30 L 0.38,0.12 '
+        'L 0.60,0.90 L 0,0.42 L -0.60,0.90 L -0.38,0.12 '
+        'L -1.0,-0.30 L -0.24,-0.30 Z" fill="{fill}" opacity="0.9" />'
+    ),
+    'acorn': (
+        '<path d="M -0.55,-0.50 C -0.55,-0.85 0.55,-0.85 0.55,-0.50 '
+        'L 0.55,-0.30 L -0.55,-0.30 Z" fill="#8B6914" opacity="0.9" />'
+        '<ellipse cx="0" cy="0.30" rx="0.50" ry="0.70" fill="{fill}" '
+        'opacity="0.9" />'
+    ),
+    'fig': (
+        '<path d="M 0,-0.90 C 0.30,-0.80 0.55,-0.45 0.65,-0.05 '
+        'C 0.80,0.50 0.60,1.00 0,1.10 C -0.60,1.00 -0.80,0.50 '
+        '-0.65,-0.05 C -0.55,-0.45 -0.30,-0.80 0,-0.90 Z" '
+        'fill="{fill}" opacity="0.9" />'
+    ),
+    'heart': (
+        '<path d="M 0,-0.30 C 0.25,-0.95 1.05,-0.85 1.0,-0.20 '
+        'C 0.95,0.35 0.35,0.80 0,1.10 C -0.35,0.80 -0.95,0.35 '
+        '-1.0,-0.20 C -1.05,-0.85 -0.25,-0.95 0,-0.30 Z" '
+        'fill="{fill}" opacity="0.9" />'
+    ),
+    'peach': (
+        '<circle cx="0" cy="0.05" r="0.95" fill="{fill}" '
+        'opacity="0.9" />'
+        '<path d="M 0,-0.90 Q 0.25,0.05 0,0.95" stroke="#00000028" '
+        'stroke-width="0.10" fill="none" />'
+    ),
 }
 FRUIT_SHAPE_HIGHLIGHTS = {
     'round': (-0.30, -0.30, 0.28),
@@ -3380,6 +3431,13 @@ FRUIT_SHAPE_HIGHLIGHTS = {
     'plum': (-0.30, -0.25, 0.24),
     'berries': (-0.10, -0.55, 0.18),
     'cherries': (-0.58, 0.28, 0.18),
+    'apple': (-0.35, -0.30, 0.25),
+    'lemon': (-0.18, -0.35, 0.18),
+    'star': (-0.15, -0.45, 0.20),
+    'acorn': (-0.15, 0.10, 0.20),
+    'fig': (-0.20, -0.30, 0.22),
+    'heart': (-0.30, -0.30, 0.22),
+    'peach': (-0.30, -0.25, 0.26),
 }
 FRUIT_SHAPES = tuple(FRUIT_SHAPE_BODIES)
 
@@ -3413,12 +3471,20 @@ def _render_single_fruit(
             f'stroke-width="0.12" fill="none" />'
         )
     )
+    stem_abs_x = spot.x
+    stem_abs_y = spot.y + spot.radius * FRUIT_STEM_TIP
+    sway_open = _wind_group(
+        'ccg-sway-fruit',
+        f'{label}:{spot.x:.0f}',
+        (stem_abs_x, stem_abs_y),
+    )
     return (
+        f'{sway_open}'
         f'<g class="fruit" transform="translate({spot.x:.1f},{spot.y:.1f}) '
         f'scale({spot.radius:.2f})">{title}{stem}{body}'
         f'<circle cx="{highlight_x}" cy="{highlight_y}" r="{highlight_r}" '
         f'fill="white" opacity="0.35" />'
-        f'</g>'
+        f'</g></g>'
     )
 
 
@@ -3859,6 +3925,84 @@ def _render_legend(
     return ''.join(parts)
 
 
+FRUIT_KEY_ROW_HEIGHT = 22.0
+FRUIT_KEY_COLS = 4
+FRUIT_KEY_PADDING = 6.0
+FRUIT_KEY_ICON_SCALE = 3.5
+
+
+def _fruit_key_height(skills: list[SkillFruit]) -> float:
+    active = [s for s in skills if s.count >= FRUIT_MIN_CALLS]
+    if not active:
+        return 0.0
+    rows = math.ceil(len(active) / FRUIT_KEY_COLS)
+    return rows * FRUIT_KEY_ROW_HEIGHT + FRUIT_KEY_PADDING * 2
+
+
+def _render_fruit_key(
+    skills: list[SkillFruit],
+    top_y: float,
+) -> str:
+    active = sorted(
+        [s for s in skills if s.count >= FRUIT_MIN_CALLS],
+        key=lambda s: s.count,
+        reverse=True,
+    )
+    if not active:
+        return ''
+
+    rows = math.ceil(len(active) / FRUIT_KEY_COLS)
+    height = rows * FRUIT_KEY_ROW_HEIGHT + FRUIT_KEY_PADDING * 2
+    col_width = LEGEND_WIDTH / FRUIT_KEY_COLS
+
+    parts = [
+        (
+            f'<g class="legend">'
+            f'<rect x="0" y="{top_y:.1f}" '
+            f'width="{VIEWBOX_WIDTH:.1f}" '
+            f'height="{height:.1f}" fill="#3f7a3f" />'
+            f'<rect x="{LEGEND_X:.1f}" y="{top_y + 2:.1f}" '
+            f'width="{LEGEND_WIDTH:.1f}" '
+            f'height="{height - 4:.1f}" rx="6" '
+            f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" '
+            f'opacity="0.88" />'
+        )
+    ]
+
+    for i, skill in enumerate(active):
+        row = i // FRUIT_KEY_COLS
+        col = i % FRUIT_KEY_COLS
+        cx = LEGEND_X + col * col_width + 18
+        cy = top_y + FRUIT_KEY_PADDING + row * FRUIT_KEY_ROW_HEIGHT + 12
+        color = _fruit_color(skill.skill)
+        shape = _fruit_shape(skill.skill)
+        body = FRUIT_SHAPE_BODIES[shape].format(fill=color)
+        hx, hy, hr = FRUIT_SHAPE_HIGHLIGHTS[shape]
+        parts.append(
+            f'<g class="fruit-key-icon" '
+            f'transform="translate({cx:.1f},{cy:.1f}) '
+            f'scale({FRUIT_KEY_ICON_SCALE})">'
+            f'{body}'
+            f'<circle cx="{hx}" cy="{hy}" r="{hr}" '
+            f'fill="white" opacity="0.35" />'
+            f'</g>'
+        )
+        text_x = cx + 10
+        label = _escape_xml(skill.skill)
+        calls = 'call' if skill.count == 1 else 'calls'
+        parts.append(
+            f'<text x="{text_x:.1f}" y="{cy + 4:.1f}" '
+            f'font-family="Georgia, serif" '
+            f'font-size="{LEGEND_DESC_SIZE}" '
+            f'fill="#2f3b23">'
+            f'<tspan font-weight="bold">{label}</tspan>'
+            f' ({skill.count} {calls})</text>'
+        )
+
+    parts.append('</g>')
+    return ''.join(parts)
+
+
 def render_svg(garden: GardenData) -> str:
     total_sessions = sum(day_ring.sessions for day_ring in garden.rings)
     base_half_width = _trunk_half_width(total_sessions)
@@ -3929,13 +4073,17 @@ def render_svg(garden: GardenData) -> str:
             with_rain=_rain_intensity(garden.vitality) > 0,
             with_fruit=bool(garden.skills),
         )
-        + _render_tap_tooltip(LEGEND_BAND_BOTTOM)
+        + _render_fruit_key(garden.skills, LEGEND_BAND_BOTTOM)
+        + _render_tap_tooltip(
+            LEGEND_BAND_BOTTOM + _fruit_key_height(garden.skills)
+        )
     )
 
+    total_height = LEGEND_BAND_BOTTOM + _fruit_key_height(garden.skills)
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {VIEWBOX_WIDTH} {LEGEND_BAND_BOTTOM:.1f}" '
-        f'width="{VIEWBOX_WIDTH}" height="{LEGEND_BAND_BOTTOM:.1f}">'
+        f'viewBox="0 0 {VIEWBOX_WIDTH} {total_height:.1f}" '
+        f'width="{VIEWBOX_WIDTH}" height="{total_height:.1f}">'
         f'{_render_defs(vitality=garden.vitality)}'
         f'{_wind_style()}'
         f'{_render_background()}'
@@ -5362,7 +5510,10 @@ def _render_tap_tooltip(
 
 
 def _render_scrubber(
-    timeline: GardenTimeline, key_times: list[float], duration: float
+    timeline: GardenTimeline,
+    key_times: list[float],
+    duration: float,
+    scrubber_top: float = LEGEND_BAND_BOTTOM,
 ) -> str:
     """A ground-strip slider that seeks the timelapse's own SMIL clock.
 
@@ -5383,18 +5534,19 @@ def _render_scrubber(
 
     panel_x = LEGEND_X
     panel_width = LEGEND_WIDTH
+    scrubber_y = scrubber_top + SCRUBBER_MARGIN
     ground_fill = (
-        f'<rect x="0" y="{LEGEND_BAND_BOTTOM:.1f}" '
+        f'<rect x="0" y="{scrubber_top:.1f}" '
         f'width="{VIEWBOX_WIDTH:.1f}" '
         f'height="{SCRUBBER_TOTAL_HEIGHT:.1f}" fill="#3f7a3f" />'
     )
     panel = (
-        f'<rect x="{panel_x:.1f}" y="{SCRUBBER_Y:.1f}" '
+        f'<rect x="{panel_x:.1f}" y="{scrubber_y:.1f}" '
         f'width="{panel_width:.1f}" height="{SCRUBBER_HEIGHT:.1f}" rx="8" '
         f'fill="#fbfbf3" stroke="#3a2412" stroke-width="1" opacity="0.88" />'
     )
     foreign = (
-        f'<foreignObject x="{panel_x + 14:.1f}" y="{SCRUBBER_Y + 5:.1f}" '
+        f'<foreignObject x="{panel_x + 14:.1f}" y="{scrubber_y + 5:.1f}" '
         f'width="{panel_width - 28:.1f}" height="{SCRUBBER_HEIGHT - 10:.1f}">'
         '<div xmlns="http://www.w3.org/1999/xhtml" '
         'style="font-family: Georgia, serif; color: #2f3b23; '
@@ -5464,6 +5616,16 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
         1.0 + sum(_frame_weights(daily_sessions, *weather))
     )
     key_times = _weighted_key_times(daily_sessions, *weather)
+    timeline_skills = [
+        SkillFruit(
+            skill=s,
+            count=timeline.skill_days[s][-1].count,
+        )
+        for s in timeline.skill_order
+        if timeline.skill_days[s][-1].count >= FRUIT_MIN_CALLS
+    ]
+    fk_height = _fruit_key_height(timeline_skills)
+
     base_half_width_by_day = _trunk_half_widths_for_timeline(
         timeline.cumulative_sessions
     )
@@ -5527,17 +5689,28 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             ),
             with_fruit=bool(timeline.skill_order),
         )
-        + _render_scrubber(timeline, key_times, duration)
-        + _render_tap_tooltip(TIMELINE_VIEWBOX_HEIGHT, key_times, duration)
+        + _render_fruit_key(timeline_skills, LEGEND_BAND_BOTTOM)
+        + _render_scrubber(
+            timeline,
+            key_times,
+            duration,
+            scrubber_top=LEGEND_BAND_BOTTOM + fk_height,
+        )
+        + _render_tap_tooltip(
+            TIMELINE_VIEWBOX_HEIGHT + fk_height,
+            key_times,
+            duration,
+        )
     )
 
     leaf_animations, ground_animations, canopy_animations = _season_animations(
         timeline.daily_vitality or [1.0] * day_count, key_times, duration
     )
+    tl_height = TIMELINE_VIEWBOX_HEIGHT + fk_height
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {VIEWBOX_WIDTH} {TIMELINE_VIEWBOX_HEIGHT:.1f}" '
-        f'width="{VIEWBOX_WIDTH}" height="{TIMELINE_VIEWBOX_HEIGHT:.1f}">'
+        f'viewBox="0 0 {VIEWBOX_WIDTH} {tl_height:.1f}" '
+        f'width="{VIEWBOX_WIDTH}" height="{tl_height:.1f}">'
         f'{
             _render_defs(leaf_animations, ground_animations, canopy_animations)
         }'
