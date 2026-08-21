@@ -3472,6 +3472,32 @@ def _limb_canopy(
     )
 
 
+def _leafy_canopies(
+    limbs: list[_Limb],
+    by_repo: dict[str, RepoBranch],
+    base_half_width: float,
+) -> tuple[list[list[_CanopyDisk]], list[tuple[str, tuple[float, float]]]]:
+    """Canopies that carry greenery, with each one's wind seed and pivot.
+
+    A fruit hangs in its limb's canopy, so it has to ride that limb's wind
+    group -- same class, same seed, same pivot -- or it floats while the
+    greenery around it sways. Limbs whose share rounds down to no leaves
+    are dropped: they have nowhere to hang anything.
+    """
+    canopies: list[list[_CanopyDisk]] = []
+    wind: list[tuple[str, tuple[float, float]]] = []
+    for index, limb in enumerate(limbs):
+        disks = _limb_canopy(limb, limbs, by_repo, base_half_width)
+        if not disks:
+            continue
+        placement = _branch_placement(
+            index, len(limbs), limb.key, base_half_width
+        )
+        canopies.append(disks)
+        wind.append((limb.key, (placement.origin_x, placement.origin_y)))
+    return canopies, wind
+
+
 def _render_fruit_on_branches(
     skills: list[SkillFruit],
     branches: list[RepoBranch],
@@ -3489,24 +3515,14 @@ def _render_fruit_on_branches(
     if not limbs:
         return ''
 
-    # Only limbs that actually carry greenery: a limb whose share of the
-    # repo rounds down to no leaves has nowhere to hang anything, and
-    # dealing fruit to it would just drop that fruit.
-    canopies = [
-        disks
-        for disks in (
-            _limb_canopy(limb, limbs, by_repo, base_half_width)
-            for limb in limbs
-        )
-        if disks
-    ]
+    canopies, canopy_wind = _leafy_canopies(limbs, by_repo, base_half_width)
     if not canopies:
         return ''
 
     placed: list[list[_FruitSpot]] = [[] for _ in canopies]
     rng = random.Random('ccgarden-fruit')
 
-    elements: list[str] = []
+    buckets: list[list[str]] = [[] for _ in canopies]
     for index, skill in enumerate(_fruit_assignments(plan)):
         radius = _fruit_radius(skill.count)
         # Start at this fruit's turn in the rotation, but walk on if that
@@ -3525,7 +3541,7 @@ def _render_fruit_on_branches(
         if spot is None or limb_index is None:
             continue
         placed[limb_index].append(spot)
-        elements.append(
+        buckets[limb_index].append(
             _render_single_fruit(
                 spot,
                 _fruit_color(skill.skill),
@@ -3534,7 +3550,11 @@ def _render_fruit_on_branches(
             )
         )
 
-    return ''.join(elements)
+    return ''.join(
+        _wind_group('ccg-sway-limb', key, pivot) + ''.join(bucket) + '</g>'
+        for (key, pivot), bucket in zip(canopy_wind, buckets, strict=True)
+        if bucket
+    )
 
 
 LEGEND_MARGIN = 4.0
@@ -3775,18 +3795,14 @@ def _render_legend(
     actually a bird, a night, a turned leaf or a downpour to explain: a
     key to something the garden isn't doing is just a puzzle.
     """
-    dropped = set()
-    if not with_birds:
-        dropped.add('bird')
-    if not with_night:
-        dropped.add('sky')
-    if not with_seasons:
-        dropped.add('season')
-    if not with_rain:
-        dropped.add('rain')
-    if not with_fruit:
-        dropped.add('fruit')
-    rows = [row for row in LEGEND_ROWS if row[2] not in dropped]
+    shown = {
+        'bird': with_birds,
+        'sky': with_night,
+        'season': with_seasons,
+        'rain': with_rain,
+        'fruit': with_fruit,
+    }
+    rows = [row for row in LEGEND_ROWS if shown.get(row[2], True)]
     columns = math.ceil(len(rows) / LEGEND_GRID_ROWS)
     column_width = LEGEND_WIDTH / columns
     row_count = math.ceil(len(rows) / columns)
