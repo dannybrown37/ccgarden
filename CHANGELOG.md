@@ -1,3 +1,9 @@
+## v0.3.2 (2026-08-21)
+
+### Fix
+
+- make fruit sway with tree
+
 ## v0.3.1 (2026-08-21)
 
 ### Fix
