@@ -1,3 +1,9 @@
+## v0.3.1 (2026-08-21)
+
+### Fix
+
+- (sort of) improve fruit implementation
+
 ## v0.3.0 (2026-08-17)
 
 ### Feat
