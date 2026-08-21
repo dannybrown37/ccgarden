@@ -1,3 +1,9 @@
+## v0.3.3 (2026-08-21)
+
+### Fix
+
+- show a legend for fruit, min 5 calls for a tool to show up
+
 ## v0.3.2 (2026-08-21)
 
 ### Fix
