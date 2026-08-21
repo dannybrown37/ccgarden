@@ -58,6 +58,23 @@ rather than a day count so the dwell adds runtime instead of stealing it)
 and its rain weight on screen, and going away and coming back have to
 take comparable time or the recovery reads as a glitch.
 
+Fruit is the one shape that does not walk the timeline. Skill counts are
+cumulative like everything else, but `_render_timeline_fruit` reuses the
+static `_render_fruit_on_branches` wholesale and fades the entire crop in
+over the last `FRUIT_RIPEN_FRACTION` of the replay — fruit reads as the
+harvest a finished garden is carrying, and ripening it day by day put
+full-grown fruit over a tree still rising out of the soil. Placement goes
+through `_fruit_position`, which samples the *same* area-weighted foliage
+blobs as `_leaf_placement` at an inset radius, so no fruit can land in
+bare sky past a branch tip.
+
+Skill usage (the tree's fruit) comes from two places in a transcript and
+both are needed: `Skill` tool calls, and `/name` prompts. The second is
+only distinguishable from a built-in like `/clear` by tag *order* —
+skill- and plugin-backed commands emit `<command-message>` before
+`<command-name>`, the CLI's own built-ins emit the name first
+(`slash_command_skill`). Counting only the tool call misses ~70% of them.
+
 New tables must be tolerated when absent — `daily_hour_usage` postdates the
 first released schema, so its loaders check `_table_exists` and degrade to
 "no opinion" rather than raising on an older db.

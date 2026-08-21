@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import random
+import zlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -137,12 +138,41 @@ FRUIT_COLORS = (
     '#3498db',
     '#d35400',
 )
+# Nominal fruit size, used by the legend icon; a real fruit is sized from
+# its skill's call count by `_fruit_radius`.
 FRUIT_RADIUS = 4.5
 FRUIT_STEM_LENGTH = 6.0
-FRUIT_PER_SKILL_USE = 0.5
-FRUIT_SATURATION_COUNT = 60
-FRUIT_ZONE_START = 0.45
-FRUIT_ZONE_END = 1.0
+FRUIT_RADIUS_MIN = 3.2
+FRUIT_RADIUS_MAX = 7.5
+FRUIT_RADIUS_SATURATION = 60
+# Fruit is per-skill, not per-call: a skill you lean on daily should read as
+# a heavier bough than one you tried once, without a 300-call skill burying
+# the tree. A root curve gives 1 fruit at 1 call and ~11 at 100.
+FRUIT_ROOT_SATURATION = 1.1
+FRUIT_MIN_PER_SKILL = 1
+FRUIT_MAX_PER_SKILL = 14
+FRUIT_TOTAL_MAX = 120
+# Fruit hangs in the same foliage blobs the leaves fill, pulled in from the
+# rim so it reads as sitting *in* the green rather than stuck on its edge.
+FRUIT_CANOPY_INSET = 0.72
+# Fruit comes at the end: the crop fades in over the last slice of the
+# replay rather than ripening piece by piece across the days.
+FRUIT_RIPEN_FRACTION = 0.08
+# Fruit is drawn in unit space and scaled, so one box bounds every shape:
+# half-width and the body's top and bottom, in radius multiples, plus the
+# stem tip above it. Placement keeps all of that in the green.
+FRUIT_EXTENT_HALF_WIDTH = 1.25
+FRUIT_EXTENT_TOP = -1.05
+FRUIT_EXTENT_BOTTOM = 1.2
+FRUIT_STEM_TIP = -1.95
+# The far corner of that body box, in radius multiples: a fruit centred in
+# a disk needs this much room, and a small canopy shrinks its fruit to fit
+# rather than dropping it.
+FRUIT_EXTENT_REACH = math.hypot(FRUIT_EXTENT_HALF_WIDTH, FRUIT_EXTENT_BOTTOM)
+FRUIT_PLACEMENT_TRIES = 24
+# Centre-to-centre spacing as a multiple of the two radii summed: just
+# clear of touching, so a crop reads as scattered rather than as clumps.
+FRUIT_MIN_GAP = 1.05
 MAX_FRUIT_PER_LIMB = 12
 
 # One cloud per model used, sized by how many tokens that model produced.
@@ -3156,33 +3186,289 @@ def _render_leaves(
     return ''.join(elements)
 
 
+class _FruitSpot(NamedTuple):
+    """A placed fruit: where it hangs and how big it is."""
+
+    x: float
+    y: float
+    radius: float
+
+
+class _CanopyDisk(NamedTuple):
+    """The reliably-green core of one foliage blob."""
+
+    x: float
+    y: float
+    radius: float
+
+
+def _canopy_disks(
+    origin_x: float,
+    origin_y: float,
+    dx: float,
+    dy: float,
+    leaf_count: int,
+) -> list[_CanopyDisk]:
+    """The disks a fruit may hang in, per foliage blob on this branch.
+
+    `_blob_path` wobbles each blob's edge by up to 32%, so the drawn
+    greenery is only guaranteed to cover `1 - jitter` of the nominal
+    radius. `FRUIT_CANOPY_INSET` stays inside that worst case, which is
+    what makes "inside this disk" mean "actually on green".
+    """
+    if leaf_count <= 0:
+        return []
+    length = math.hypot(dx, dy) or 1.0
+    if leaf_count < CANOPY_MIN_LEAVES:
+        # Too sparse for blobs: `_render_leaves` scatters this branch's
+        # few leaves in a loose band, so hang the fruit in the same band.
+        scatter = LEAF_SCATTER_RADIUS * 0.4 * FRUIT_CANOPY_INSET
+        return [
+            _CanopyDisk(
+                x=origin_x + fraction * dx,
+                y=origin_y + fraction * dy,
+                radius=scatter,
+            )
+            for fraction, _ in _foliage_blob_relative_radii(length)
+        ]
+    canopy_radius = _canopy_radius(leaf_count)
+    return [
+        _CanopyDisk(
+            x=origin_x + fraction * dx,
+            y=origin_y + fraction * dy,
+            radius=canopy_radius * relative * FRUIT_CANOPY_INSET,
+        )
+        for fraction, relative in _foliage_blob_relative_radii(length)
+    ]
+
+
+def _fruit_fits(
+    x: float, y: float, radius: float, disks: list[_CanopyDisk]
+) -> bool:
+    """True when the fruit *and its stem* sit inside a single blob.
+
+    Testing the centre alone is what let stems poke out above the canopy:
+    the stem rises from the top of the fruit, so it clears the greenery
+    well before the fruit itself does. The body has to fit the disk's
+    guaranteed-green core, while the stem only has to stay within the
+    blob's nominal radius -- it is a thin line, and holding it to the same
+    conservative core would push every fruit into the middle of the blob.
+    """
+    half = radius * FRUIT_EXTENT_HALF_WIDTH
+    body = [
+        (x + sx * half, y + sy * radius)
+        for sx in (-1.0, 1.0)
+        for sy in (FRUIT_EXTENT_TOP, FRUIT_EXTENT_BOTTOM)
+    ]
+    stem_x, stem_y = x, y + radius * FRUIT_STEM_TIP
+    return any(
+        all(
+            math.hypot(cx - disk.x, cy - disk.y) <= disk.radius
+            for cx, cy in body
+        )
+        and math.hypot(stem_x - disk.x, stem_y - disk.y)
+        <= disk.radius / FRUIT_CANOPY_INSET
+        for disk in disks
+    )
+
+
+def _place_fruit(
+    rng: random.Random,
+    radius: float,
+    disks: list[_CanopyDisk],
+    placed: list[_FruitSpot],
+) -> _FruitSpot | None:
+    """A spot inside the canopy that no other fruit is already using.
+
+    Rejection sampling rather than a formula: the canopy is a union of
+    overlapping wobbly disks, so there is no closed form for "inside the
+    green and clear of the neighbours". Bounded tries keep it O(fruit),
+    and the rng is seeded, so a retry is as deterministic as a first hit.
+    """
+    if not disks:
+        return None
+    radius = min(radius, max(d.radius for d in disks) / FRUIT_EXTENT_REACH)
+    weights = [disk.radius**2 for disk in disks]
+    for _ in range(FRUIT_PLACEMENT_TRIES):
+        disk = rng.choices(disks, weights=weights)[0]
+        angle = rng.uniform(0.0, 2 * math.pi)
+        reach = disk.radius * math.sqrt(rng.random())
+        x = disk.x + reach * math.cos(angle)
+        y = disk.y + reach * math.sin(angle)
+        if not _fruit_fits(x, y, radius, disks):
+            continue
+        if any(
+            math.hypot(x - spot.x, y - spot.y)
+            < (radius + spot.radius) * FRUIT_MIN_GAP
+            for spot in placed
+        ):
+            continue
+        return _FruitSpot(x=x, y=y, radius=radius)
+    return None
+
+
+def _fruit_radius(uses: int) -> float:
+    """Fruit size for a skill with `uses` calls.
+
+    A skill you lean on daily hangs heavier than one you tried once.
+    """
+    saturation = min(max(uses, 0), FRUIT_RADIUS_SATURATION)
+    growth = math.sqrt(saturation / FRUIT_RADIUS_SATURATION)
+    return FRUIT_RADIUS_MIN + (FRUIT_RADIUS_MAX - FRUIT_RADIUS_MIN) * growth
+
+
 def _fruit_color(skill: str) -> str:
-    return FRUIT_COLORS[hash(skill) % len(FRUIT_COLORS)]
+    # crc32, not hash(): str.__hash__ is salted per process, so hash() would
+    # repaint the whole tree on every run.
+    return FRUIT_COLORS[zlib.crc32(skill.encode()) % len(FRUIT_COLORS)]
 
 
-def _fruit_count(total_uses: int) -> int:
-    raw = int(total_uses * FRUIT_PER_SKILL_USE)
-    return min(max(raw, 1), FRUIT_SATURATION_COUNT)
+def _fruit_count(uses: int) -> int:
+    """How many fruit one skill earns for `uses` calls."""
+    raw = round(math.sqrt(max(uses, 0)) * FRUIT_ROOT_SATURATION)
+    return min(max(int(raw), FRUIT_MIN_PER_SKILL), FRUIT_MAX_PER_SKILL)
+
+
+def _fruit_plan(skills: list[SkillFruit]) -> list[tuple[SkillFruit, int]]:
+    """Fruit per skill, scaled down together if the tree would overflow."""
+    plan = [(sf, _fruit_count(sf.count)) for sf in skills if sf.count > 0]
+    total = sum(n for _, n in plan)
+    if total <= FRUIT_TOTAL_MAX or total == 0:
+        return plan
+    scale = FRUIT_TOTAL_MAX / total
+    return [(sf, max(FRUIT_MIN_PER_SKILL, int(n * scale))) for sf, n in plan]
+
+
+def _fruit_label(skill: str, count: int) -> str:
+    calls = 'call' if count == 1 else 'calls'
+    return f'{skill} — {count:,} {calls}'
+
+
+# Every shape is drawn at radius 1 about its own centre and scaled into
+# place, so sizing a fruit is one number and the shapes stay comparable.
+FRUIT_STEM_D = 'M 0,-0.95 L 0,-1.95'
+FRUIT_SHAPE_BODIES = {
+    'round': '<circle cx="0" cy="0" r="1" fill="{fill}" opacity="0.9" />',
+    'pear': (
+        '<path d="M 0,-1.05 C 0.42,-0.95 0.40,-0.35 0.55,0.05 '
+        'C 0.78,0.60 0.42,1.05 0,1.05 C -0.42,1.05 -0.78,0.60 -0.55,0.05 '
+        'C -0.40,-0.35 -0.42,-0.95 0,-1.05 Z" fill="{fill}" opacity="0.9" />'
+    ),
+    'plum': (
+        '<ellipse cx="0" cy="0.05" rx="0.88" ry="1.02" '
+        'fill="{fill}" opacity="0.9" />'
+        '<path d="M 0,-0.95 Q 0.18,0 0,1.05" stroke="#00000033" '
+        'stroke-width="0.12" fill="none" />'
+    ),
+    'berries': (
+        '<circle cx="-0.52" cy="0.28" r="0.58" fill="{fill}" opacity="0.9" />'
+        '<circle cx="0.52" cy="0.32" r="0.55" fill="{fill}" opacity="0.9" />'
+        '<circle cx="0.02" cy="-0.42" r="0.60" fill="{fill}" opacity="0.9" />'
+    ),
+    'cherries': (
+        '<path d="M -0.45,0.30 Q -0.30,-0.55 0,-0.95" stroke="#5a3d1a" '
+        'stroke-width="0.10" fill="none" />'
+        '<path d="M 0.48,0.38 Q 0.28,-0.50 0,-0.95" stroke="#5a3d1a" '
+        'stroke-width="0.10" fill="none" />'
+        '<circle cx="-0.45" cy="0.42" r="0.56" fill="{fill}" opacity="0.9" />'
+        '<circle cx="0.48" cy="0.48" r="0.52" fill="{fill}" opacity="0.9" />'
+    ),
+}
+FRUIT_SHAPE_HIGHLIGHTS = {
+    'round': (-0.30, -0.30, 0.28),
+    'pear': (-0.22, 0.30, 0.22),
+    'plum': (-0.30, -0.25, 0.24),
+    'berries': (-0.10, -0.55, 0.18),
+    'cherries': (-0.58, 0.28, 0.18),
+}
+FRUIT_SHAPES = tuple(FRUIT_SHAPE_BODIES)
+
+
+def _fruit_shape(skill: str) -> str:
+    """Which shape a skill's fruit takes.
+
+    Salted apart from `_fruit_color` so shape and colour don't move
+    together -- keyed off the same name with the same hash, every red
+    fruit would share one silhouette.
+    """
+    digest = zlib.crc32(f'shape:{skill}'.encode())
+    return FRUIT_SHAPES[digest % len(FRUIT_SHAPES)]
 
 
 def _render_single_fruit(
-    x: float,
-    y: float,
+    spot: _FruitSpot,
     color: str,
-    skill: str,
+    shape: str,
+    label: str,
 ) -> str:
-    title = _title(f'{_escape_xml(skill)}')
+    title = _title(_escape_xml(label))
+    highlight_x, highlight_y, highlight_r = FRUIT_SHAPE_HIGHLIGHTS[shape]
+    body = FRUIT_SHAPE_BODIES[shape].format(fill=color)
+    # Cherries draw their own pair of stems.
+    stem = (
+        ''
+        if shape == 'cherries'
+        else (
+            f'<path d="{FRUIT_STEM_D}" stroke="#5a3d1a" '
+            f'stroke-width="0.12" fill="none" />'
+        )
+    )
     return (
-        f'<g class="fruit">{title}'
-        f'<line x1="{x:.1f}" y1="{y - FRUIT_RADIUS:.1f}" '
-        f'x2="{x:.1f}" y2="{y - FRUIT_RADIUS - FRUIT_STEM_LENGTH:.1f}" '
-        f'stroke="#5a3d1a" stroke-width="1" />'
-        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{FRUIT_RADIUS}" '
-        f'fill="{color}" opacity="0.9" />'
-        f'<circle cx="{x - 1.2:.1f}" cy="{y - 1.2:.1f}" '
-        f'r="{FRUIT_RADIUS * 0.3:.1f}" '
+        f'<g class="fruit" transform="translate({spot.x:.1f},{spot.y:.1f}) '
+        f'scale({spot.radius:.2f})">{title}{stem}{body}'
+        f'<circle cx="{highlight_x}" cy="{highlight_y}" r="{highlight_r}" '
         f'fill="white" opacity="0.35" />'
         f'</g>'
+    )
+
+
+def _fruit_assignments(
+    plan: list[tuple[SkillFruit, int]],
+) -> list[SkillFruit]:
+    """One entry per fruit, with the skills interleaved.
+
+    Emitting a skill's fruit consecutively and then dealing them round
+    robin puts every fruit of a skill on the same few limbs, which is
+    what made the crop read as coloured clumps. Rotating between skills
+    spreads each one over the whole tree and mixes the colours within
+    each limb.
+    """
+    remaining = [(skill, count) for skill, count in plan if count > 0]
+    order: list[SkillFruit] = []
+    while remaining:
+        order.extend(skill for skill, _ in remaining)
+        remaining = [
+            (skill, count - 1) for skill, count in remaining if count > 1
+        ]
+    return order
+
+
+def _limb_canopy(
+    limb: _Limb,
+    limbs: list[_Limb],
+    by_repo: dict[str, RepoBranch],
+    base_half_width: float,
+) -> list[_CanopyDisk]:
+    """The canopy disks hanging off one limb."""
+    repo_branch = _limb_share_of(by_repo[limb.repo], limb)
+    placement = _branch_placement(
+        limbs.index(limb), len(limbs), limb.key, base_half_width
+    )
+    length = _branch_length(repo_branch.lines_added)
+    end_x, end_y = _branch_endpoint(
+        placement.origin_x,
+        placement.origin_y,
+        length,
+        placement.side,
+        placement.spread_index,
+        angle_jitter=placement.angle_jitter,
+    )
+    return _canopy_disks(
+        placement.origin_x,
+        placement.origin_y,
+        end_x - placement.origin_x,
+        end_y - placement.origin_y,
+        repo_branch.sessions * LEAVES_PER_SESSION,
     )
 
 
@@ -3194,49 +3480,59 @@ def _render_fruit_on_branches(
     if not skills or not branches:
         return ''
 
-    total_uses = sum(s.count for s in skills)
-    fruit_total = _fruit_count(total_uses)
+    plan = _fruit_plan(skills)
+    if not plan:
+        return ''
 
     by_repo = {branch.repo: branch for branch in branches}
     limbs = _plan_limbs([(b.repo, float(b.lines_added)) for b in branches])
     if not limbs:
         return ''
 
-    count = len(limbs)
+    # Only limbs that actually carry greenery: a limb whose share of the
+    # repo rounds down to no leaves has nowhere to hang anything, and
+    # dealing fruit to it would just drop that fruit.
+    canopies = [
+        disks
+        for disks in (
+            _limb_canopy(limb, limbs, by_repo, base_half_width)
+            for limb in limbs
+        )
+        if disks
+    ]
+    if not canopies:
+        return ''
+
+    placed: list[list[_FruitSpot]] = [[] for _ in canopies]
     rng = random.Random('ccgarden-fruit')
 
-    per_skill: list[tuple[str, str, int]] = []
-    for sf in skills:
-        color = _fruit_color(sf.skill)
-        n = max(1, int(fruit_total * sf.count / total_uses))
-        per_skill.append((sf.skill, color, n))
-
     elements: list[str] = []
-    fruit_index = 0
-    for skill_name, color, n in per_skill:
-        for _ in range(n):
-            limb = limbs[fruit_index % count]
-            fruit_index += 1
-            whole_repo = by_repo[limb.repo]
-            repo_branch = _limb_share_of(whole_repo, limb)
-            placement = _branch_placement(
-                limbs.index(limb), count, limb.key, base_half_width
+    for index, skill in enumerate(_fruit_assignments(plan)):
+        radius = _fruit_radius(skill.count)
+        # Start at this fruit's turn in the rotation, but walk on if that
+        # canopy is already full, so a crowded limb sheds fruit onto its
+        # neighbours instead of the crop simply shrinking.
+        spot = None
+        limb_index = None
+        for offset in range(len(canopies)):
+            candidate = (index + offset) % len(canopies)
+            spot = _place_fruit(
+                rng, radius, canopies[candidate], placed[candidate]
             )
-            length = _branch_length(repo_branch.lines_added)
-            end_x, end_y = _branch_endpoint(
-                placement.origin_x,
-                placement.origin_y,
-                length,
-                placement.side,
-                placement.spread_index,
-                angle_jitter=placement.angle_jitter,
+            if spot is not None:
+                limb_index = candidate
+                break
+        if spot is None or limb_index is None:
+            continue
+        placed[limb_index].append(spot)
+        elements.append(
+            _render_single_fruit(
+                spot,
+                _fruit_color(skill.skill),
+                _fruit_shape(skill.skill),
+                _fruit_label(skill.skill, skill.count),
             )
-            dx = end_x - placement.origin_x
-            dy = end_y - placement.origin_y
-            t = rng.uniform(FRUIT_ZONE_START, FRUIT_ZONE_END)
-            fx = placement.origin_x + t * dx + rng.uniform(-8, 8)
-            fy = placement.origin_y + t * dy + rng.uniform(2, 12)
-            elements.append(_render_single_fruit(fx, fy, color, skill_name))
+        )
 
     return ''.join(elements)
 
@@ -3308,7 +3604,7 @@ LEGEND_ROWS = (
     ),
     (
         'Fruit',
-        ('hangs on branches;', 'color = skill used'),
+        ('one per skill you ran;', 'more calls, more fruit'),
         'fruit',
     ),
     (
@@ -4731,108 +5027,55 @@ def _render_timeline_flowers_on_bushes(
 def _render_timeline_fruit(
     timeline: GardenTimeline,
     base_half_width: float,
-    key_times: list[float],
     duration: float,
 ) -> str:
+    """The whole crop, ripening together at the very end of the replay.
+
+    Skill counts are cumulative like every other shape, but fruit is the
+    one worth *not* walking day by day: it reads as the harvest the
+    finished garden is carrying rather than as something that grew, and
+    day-by-day ripening put full-grown fruit over a tree still rising out
+    of the soil. One shared fade also costs a single `<animate>` instead
+    of one per fruit.
+    """
     if not timeline.skill_order or not timeline.branch_order:
         return ''
 
     final_skills = [
-        SkillFruit(skill=s, count=timeline.skill_days[s][-1].count)
-        for s in timeline.skill_order
+        SkillFruit(skill=skill, count=timeline.skill_days[skill][-1].count)
+        for skill in timeline.skill_order
     ]
     final_branches = [
         RepoBranch(
             repo=repo,
-            sessions=timeline.branch_days[repo][-1].sessions,
-            lines_added=timeline.branch_days[repo][-1].lines_added,
-            lines_removed=timeline.branch_days[repo][-1].lines_removed,
-            output_tokens=timeline.branch_days[repo][-1].output_tokens,
-            input_tokens=timeline.branch_days[repo][-1].input_tokens,
-            cost=timeline.branch_days[repo][-1].cost,
-            prompts=timeline.branch_days[repo][-1].prompts,
+            sessions=days[-1].sessions,
+            lines_added=days[-1].lines_added,
+            lines_removed=days[-1].lines_removed,
+            output_tokens=days[-1].output_tokens,
+            input_tokens=days[-1].input_tokens,
+            cost=days[-1].cost,
+            prompts=days[-1].prompts,
         )
-        for repo in timeline.branch_order
+        for repo, days in (
+            (repo, timeline.branch_days[repo])
+            for repo in timeline.branch_order
+        )
     ]
 
-    total_final = sum(s.count for s in final_skills)
-    if total_final <= 0:
-        return ''
-
-    total_fruit = _fruit_count(total_final)
-    day_totals = [
-        sum(timeline.skill_days[s][i].count for s in timeline.skill_order)
-        for i in range(len(timeline.days))
-    ]
-
-    by_repo = {b.repo: b for b in final_branches}
-    limbs = _plan_limbs(
-        [(b.repo, float(b.lines_added)) for b in final_branches]
+    crop = _render_fruit_on_branches(
+        final_skills, final_branches, base_half_width
     )
-    if not limbs:
+    if not crop:
         return ''
 
-    limb_count = len(limbs)
-    rng = random.Random('ccgarden-fruit')
-    elements: list[str] = []
-    fruit_idx = 0
-
-    for sf in final_skills:
-        color = _fruit_color(sf.skill)
-        n = max(1, int(total_fruit * sf.count / total_final))
-        for piece in range(n):
-            limb = limbs[fruit_idx % limb_count]
-            fruit_idx += 1
-            whole_repo = by_repo[limb.repo]
-            repo_branch = _limb_share_of(whole_repo, limb)
-            placement = _branch_placement(
-                limbs.index(limb),
-                limb_count,
-                limb.key,
-                base_half_width,
-            )
-            length = _branch_length(repo_branch.lines_added)
-            end_x, end_y = _branch_endpoint(
-                placement.origin_x,
-                placement.origin_y,
-                length,
-                placement.side,
-                placement.spread_index,
-                angle_jitter=placement.angle_jitter,
-            )
-            dx = end_x - placement.origin_x
-            dy = end_y - placement.origin_y
-            t = rng.uniform(FRUIT_ZONE_START, FRUIT_ZONE_END)
-            fx = placement.origin_x + t * dx + rng.uniform(-8, 8)
-            fy = placement.origin_y + t * dy + rng.uniform(2, 12)
-
-            threshold = int(total_final * (piece + 1) / n) if n > 1 else 1
-            opacity_values = [
-                '0' if day_totals[i] < threshold else '0.9'
-                for i in range(len(timeline.days))
-            ]
-            animate = _animate_tag(
-                'opacity',
-                opacity_values,
-                key_times,
-                duration,
-            )
-            elements.append(
-                f'<g class="fruit" opacity="0.9">{animate}'
-                f'<line x1="{fx:.1f}" y1="{fy - FRUIT_RADIUS:.1f}" '
-                f'x2="{fx:.1f}" '
-                f'y2="{fy - FRUIT_RADIUS - FRUIT_STEM_LENGTH:.1f}" '
-                f'stroke="#5a3d1a" stroke-width="1" />'
-                f'<circle cx="{fx:.1f}" cy="{fy:.1f}" '
-                f'r="{FRUIT_RADIUS}" '
-                f'fill="{color}" opacity="0.9" />'
-                f'<circle cx="{fx - 1.2:.1f}" cy="{fy - 1.2:.1f}" '
-                f'r="{FRUIT_RADIUS * 0.3:.1f}" '
-                f'fill="white" opacity="0.35" />'
-                f'</g>'
-            )
-
-    return ''.join(elements)
+    ripen = _animate_tag(
+        'opacity',
+        ['0', '0', '1'],
+        [0.0, 1.0 - FRUIT_RIPEN_FRACTION, 1.0],
+        duration,
+        smooth=True,
+    )
+    return f'<g class="fruit-crop" opacity="0">{ripen}{crop}</g>'
 
 
 def _render_timeline_sunflowers(
@@ -5240,13 +5483,16 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
                 base_half_width_by_day,
                 key_times,
                 duration,
+            )
+            # Inside the growth group, not beside it: fruit hangs in the
+            # canopy, so it has to rise with the tree like anything else
+            # drawn into it.
+            + _render_timeline_fruit(
+                timeline, final_base_half_width, duration
             ),
             _tree_growth_scales(timeline.cumulative_sessions),
             key_times,
             duration,
-        )
-        + _render_timeline_fruit(
-            timeline, final_base_half_width, key_times, duration
         )
         # Behind the bushes -- see the same ordering note in `render_svg`.
         + _render_timeline_sunflowers(timeline, key_times, duration)

@@ -1,16 +1,19 @@
 import itertools
 import math
+import os
 import re
+import subprocess
+import sys
 from dataclasses import replace
 
 import pytest
 
 
 from ccgarden.data import (
-    DORMANCY_HALF_LIFE_DAYS,
-    DORMANCY_MIN_GAP_DAYS,
     CartoonBird,
     DayRing,
+    DORMANCY_HALF_LIFE_DAYS,
+    DORMANCY_MIN_GAP_DAYS,
     GardenData,
     GardenTimeline,
     ModelCloud,
@@ -18,113 +21,126 @@ from ccgarden.data import (
     RepoBranch,
     RepoBranchDay,
     SkillFruit,
+    SkillUsageDay,
     ToolBush,
     ToolUsageDay,
 )
 from ccgarden.render import (
     AUTUMN_COLORS,
+    BIRD_MARGIN,
+    _bird_positions,
+    _bird_size,
+    BIRD_SIZE_MAX,
+    BIRD_SIZE_MIN,
+    _bird_slots,
+    BIRD_TOKENS_SATURATION,
+    BIRD_Y_MAX,
+    BIRD_Y_MIN,
+    _blend_hex,
+    BRANCH_ANGLE_JITTER_DEGREES,
+    _branch_bow,
+    _branch_endpoint,
+    _branch_length,
+    BRANCH_LENGTH_MAX,
+    BRANCH_LENGTH_MIN,
+    BRANCH_LINES_SATURATION,
+    _branch_placement,
+    _branch_side,
+    _bush_radius,
+    _bush_x_positions,
+    _cache_efficiency_flower_count,
+    CLOUD_MARGIN,
+    _cloud_positions,
+    _cloud_radius,
+    CLOUD_TOKENS_SATURATION,
+    CLOUD_TREE_KEEPOUT_HALF_WIDTH,
+    _cloud_y_max,
+    CLOUD_Y_MAX_AT_EDGE,
+    CLOUD_Y_MAX_NEAR_TREE,
+    _days_away,
+    DORMANT_FRAME_DWELL,
+    _frame_weights,
+    _fruit_color,
+    _fruit_count,
+    _fruit_plan,
+    _fruit_radius,
+    FRUIT_RADIUS_MAX,
+    FRUIT_RADIUS_MIN,
+    FRUIT_RIPEN_FRACTION,
+    _fruit_shape,
+    FRUIT_SHAPE_BODIES,
+    FRUIT_SHAPES,
+    FRUIT_STEM_TIP,
+    FRUIT_TOTAL_MAX,
+    _leaf_color,
+    LEAF_COLORS,
+    _leaf_opacity,
+    LEAF_OPACITY_DORMANT,
+    LEAF_OPACITY_LIVING,
+    LEAF_PAINT_ID,
+    LEAVES_PER_SESSION,
     LEGEND_BAND_BOTTOM,
     LEGEND_GRID_ROWS,
     LEGEND_LINE_HEIGHT,
     LEGEND_ROWS,
-    LEAF_COLORS,
-    LEAF_OPACITY_DORMANT,
-    LEAF_OPACITY_LIVING,
-    LEAF_PAINT_ID,
+    _Limb,
+    _limb_counts,
+    _limb_lead_weight,
+    LIMB_MAX_SHARE,
+    LIMB_SHARE_FALLOFF,
+    _limb_share_of,
     LIVING_CANOPY_STOPS,
     LIVING_GROUND_STOPS,
+    MAX_BIRDS,
+    MAX_BUSHES,
+    MAX_LIMBS_PER_REPO,
+    MAX_SUNFLOWERS,
+    MIN_LIMBS,
+    NIGHT_VEIL_MAX_OPACITY,
+    NIGHTNESS_SATURATION,
+    _plan_limbs,
     RAIN_DROP_COUNT,
+    _rain_field,
     RAIN_FULL_DAYS,
+    _rain_intensity,
     RAIN_MAX_OPACITY,
     RAIN_MIN_INTENSITY,
     RAIN_ONSET_DAYS,
-    _blend_hex,
-    _days_away,
-    _leaf_color,
-    _leaf_opacity,
-    DORMANT_FRAME_DWELL,
+    _rain_opacity,
+    RECOVERY_FRAME_DWELL,
+    _render_rain,
+    render_svg,
+    render_timeline_svg,
+    _saturated_nightness,
+    _sky_body_opacities,
+    STAR_COUNT,
+    _star_field,
     STORM_GUST_COUNT,
+    STORM_LEAF_COUNT,
+    _storm_opacity,
     STORM_SCUD_COUNT,
+    _sun_day_values,
+    SUN_HALO_RADIUS_FACTOR,
+    _sun_position,
+    _sun_radius,
     SUN_STORM_MIN_OPACITY,
     _sun_storm_opacity,
-    _storm_opacity,
-    STORM_LEAF_COUNT,
-    _wind_style,
-    RECOVERY_FRAME_DWELL,
-    _frame_weights,
-    _weighted_key_times,
-    _timeline_duration,
-    _rain_field,
-    _render_rain,
-    _rain_intensity,
-    _rain_opacity,
-    NIGHTNESS_SATURATION,
-    NIGHT_VEIL_MAX_OPACITY,
-    _saturated_nightness,
-    _star_field,
-    STAR_COUNT,
-    BIRD_MARGIN,
-    BRANCH_ANGLE_JITTER_DEGREES,
-    BRANCH_LENGTH_MAX,
-    BRANCH_LENGTH_MIN,
-    BRANCH_LINES_SATURATION,
-    BIRD_SIZE_MAX,
-    BIRD_SIZE_MIN,
-    BIRD_TOKENS_SATURATION,
-    BIRD_Y_MAX,
-    BIRD_Y_MIN,
-    CLOUD_MARGIN,
-    CLOUD_TOKENS_SATURATION,
-    CLOUD_TREE_KEEPOUT_HALF_WIDTH,
-    CLOUD_Y_MAX_AT_EDGE,
-    CLOUD_Y_MAX_NEAR_TREE,
-    LEAVES_PER_SESSION,
-    MAX_BIRDS,
-    MAX_BUSHES,
-    MAX_SUNFLOWERS,
-    SUN_HALO_RADIUS_FACTOR,
+    _sun_sweep_x,
     SUN_TOKENS_SATURATION,
+    SUN_X_END,
+    SUN_X_START,
     SUNFLOWER_BAND_WIDTH,
+    _sunflower_height,
     SUNFLOWER_MARGIN,
+    _sunflower_x_positions,
+    _timeline_duration,
     TIMELINE_VIEWBOX_HEIGHT,
     TRUNK_BASE_HALF_WIDTH_MIN,
     TRUNK_CENTER_X,
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
-    _bird_size,
-    _branch_bow,
-    _branch_endpoint,
-    _branch_length,
-    _branch_placement,
-    _branch_side,
-    LIMB_SHARE_FALLOFF,
-    _Limb,
-    _limb_counts,
-    _limb_lead_weight,
-    _limb_share_of,
-    _plan_limbs,
-    LIMB_MAX_SHARE,
-    MAX_LIMBS_PER_REPO,
-    MIN_LIMBS,
-    _bird_positions,
-    _bird_slots,
-    _bush_radius,
-    _bush_x_positions,
-    _cache_efficiency_flower_count,
-    _cloud_positions,
-    _cloud_radius,
-    _cloud_y_max,
-    SUN_X_END,
-    SUN_X_START,
-    _sky_body_opacities,
-    _sun_day_values,
-    _sun_position,
-    _sun_radius,
-    _sun_sweep_x,
-    _sunflower_height,
-    _sunflower_x_positions,
-    render_svg,
-    render_timeline_svg,
+    _weighted_key_times,
+    _wind_style,
 )
 
 
@@ -2135,7 +2151,7 @@ def test_render_svg_fruit_legend_shown_with_skills() -> None:
     svg = render_svg(garden)
 
     assert 'Fruit' in svg
-    assert 'hangs on branches' in svg
+    assert 'one per skill you ran' in svg
 
 
 def test_render_svg_fruit_legend_hidden_without_skills() -> None:
@@ -2148,3 +2164,275 @@ def test_render_svg_fruit_legend_hidden_without_skills() -> None:
     svg = render_svg(garden)
 
     assert 'hangs on branches' not in svg
+
+
+def _timeline_with_skills(**extra: list[int]) -> GardenTimeline:
+    """Four days; `code-review` runs to 4 calls, plus any extra skill."""
+    counts = {'code-review': [1, 2, 3, 4], **extra}
+    days = ['2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23']
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1] * len(days),
+        cumulative_sessions=[1, 2, 3, 4],
+        branch_order=['my-repo'],
+        branch_days={
+            'my-repo': [
+                RepoBranchDay(
+                    day=day,
+                    sessions=30,
+                    lines_added=600,
+                    lines_removed=60,
+                    output_tokens=1000,
+                    input_tokens=100,
+                    cost=0.1,
+                    prompts=5,
+                )
+                for day in days
+            ]
+        },
+        skill_order=list(counts),
+        skill_days={
+            skill: [
+                SkillUsageDay(day=day, count=count)
+                for day, count in zip(days, running, strict=True)
+            ]
+            for skill, running in counts.items()
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ('uses', 'expected'),
+    [(0, 1), (1, 1), (4, 2), (25, 6), (100, 11), (10_000, 14)],
+)
+def test_fruit_count_curve(uses: int, expected: int) -> None:
+    assert _fruit_count(uses) == expected
+
+
+def test_fruit_color_is_stable_across_processes() -> None:
+    """`hash()` is salted per run; the garden must not repaint itself."""
+    code = (
+        'from ccgarden.render import _fruit_color;'
+        "print(_fruit_color('skill-tree:handoff'))"
+    )
+    runs = {
+        subprocess.run(  # noqa: S603
+            [sys.executable, '-c', code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, 'PYTHONHASHSEED': seed},
+        ).stdout.strip()
+        for seed in ('1', '2', '3')
+    }
+    assert runs == {_fruit_color('skill-tree:handoff')}
+
+
+def test_fruit_plan_scales_down_past_the_total_cap() -> None:
+    skills = [SkillFruit(skill=f's{i}', count=400) for i in range(30)]
+
+    plan = _fruit_plan(skills)
+
+    assert sum(n for _, n in plan) <= FRUIT_TOTAL_MAX
+    assert all(n >= 1 for _, n in plan)
+
+
+def test_heavier_skill_grows_more_fruit() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo='my-repo',
+                sessions=10,
+                lines_added=500,
+                lines_removed=50,
+                output_tokens=1000,
+                input_tokens=500,
+                cost=0.0,
+                prompts=20,
+            ),
+        ],
+        skills=[
+            SkillFruit(skill='often', count=100),
+            SkillFruit(skill='once', count=1),
+        ],
+    )
+
+    svg = render_svg(garden)
+
+    assert svg.count('often — 100 calls') > svg.count('once — 1 call')
+    assert 'once — 1 calls' not in svg
+
+
+def test_timeline_fruit_ripens_only_at_the_end() -> None:
+    """Fruit is the harvest, not a shape that grows across the replay."""
+    svg = render_timeline_svg(_timeline_with_skills(latecomer=[0, 0, 0, 9]))
+
+    ripen = re.search(
+        r'<g class="fruit-crop" opacity="0"><animate[^>]*'
+        r'keyTimes="([^"]+)" values="([^"]+)"',
+        svg,
+    )
+    assert ripen is not None
+    key_times = [float(t) for t in ripen.group(1).split(';')]
+    assert ripen.group(2) == '0;0;1'
+    assert key_times == [0.0, 1.0 - FRUIT_RIPEN_FRACTION, 1.0]
+    # One shared fade for the whole crop, not one animation per fruit.
+    assert svg.count('class="fruit"') > 1
+    assert svg.count('class="fruit-crop"') == 1
+
+
+def test_timeline_fruit_labels_use_final_counts() -> None:
+    svg = render_timeline_svg(_timeline_with_skills(latecomer=[0, 0, 0, 9]))
+
+    assert 'code-review — 4 calls' in svg
+    assert 'latecomer — 9 calls' in svg
+
+
+def _fruit_spots(svg: str) -> list[tuple[float, float, float]]:
+    """(x, y, radius) per fruit, off the group transform it is drawn with."""
+    return [
+        (float(x), float(y), float(r))
+        for x, y, r in re.findall(
+            r'class="fruit" transform="translate\((-?[\d.]+),(-?[\d.]+)\) '
+            r'scale\(([\d.]+)\)"',
+            svg,
+        )
+    ]
+
+
+def _canopy_disks_in(svg: str) -> list[tuple[float, float, float]]:
+    """(cx, cy, r) per foliage blob, read back off the rendered paths."""
+    disks = []
+    for blob_d in re.findall(r'class="canopy" d="([^"]+)"', svg):
+        numbers = [float(n) for n in re.findall(r'(-?[\d.]+)', blob_d)]
+        points = list(zip(numbers[0::2], numbers[1::2], strict=True))
+        cx = sum(x for x, _ in points) / len(points)
+        cy = sum(y for _, y in points) / len(points)
+        radius = max(math.hypot(x - cx, y - cy) for x, y in points)
+        disks.append((cx, cy, radius))
+    return disks
+
+
+def _fruit_garden() -> GardenData:
+    return GardenData(
+        rings=[],
+        branches=[
+            RepoBranch(
+                repo=f'repo-{i}',
+                sessions=40,
+                lines_added=800,
+                lines_removed=80,
+                output_tokens=5000,
+                input_tokens=1000,
+                cost=1.0,
+                prompts=60,
+            )
+            for i in range(3)
+        ],
+        skills=[
+            SkillFruit(skill=f'skill-{i}', count=(i + 1) * 20)
+            for i in range(6)
+        ],
+    )
+
+
+def test_every_fruit_hangs_inside_the_canopy() -> None:
+    """Fruit used to land in bare sky past the branch tip."""
+    svg = render_svg(_fruit_garden())
+    disks = _canopy_disks_in(svg)
+    spots = _fruit_spots(svg)
+
+    assert spots
+    assert disks
+    stranded = [
+        (x, y)
+        for x, y, _ in spots
+        if not any(math.hypot(x - cx, y - cy) <= r for cx, cy, r in disks)
+    ]
+    assert stranded == []
+
+
+def test_no_fruit_stem_pokes_above_the_canopy() -> None:
+    """The stem clears the greenery long before the fruit does."""
+    svg = render_svg(_fruit_garden())
+    disks = _canopy_disks_in(svg)
+
+    poking = [
+        (x, y)
+        for x, y, radius in _fruit_spots(svg)
+        if not any(
+            math.hypot(x - cx, y + radius * FRUIT_STEM_TIP - cy) <= r
+            for cx, cy, r in disks
+        )
+    ]
+    assert poking == []
+
+
+def test_fruit_do_not_bunch_on_top_of_each_other() -> None:
+    spots = _fruit_spots(render_svg(_fruit_garden()))
+
+    overlapping = [
+        (a, b)
+        for a, b in itertools.combinations(spots, 2)
+        if math.hypot(a[0] - b[0], a[1] - b[1]) < (a[2] + b[2])
+    ]
+    assert overlapping == []
+
+
+def test_fruit_size_tracks_skill_usage() -> None:
+    """A skill you lean on hangs heavier than one you tried once."""
+    assert _fruit_radius(1) < _fruit_radius(10) < _fruit_radius(60)
+    assert _fruit_radius(0) == pytest.approx(FRUIT_RADIUS_MIN)
+    assert _fruit_radius(10_000) == pytest.approx(FRUIT_RADIUS_MAX)
+
+
+def test_rendered_fruit_is_bigger_for_a_heavier_skill() -> None:
+    svg = render_svg(_fruit_garden())
+    drawn = re.findall(
+        r'class="fruit" transform="[^"]*scale\(([\d.]+)\)"><title>'
+        r'([^ ]+) — ([\d,]+) calls?</title>',
+        svg,
+    )
+
+    assert drawn
+    by_skill = {
+        skill: (float(scale), int(count.replace(',', '')))
+        for scale, skill, count in drawn
+    }
+    ranked = sorted(by_skill.values(), key=lambda pair: pair[1])
+    assert [scale for scale, _ in ranked] == sorted(
+        scale for scale, _ in ranked
+    )
+
+
+def test_fruit_shapes_vary_between_skills() -> None:
+    shapes = {_fruit_shape(f'skill-{i}') for i in range(40)}
+
+    assert shapes == set(FRUIT_SHAPES)
+    assert len(FRUIT_SHAPES) > 1
+    # Shape and colour must not move together.
+    pairs = {
+        (_fruit_shape(f'skill-{i}'), _fruit_color(f'skill-{i}'))
+        for i in range(40)
+    }
+    assert len({shape for shape, _ in pairs}) > 1
+    assert len({color for _, color in pairs}) > 1
+
+
+def test_rendered_garden_draws_more_than_one_fruit_shape() -> None:
+    svg = render_svg(_fruit_garden())
+
+    drawn = {
+        shape
+        for shape in FRUIT_SHAPES
+        if FRUIT_SHAPE_BODIES[shape].format(fill='#e74c3c') in svg
+        or FRUIT_SHAPE_BODIES[shape].split('{fill}')[0] in svg
+    }
+    assert len(drawn) > 1
+
+
+def test_fruit_placement_is_deterministic() -> None:
+    garden = _fruit_garden()
+
+    assert _fruit_spots(render_svg(garden)) == _fruit_spots(render_svg(garden))

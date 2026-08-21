@@ -11,16 +11,8 @@ from pathlib import Path
 import pytest
 
 from ccgarden.claude_stats import (
-    BAR_WIDTH,
-    MAX_SPARK_POINTS,
-    UNKNOWN_REPO,
-    CostBreakdown,
-    RepoReport,
-    ModelPrice,
-    ModelUsage,
-    PricingTable,
-    UsageStats,
     bar,
+    BAR_WIDTH,
     box_lines,
     bucket_series,
     build_repo_reports,
@@ -29,6 +21,7 @@ from ccgarden.claude_stats import (
     collect_stats_by_repo,
     collect_stats_from_logs,
     compute_cost,
+    CostBreakdown,
     daily_series,
     ensure_schema,
     find_model_price,
@@ -38,20 +31,28 @@ from ccgarden.claude_stats import (
     iter_days,
     label_repo_roots,
     load_pricing,
+    MAX_SPARK_POINTS,
     merge_stats,
+    ModelPrice,
+    ModelUsage,
     parse_cartoon_stats,
     parse_timestamp,
     peek_cwd,
     percentile,
+    PricingTable,
     record_day,
     record_range,
     record_repo_day,
+    RepoReport,
     resolve_repo_roots,
     run_cartoon_stats,
+    slash_command_skill,
     sparkline,
     stats_as_dict,
     supports_color,
     truncate,
+    UNKNOWN_REPO,
+    UsageStats,
     worktree_sibling_root,
 )
 
@@ -2228,3 +2229,52 @@ def test_re_recording_a_day_replaces_its_hours() -> None:
         'SELECT hour, count FROM daily_hour_usage ORDER BY hour'
     ).fetchall()
     assert rows == [(9, 1)]
+
+
+SKILL_COMMAND = (
+    '<command-message>skill-tree:handoff</command-message>\n'
+    '<command-name>/skill-tree:handoff</command-name>\n'
+    '<command-args>go</command-args>'
+)
+BUILTIN_COMMAND = (
+    '<command-name>/clear</command-name>\n'
+    '            <command-message>clear</command-message>\n'
+    '            <command-args></command-args>'
+)
+
+
+@pytest.mark.parametrize(
+    ('text', 'expected'),
+    [
+        (SKILL_COMMAND, 'skill-tree:handoff'),
+        (BUILTIN_COMMAND, None),
+        ('just a normal prompt', None),
+        ('<command-name>/nope</command-name>', None),
+        (
+            (
+                '<command-message>bro</command-message>'
+                '<command-name>/bro</command-name>'
+            ),
+            'bro',
+        ),
+    ],
+)
+def test_slash_command_skill(text: str, expected: str | None) -> None:
+    assert slash_command_skill(text) == expected
+
+
+def test_tallies_skill_usage_from_slash_commands(tmp_path: Path) -> None:
+    """A `/skill` prompt invokes a skill just as the Skill tool does."""
+    _write_log(
+        tmp_path,
+        [
+            _prompt(SKILL_COMMAND),
+            _prompt(SKILL_COMMAND),
+            _prompt(BUILTIN_COMMAND),
+            _prompt('a real prompt'),
+        ],
+    )
+
+    stats = collect_stats([tmp_path])
+
+    assert stats.skills == Counter({'skill-tree:handoff': 2})

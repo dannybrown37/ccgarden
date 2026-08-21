@@ -16,6 +16,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -289,6 +290,27 @@ def prompt_text(record: dict) -> str:
     return ''
 
 
+_COMMAND_NAME_RE = re.compile(r'<command-name>([^<]*)</command-name>')
+_COMMAND_MESSAGE_RE = re.compile(r'<command-message>')
+
+
+def slash_command_skill(text: str) -> str | None:
+    """The skill a `/name` prompt invoked, or None for a built-in command.
+
+    Skill- and plugin-backed commands emit `<command-message>` ahead of
+    `<command-name>`; the CLI's own built-ins (`/clear`, `/model`) emit the
+    name first. That ordering is the only thing in the transcript that
+    tells the two apart.
+    """
+    name_match = _COMMAND_NAME_RE.search(text)
+    if not name_match:
+        return None
+    message_match = _COMMAND_MESSAGE_RE.search(text)
+    if not message_match or message_match.start() > name_match.start():
+        return None
+    return name_match.group(1).lstrip('/').strip() or None
+
+
 def count_patch_lines(patch: object) -> tuple[int, int]:
     """Added and removed line counts from an Edit/Write structuredPatch."""
     added = removed = 0
@@ -435,10 +457,14 @@ def tally_record(
         tally_turn_duration(stats, record, turn)
     elif is_prompt(record):
         stats.prompts += 1
+        text = prompt_text(record)
         stats.longest_prompt_chars = max(
             stats.longest_prompt_chars,
-            len(prompt_text(record)),
+            len(text),
         )
+        skill = slash_command_skill(text)
+        if skill:
+            stats.skills[skill] += 1
         turn.begin_turn(stamp)
     elif record.get('type') == 'user':
         turn.note_record(stamp, from_model=False)
