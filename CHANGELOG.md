@@ -1,3 +1,9 @@
+## v0.3.4 (2026-09-12)
+
+### Fix
+
+- optimize animation by collapsing key frames and grouping opacity
+
 ## v0.3.3 (2026-08-21)
 
 ### Fix
