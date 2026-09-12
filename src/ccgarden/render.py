@@ -4220,6 +4220,32 @@ def _weighted_key_times(
 EASE_IN_OUT_SPLINE = '0.42 0 0.58 1'
 
 
+def _collapse_keyframes(
+    values: list[str],
+    key_times: list[float],
+) -> tuple[list[str], list[float]]:
+    """Drop interior frames in runs of identical values.
+
+    A run ``A A A B`` keeps the first and last ``A`` (the boundary
+    before ``B``) and drops every ``A`` in between.  The visual result
+    is identical for both linear and spline interpolation because the
+    endpoints of the collapsed segment share the same value.
+    """
+    if len(values) <= 2:  # noqa: PLR2004
+        return values, key_times
+    out_v: list[str] = [values[0]]
+    out_t: list[float] = [key_times[0]]
+    for i in range(1, len(values)):
+        if values[i] == values[i - 1] and i < len(values) - 1:
+            if values[i] != values[i + 1]:
+                out_v.append(values[i])
+                out_t.append(key_times[i])
+        else:
+            out_v.append(values[i])
+            out_t.append(key_times[i])
+    return out_v, out_t
+
+
 def _spline_attrs(key_times: list[float], *, smooth: bool) -> str:
     if not smooth or len(key_times) < TIMELINE_MIN_DAYS_TO_ANIMATE:
         return 'calcMode="linear" '
@@ -4234,7 +4260,10 @@ def _animate_tag(
     duration: float,
     *,
     smooth: bool = False,
+    collapse: bool = True,
 ) -> str:
+    if collapse:
+        values, key_times = _collapse_keyframes(values, key_times)
     return (
         f'<animate attributeName="{attribute}" dur="{duration:.3f}s" '
         f'begin="0s" fill="freeze" '
@@ -4249,7 +4278,11 @@ def _animate_transform_tag(
     values: list[str],
     key_times: list[float],
     duration: float,
+    *,
+    collapse: bool = True,
 ) -> str:
+    if collapse:
+        values, key_times = _collapse_keyframes(values, key_times)
     return (
         f'<animateTransform attributeName="transform" '
         f'type="{transform_type}" dur="{duration:.3f}s" '
@@ -4754,6 +4787,7 @@ def _render_timeline_leaves(  # noqa: PLR0915
             )
 
     rng = random.Random(f'{seed}:leaves')
+    opacity_groups: dict[tuple[str, ...], list[str]] = {}
     for leaf_index in range(leaf_count):
         if has_canopy:
             t, relative_radius, r_frac, blob_angle = _leaf_placement(
@@ -4768,10 +4802,6 @@ def _render_timeline_leaves(  # noqa: PLR0915
         angle = rng.uniform(0, 360)
         color_index = rng.randrange(len(LEAF_COLORS))
 
-        # Track the branch's position every day, not just on the day this
-        # leaf appears -- otherwise the leaf fades in already sitting at its
-        # (eventual) resting spot while the branch under it is still
-        # visibly mid-growth, instead of riding the tip out with it.
         positions = []
         for day_index, (dx, dy) in enumerate(day_vectors):
             cx = origin_x + t * dx
@@ -4808,31 +4838,35 @@ def _render_timeline_leaves(  # noqa: PLR0915
             ),
             day_count - 1,
         )
-        # Combined with the leaf path's own opacity, this both fades the
-        # leaf in on the day it was earned and thins the canopy out as
-        # the garden goes dormant.
-        opacity_values = [
+        opacity_key = tuple(
             f'{_leaf_opacity(vitality[i]) / LEAF_OPACITY_LIVING:.3f}'
             if i >= birth_index
             else '0'
             for i in range(day_count)
-        ]
-        opacity_animate = _animate_tag(
-            'opacity', opacity_values, key_times, duration
         )
-        elements.append(
+        leaf_svg = (
             f'<g class="leaf" '
             f'transform="translate({final_x:.1f},{final_y:.1f})">'
             f'{translate_animate}'
-            f'<g transform="rotate({angle:.1f}) scale({radius:.2f})" '
-            f'opacity="1">'
+            f'<g transform="rotate({angle:.1f}) scale({radius:.2f})">'
             f'<path d="{LEAF_SHAPE_D}" '
             f'fill="url(#{LEAF_PAINT_ID}{color_index})" '
             f'opacity="{LEAF_OPACITY_LIVING}" />'
             f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
             f'opacity="0.5" />'
-            f'{opacity_animate}'
             f'</g>'
+            f'</g>'
+        )
+        opacity_groups.setdefault(opacity_key, []).append(leaf_svg)
+
+    for opacity_key, group_leaves in opacity_groups.items():
+        opacity_animate = _animate_tag(
+            'opacity', list(opacity_key), key_times, duration
+        )
+        elements.append(
+            f'<g opacity="{opacity_key[-1]}">'
+            f'{opacity_animate}'
+            f'{"".join(group_leaves)}'
             f'</g>'
         )
     return ''.join(elements)

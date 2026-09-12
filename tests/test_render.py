@@ -30,6 +30,7 @@ from ccgarden.render import (
     BIRD_MARGIN,
     _bird_positions,
     _bird_size,
+    _collapse_keyframes,
     BIRD_SIZE_MAX,
     BIRD_SIZE_MIN,
     _bird_slots,
@@ -2511,3 +2512,40 @@ def test_fruit_excluded_below_min_calls() -> None:
     svg = render_svg(garden)
     assert 'class="fruit"' not in svg
     assert 'fruit-key-icon' not in svg
+
+
+@pytest.mark.parametrize(
+    ('values', 'key_times', 'expected_v', 'expected_t'),
+    [
+        (['0'], [0.0], ['0'], [0.0]),
+        (['0', '1'], [0.0, 1.0], ['0', '1'], [0.0, 1.0]),
+        (
+            ['0', '0', '0', '1', '1', '1'],
+            [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            ['0', '0', '1', '1'],
+            [0.0, 0.4, 0.6, 1.0],
+        ),
+        (
+            ['0', '0', '0', '0', '0'],
+            [0.0, 0.25, 0.5, 0.75, 1.0],
+            ['0', '0'],
+            [0.0, 1.0],
+        ),
+        (
+            ['a', 'b', 'c'],
+            [0.0, 0.5, 1.0],
+            ['a', 'b', 'c'],
+            [0.0, 0.5, 1.0],
+        ),
+        (
+            ['0', '0', '1', '1', '0.5', '0.5', '1'],
+            [0.0, 0.1, 0.3, 0.5, 0.7, 0.8, 1.0],
+            ['0', '0', '1', '1', '0.5', '0.5', '1'],
+            [0.0, 0.1, 0.3, 0.5, 0.7, 0.8, 1.0],
+        ),
+    ],
+)
+def test_collapse_keyframes(values, key_times, expected_v, expected_t):
+    got_v, got_t = _collapse_keyframes(values, key_times)
+    assert got_v == expected_v
+    assert got_t == expected_t
