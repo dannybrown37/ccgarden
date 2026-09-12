@@ -278,7 +278,7 @@ def _load_hour_days(
 
 
 def load_cartoon_birds(
-    since: str = DEFAULT_CARTOON_SINCE,
+    since: str | None = DEFAULT_CARTOON_SINCE,
 ) -> list[CartoonBird]:
     """Per-adapter cartoon savings, biggest first -- empty if unavailable.
 
@@ -312,7 +312,7 @@ def load_cartoon_birds(
 
 def load_garden_timeline(
     db_path: str,
-    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    cartoon_since: str | None = DEFAULT_CARTOON_SINCE,
     days: DayRange = ALL_DAYS,
 ) -> GardenTimeline:
     conn = sqlite3.connect(db_path)
@@ -323,7 +323,7 @@ def load_garden_timeline(
     return replace(
         timeline,
         birds=load_cartoon_birds(cartoon_since),
-        cartoon_since=cartoon_since,
+        cartoon_since=cartoon_since or '',
     )
 
 
@@ -993,7 +993,7 @@ def _cumulative_skill_days(
 
 def load_garden_data(
     db_path: str,
-    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    cartoon_since: str | None = DEFAULT_CARTOON_SINCE,
     days: DayRange = ALL_DAYS,
 ) -> GardenData:
     conn = sqlite3.connect(db_path)
@@ -1022,7 +1022,7 @@ def load_garden_data(
         model_efforts=model_efforts,
         total_tokens=total_tokens,
         birds=load_cartoon_birds(cartoon_since),
-        cartoon_since=cartoon_since,
+        cartoon_since=cartoon_since or '',
         hour_counts=hour_counts,
         nightness=_nightness(hour_counts),
         vitality=_vitality_today(rings),

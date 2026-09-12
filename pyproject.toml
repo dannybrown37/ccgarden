@@ -75,13 +75,38 @@ inline-quotes = "single"
 # Every query here splices in DayRange.clause(), which is one of three
 # literal strings -- the day bounds themselves are always bound via `?`.
 "src/ccgarden/data.py" = ["S608"]
+# Same pattern -- where clause built internally from date bounds via `?`.
+"src/ccgarden/claude_stats.py" = ["S608"]
 
 [tool.ruff.format]
 quote-style = "single"
 docstring-code-format = true
 
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+# Tests lean on patterns mypy can't verify (regex .group() after an
+# assert, dict literals typed against a broader value type) --
+# ANN is relaxed the same way for these files in ruff.
+module = [
+    "test_cli",
+    "test_claude_stats",
+    "test_data",
+    "test_render",
+    "test_render_utils",
+]
+disable_error_code = [
+    "union-attr",
+    "var-annotated",
+    "arg-type",
+    "attr-defined",
+]
+
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=9.1.1",
     "ruff>=0.16.0",
 ]

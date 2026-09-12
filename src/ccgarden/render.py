@@ -1,16 +1,34 @@
 from __future__ import annotations
 
-import datetime
-import itertools
-import json
 import math
 import random
 import zlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
+from ccgarden.render_utils import (
+    EPSILON,
+    TIMELINE_MIN_DAYS_TO_ANIMATE,
+    _animate_tag,
+    _animate_transform_tag,
+    _blend_hex,
+    _blob_path,
+    _escape_xml,
+    _exact_days_away,
+    _format_day,
+    _frame_weights,
+    _lerp_hex,
+    _rain_intensity,
+    _rain_opacity,
+    _saturated_nightness,
+    _sun_storm_opacity,
+    _timeline_duration,
+    _title,
+    _tt_attr,
+    _weighted_key_times,
+)
+
 from ccgarden.data import (
-    DORMANCY_HALF_LIFE_DAYS,
     CartoonBird,
     DayRing,
     GardenData,
@@ -328,7 +346,7 @@ BIRD_FLOCK_SPACING_Y = 8.0
 # a dark dusk blue -- so they're drawn as a pale, near-white stroke, the
 # only value that reads at this size against that gradient.
 BIRD_COLOR = '#dce7f4'
-EPSILON = 1e-6
+
 BIRD_LEGEND_COLOR = '#3f4b5c'
 BIRD_STROKE_WIDTH = 1.8
 # In the timeline the flock drifts on its own slow loop, out from the tree
@@ -402,10 +420,6 @@ TOOLTIP_PAD = 8.0
 TOOLTIP_FONT_SIZE = 13.0
 TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
 
-TIMELINE_PER_DAY_SECONDS = 0.6
-TIMELINE_MIN_DURATION_S = 5.0
-TIMELINE_MAX_DURATION_S = 18.0
-TIMELINE_MIN_DAYS_TO_ANIMATE = 2
 
 # Extra strip below the legend, holding the scrubber that appears once the
 # initial timelapse finishes playing.
@@ -414,36 +428,6 @@ SCRUBBER_MARGIN = 4.0
 SCRUBBER_TOTAL_HEIGHT = SCRUBBER_HEIGHT + SCRUBBER_MARGIN * 2
 SCRUBBER_Y = LEGEND_BAND_BOTTOM + SCRUBBER_MARGIN
 TIMELINE_VIEWBOX_HEIGHT = LEGEND_BAND_BOTTOM + SCRUBBER_TOTAL_HEIGHT
-
-
-def _escape_xml(text: str) -> str:
-    return text.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-
-def _title(text: str) -> str:
-    """A `<title>` child that browsers render as a native hover tooltip."""
-    return f'<title>{_escape_xml(text)}</title>'
-
-
-def _tt_attr(day_labels: list[str]) -> str:
-    """A `data-tt` attribute: one tooltip string per day, JSON-encoded.
-
-    A static `<title>` can't track which day the timeline animation is
-    currently showing, so `_render_tap_tooltip` reads this instead for any
-    element whose stats grow over the timeline -- picking the entry that
-    matches the SMIL clock's current position rather than always the last.
-    """
-    encoded = _escape_xml(json.dumps(day_labels, ensure_ascii=False)).replace(
-        "'", '&apos;'
-    )
-    return f"data-tt='{encoded}'"
-
-
-def _format_day(day: str) -> str:
-    try:
-        return datetime.date.fromisoformat(day).strftime('%b %-d, %Y')
-    except ValueError:
-        return day
 
 
 def _trunk_half_width(total_sessions: int) -> float:
@@ -657,17 +641,6 @@ LIVING_CANOPY_STOPS = ('#8fcf6f', '#5a9e5a', '#2f5f2f')
 # Leaves thin out as well as turn -- a bare-branch winter needs both.
 LEAF_OPACITY_LIVING = 0.92
 LEAF_OPACITY_DORMANT = 0.12
-
-
-def _blend_hex(dormant: str, living: str, vitality: float) -> str:
-    """Mix two #rrggbb colours, `vitality` 1.0 being fully living."""
-    ratio = max(0.0, min(vitality, 1.0))
-    channels = []
-    for start in (1, 3, 5):
-        cold = int(dormant[start : start + 2], 16)
-        warm = int(living[start : start + 2], 16)
-        channels.append(round(cold + (warm - cold) * ratio))
-    return '#{:02x}{:02x}{:02x}'.format(*channels)
 
 
 def _leaf_color(index: int, vitality: float) -> str:
@@ -1048,7 +1021,6 @@ NIGHT_VEIL_MAX_OPACITY = 0.62
 # ratio would leave every garden in permanent daylight. Saturating at 45%
 # means a genuine night owl gets a genuinely dark sky, while an ordinary
 # evening habit still shows as dusk rather than noon.
-NIGHTNESS_SATURATION = 0.45
 NIGHT_VEIL_COLOR = '#0b1636'
 STAR_COUNT = 70
 STAR_FIELD_BOTTOM = 420.0
@@ -1115,11 +1087,6 @@ def _render_stars(
         f'<g class="stars" opacity="{opacity:.3f}" {group_attrs}>'
         f'{title}{animate}{"".join(stars)}</g>'
     )
-
-
-def _saturated_nightness(nightness: float) -> float:
-    """Raw night share, curved onto 0..1 by `NIGHTNESS_SATURATION`."""
-    return max(0.0, min(nightness / NIGHTNESS_SATURATION, 1.0))
 
 
 def _night_veil_opacity(nightness: float) -> float:
@@ -1209,15 +1176,6 @@ def _render_timeline_night(
 # onset at two days that frame had no rain, no dimmed sun and a season
 # tint too faint to see -- the single longest interval in the replay was
 # also the only one in which nothing whatsoever happened.
-RAIN_ONSET_DAYS = 1.0
-RAIN_FULL_DAYS = 10.0
-# Rain that fades in from nothing spends its first frames looking like a
-# compression artefact, so the first rainy day already gets a real
-# drizzle and the ramp thickens it from there.
-RAIN_MIN_INTENSITY = 0.28
-# What's left of the sun at the height of a downpour.
-SUN_STORM_MIN_OPACITY = 0.15
-RAIN_MAX_OPACITY = 0.7
 RAIN_DROP_COUNT = 150
 RAIN_COLOR = '#cfe0ef'
 RAIN_OVERCAST_COLOR = '#5d707e'
@@ -1231,50 +1189,10 @@ RAIN_FALL_MIN_S = 0.55
 RAIN_FALL_MAX_S = 1.15
 
 
-def _exact_days_away(vitality: float) -> float:
-    """Invert `_daily_vitality`'s decay back into days of silence."""
-    if vitality >= 1.0:
-        return 0.0
-    if vitality <= 0.0:
-        return math.inf
-    return -math.log2(vitality) * DORMANCY_HALF_LIFE_DAYS
-
-
 def _days_away(vitality: float) -> int | None:
     """Whole days of silence, or None for a garden gone past measuring."""
     days = _exact_days_away(vitality)
     return round(days) if math.isfinite(days) else None
-
-
-def _rain_intensity(vitality: float) -> float:
-    """0 while the garden is being tended, ramping to 1 once it's gone."""
-    days = _exact_days_away(vitality)
-    # Tolerantly: a day's vitality round-trips through a log and lands a
-    # hair under its own day count, which at the onset is the difference
-    # between a drizzle and a frame where nothing happens at all.
-    if days < RAIN_ONSET_DAYS - EPSILON:
-        return 0.0
-    if days >= RAIN_FULL_DAYS:
-        return 1.0
-    ramp = (days - RAIN_ONSET_DAYS) / (RAIN_FULL_DAYS - RAIN_ONSET_DAYS)
-    return RAIN_MIN_INTENSITY + (1.0 - RAIN_MIN_INTENSITY) * ramp
-
-
-def _rain_opacity(vitality: float) -> float:
-    return _rain_intensity(vitality) * RAIN_MAX_OPACITY
-
-
-def _sun_storm_opacity(vitality: float) -> float:
-    """How much of the sun survives the cloud, 1.0 in clear weather.
-
-    The sun's height is driven by your token total, which -- like every
-    cumulative shape -- holds still through a lapse. Everything else on
-    screen is moving by then (rain, scud, the wind), so a sun that just
-    stops mid-sky reads as a broken animation rather than as weather.
-    Fading it out is what a storm actually does to a sun, and it is a
-    change the sun can go on making while its position is frozen.
-    """
-    return 1.0 - (1.0 - SUN_STORM_MIN_OPACITY) * _rain_intensity(vitality)
 
 
 def _rain_field() -> list[tuple[float, float, float, float, float]]:
@@ -1552,17 +1470,6 @@ def _render_flowers_on_bushes(
             f'{_render_flower(x, y, size, color, rng)}</g>'
         )
     return ''.join(elements)
-
-
-def _lerp_hex(start: str, end: str, fraction: float) -> str:
-    """Blend two `#rrggbb` colors, `fraction` of the way from start to end."""
-    start_rgb = (int(start[i : i + 2], 16) for i in (1, 3, 5))
-    end_rgb = (int(end[i : i + 2], 16) for i in (1, 3, 5))
-    channels = (
-        round(s + (e - s) * fraction)
-        for s, e in zip(start_rgb, end_rgb, strict=True)
-    )
-    return '#{:02x}{:02x}{:02x}'.format(*channels)
 
 
 def _cloud_gradient_id(effort: str | None) -> str:
@@ -2934,35 +2841,6 @@ def _render_branches_and_leaves(
     return ''.join(elements)
 
 
-def _blob_path(
-    center_x: float,
-    center_y: float,
-    radius: float,
-    rng: random.Random,
-    *,
-    points: int = 9,
-    jitter: float = 0.32,
-) -> str:
-    vertices = []
-    for i in range(points):
-        angle = 2 * math.pi * i / points
-        r = radius * (1 + rng.uniform(-jitter, jitter))
-        vertices.append(
-            (center_x + r * math.cos(angle), center_y + r * math.sin(angle))
-        )
-    start_mid = (
-        (vertices[0][0] + vertices[-1][0]) / 2,
-        (vertices[0][1] + vertices[-1][1]) / 2,
-    )
-    d = f'M {start_mid[0]},{start_mid[1]} '
-    for i in range(points):
-        p1 = vertices[i]
-        p2 = vertices[(i + 1) % points]
-        mid = ((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2)
-        d += f'Q {p1[0]},{p1[1]} {mid[0]},{mid[1]} '
-    return d + 'Z'
-
-
 def _canopy_radius(leaf_count: int) -> float:
     """Leaf-cluster radius, growing quickly at first then leveling off.
 
@@ -4102,194 +3980,6 @@ def render_svg(garden: GardenData) -> str:
 # the calendar day they were earned. The base (non-animated) attribute on
 # every element is always the final, fully-grown value, so a viewer with
 # no SMIL support just sees the finished tree instead of nothing.
-
-
-def _timeline_duration(day_count: float) -> float:
-    """Seconds of replay for a timeline `day_count` frame-weights long.
-
-    Takes a weight rather than a count so the dwell dormant frames get
-    (see `_frame_weights`) buys extra runtime instead of being taken out
-    of the working days' share.
-    """
-    return min(
-        max(day_count * TIMELINE_PER_DAY_SECONDS, TIMELINE_MIN_DURATION_S),
-        TIMELINE_MAX_DURATION_S,
-    )
-
-
-def _key_times(count: int) -> list[float]:
-    if count <= 1:
-        return [0.0]
-    return [index / (count - 1) for index in range(count)]
-
-
-# How much longer a dormant frame is held than a working one. A lapse
-# only exists in the timelapse as the frames `data.py` inserts for it, and
-# at an even cadence those go by faster than the weather they carry reads
-# -- the rain arrives and is gone before the eye finds it. Dwelling on
-# them buys the lapse the time it actually took, without spending frames.
-DORMANT_FRAME_DWELL = 2.5
-
-
-# The frame you come back on gets a dwell of its own. Without it the
-# garden spends seconds drying out and then snaps green again between two
-# ordinary days, which reads as a glitch rather than as a recovery: the
-# way out of a lapse has to take about as long as the way in.
-RECOVERY_FRAME_DWELL = 2.0
-# Extra frame-time per unit of weather change. Sky, rain and sun cover
-# the whole canvas, so a day that swings one of them from nothing to full
-# repaints the entire picture -- at an ordinary day's pace that lands as a
-# slam, however smoothly it is interpolated. Rather than damp the change
-# (the day really was a night shift, or really was the day you came back)
-# the frame simply gets the time the change needs.
-WEATHER_SWING_DWELL = 3.5
-
-
-def _weather_load(nightness: float, vitality: float) -> float:
-    """Total canvas-wide weather on one frame, for pacing purposes.
-
-    Deliberately a sum of the three full-bleed channels rather than any
-    one of them: what makes a transition jarring is how much of the
-    picture it repaints, and darkness, rain and a smothered sun all
-    repaint the same sky.
-    """
-    return (
-        _saturated_nightness(nightness)
-        + _rain_opacity(vitality)
-        + (1.0 - _sun_storm_opacity(vitality))
-    )
-
-
-def _frame_weights(
-    daily_sessions: list[int],
-    daily_nightness: list[float] | None = None,
-    daily_vitality: list[float] | None = None,
-) -> list[float]:
-    """Relative time spent arriving at each frame after the first."""
-    count = len(daily_sessions)
-    nightness = daily_nightness or [0.0] * count
-    vitality = daily_vitality or [1.0] * count
-    loads = [
-        _weather_load(night, life)
-        for night, life in zip(nightness, vitality, strict=True)
-    ]
-    weights = []
-    for index, (previous, sessions) in enumerate(
-        itertools.pairwise(daily_sessions)
-    ):
-        if sessions <= 0:
-            weight = DORMANT_FRAME_DWELL
-        elif previous <= 0:
-            weight = RECOVERY_FRAME_DWELL
-        else:
-            weight = 1.0
-        swing = abs(loads[index + 1] - loads[index])
-        weights.append(weight + WEATHER_SWING_DWELL * swing)
-    return weights
-
-
-def _weighted_key_times(
-    daily_sessions: list[int],
-    daily_nightness: list[float] | None = None,
-    daily_vitality: list[float] | None = None,
-) -> list[float]:
-    """Frame times with the dormant frames held longer than the rest.
-
-    Days you worked all get the same slice; a day with no sessions is a
-    day `data.py` inserted to stand for silence, so it gets `DORMANT_
-    FRAME_DWELL` of one. The seed day carries no interval of its own, so
-    a frame's weight is the time spent *arriving* at it.
-    """
-    if len(daily_sessions) <= 1:
-        return [0.0]
-    weights = _frame_weights(daily_sessions, daily_nightness, daily_vitality)
-    total = sum(weights)
-    times = [0.0]
-    elapsed = 0.0
-    for weight in weights:
-        elapsed += weight
-        times.append(elapsed / total)
-    return times
-
-
-# Ease-in-out, for the channels that sit still and then swing: weather
-# and season hold one value for days and then move, so a linear segment
-# starts and stops with a visible corner. Geometry is deliberately left
-# linear -- growth moves on nearly every frame, and easing each day
-# individually would turn steady growth into a pulse.
-EASE_IN_OUT_SPLINE = '0.42 0 0.58 1'
-
-
-def _collapse_keyframes(
-    values: list[str],
-    key_times: list[float],
-) -> tuple[list[str], list[float]]:
-    """Drop interior frames in runs of identical values.
-
-    A run ``A A A B`` keeps the first and last ``A`` (the boundary
-    before ``B``) and drops every ``A`` in between.  The visual result
-    is identical for both linear and spline interpolation because the
-    endpoints of the collapsed segment share the same value.
-    """
-    if len(values) <= 2:  # noqa: PLR2004
-        return values, key_times
-    out_v: list[str] = [values[0]]
-    out_t: list[float] = [key_times[0]]
-    for i in range(1, len(values)):
-        if values[i] == values[i - 1] and i < len(values) - 1:
-            if values[i] != values[i + 1]:
-                out_v.append(values[i])
-                out_t.append(key_times[i])
-        else:
-            out_v.append(values[i])
-            out_t.append(key_times[i])
-    return out_v, out_t
-
-
-def _spline_attrs(key_times: list[float], *, smooth: bool) -> str:
-    if not smooth or len(key_times) < TIMELINE_MIN_DAYS_TO_ANIMATE:
-        return 'calcMode="linear" '
-    splines = ';'.join([EASE_IN_OUT_SPLINE] * (len(key_times) - 1))
-    return f'calcMode="spline" keySplines="{splines}" '
-
-
-def _animate_tag(
-    attribute: str,
-    values: list[str],
-    key_times: list[float],
-    duration: float,
-    *,
-    smooth: bool = False,
-    collapse: bool = True,
-) -> str:
-    if collapse:
-        values, key_times = _collapse_keyframes(values, key_times)
-    return (
-        f'<animate attributeName="{attribute}" dur="{duration:.3f}s" '
-        f'begin="0s" fill="freeze" '
-        f'{_spline_attrs(key_times, smooth=smooth)}'
-        f'keyTimes="{";".join(f"{t:.4f}" for t in key_times)}" '
-        f'values="{";".join(values)}" />'
-    )
-
-
-def _animate_transform_tag(
-    transform_type: str,
-    values: list[str],
-    key_times: list[float],
-    duration: float,
-    *,
-    collapse: bool = True,
-) -> str:
-    if collapse:
-        values, key_times = _collapse_keyframes(values, key_times)
-    return (
-        f'<animateTransform attributeName="transform" '
-        f'type="{transform_type}" dur="{duration:.3f}s" '
-        f'begin="0s" fill="freeze" calcMode="linear" '
-        f'keyTimes="{";".join(f"{t:.4f}" for t in key_times)}" '
-        f'values="{";".join(values)}" />'
-    )
 
 
 def _trunk_path_d(base_half_width: float) -> str:

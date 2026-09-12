@@ -41,7 +41,7 @@ PRICING_STALE_AFTER_DAYS = 60
 TOKENS_PER_MILLION = 1_000_000
 CARTOON_BINARY = 'cartoon'
 CARTOON_STATS_TIMEOUT_S = 5
-DEFAULT_CARTOON_SINCE = '7d'
+DEFAULT_CARTOON_SINCE: str | None = None
 
 RESET = '\x1b[0m'
 BOLD = '\x1b[1m'
@@ -348,51 +348,17 @@ def model_effort_label(model: str, effort: str | None) -> str:
     return f'{model} ({effort})' if effort else model
 
 
-def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
-    message = record.get('message', {})
-    stats.replies += 1
+def _accumulate_usage(
+    usage: UsageStats | ModelUsage, tokens: tuple[int, int, int, int]
+) -> None:
+    output, input_, cache_read, cache_write = tokens
+    usage.output_tokens += output
+    usage.input_tokens += input_
+    usage.cache_read_tokens += cache_read
+    usage.cache_write_tokens += cache_write
 
-    model = message.get('model')
 
-    usage = message.get('usage') or {}
-    output = usage.get('output_tokens', 0) or 0
-    input_ = usage.get('input_tokens', 0) or 0
-    cache_read = usage.get('cache_read_input_tokens', 0) or 0
-    cache_write = usage.get('cache_creation_input_tokens', 0) or 0
-
-    stats.output_tokens += output
-    stats.input_tokens += input_
-    stats.cache_read_tokens += cache_read
-    stats.cache_write_tokens += cache_write
-
-    if model:
-        stats.models[model] += 1
-        model_usage = stats.model_usage.setdefault(model, ModelUsage())
-        model_usage.output_tokens += output
-        model_usage.input_tokens += input_
-        model_usage.cache_read_tokens += cache_read
-        model_usage.cache_write_tokens += cache_write
-
-    effort = record.get('effort')
-    if effort:
-        stats.efforts[effort] += 1
-
-    if model:
-        combo_label = model_effort_label(model, effort)
-        stats.model_effort_counts[combo_label] += 1
-        combo_usage = stats.model_effort_usage.setdefault(
-            combo_label, ModelUsage()
-        )
-        combo_usage.output_tokens += output
-        combo_usage.input_tokens += input_
-        combo_usage.cache_read_tokens += cache_read
-        combo_usage.cache_write_tokens += cache_write
-
-    if day is not None and output:
-        stats.output_tokens_by_day[day] = (
-            stats.output_tokens_by_day.get(day, 0) + output
-        )
-
+def _tally_content_blocks(stats: UsageStats, message: dict) -> None:
     for block in message.get('content', []):
         if not isinstance(block, dict):
             continue
@@ -406,6 +372,47 @@ def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
                 skill = (block.get('input') or {}).get('skill')
                 if skill:
                     stats.skills[skill] += 1
+
+
+def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
+    message = record.get('message', {})
+    stats.replies += 1
+
+    model = message.get('model')
+
+    usage = message.get('usage') or {}
+    tokens = (
+        usage.get('output_tokens', 0) or 0,
+        usage.get('input_tokens', 0) or 0,
+        usage.get('cache_read_input_tokens', 0) or 0,
+        usage.get('cache_creation_input_tokens', 0) or 0,
+    )
+    output = tokens[0]
+    _accumulate_usage(stats, tokens)
+
+    if model:
+        stats.models[model] += 1
+        model_usage = stats.model_usage.setdefault(model, ModelUsage())
+        _accumulate_usage(model_usage, tokens)
+
+    effort = record.get('effort')
+    if effort:
+        stats.efforts[effort] += 1
+
+    if model:
+        combo_label = model_effort_label(model, effort)
+        stats.model_effort_counts[combo_label] += 1
+        combo_usage = stats.model_effort_usage.setdefault(
+            combo_label, ModelUsage()
+        )
+        _accumulate_usage(combo_usage, tokens)
+
+    if day is not None and output:
+        stats.output_tokens_by_day[day] = (
+            stats.output_tokens_by_day.get(day, 0) + output
+        )
+
+    _tally_content_blocks(stats, message)
 
 
 def track_span(stats: UsageStats, stamp: datetime) -> None:
@@ -1488,17 +1495,20 @@ def cartoon_available() -> bool:
     return shutil.which(CARTOON_BINARY) is not None
 
 
-def run_cartoon_stats(since: str) -> str | None:
-    """Raw `cartoon stats --since <since>` output, or None if unusable.
+def run_cartoon_stats(since: str | None = None) -> str | None:
+    """Raw `cartoon stats` output, or None if unusable.
 
     Cartoon tracks its own token savings in its own state, so this shells
     out to it rather than re-deriving anything from the transcripts.
     """
     if not cartoon_available():
         return None
+    cmd: list[str] = [CARTOON_BINARY, 'stats']
+    if since is not None:
+        cmd += ['--since', since]
     try:
         result = subprocess.run(  # noqa: S603
-            [CARTOON_BINARY, 'stats', '--since', since],
+            cmd,
             capture_output=True,
             text=True,
             timeout=CARTOON_STATS_TIMEOUT_S,
@@ -1544,13 +1554,17 @@ def parse_cartoon_stats(output: str) -> dict:
 CARTOON_ROW_WIDTH = 20
 
 
-def cartoon_lines(stats: dict | None, since: str) -> list[str]:
+def cartoon_lines(
+    stats: dict | None,
+    since: str | None,
+) -> list[str]:
     if not stats or not stats['calls']:
         return []
 
     tokens_saved = humanize(stats['tokens_saved'])
+    label = f'--since {since}' if since else 'all time'
     lines = [
-        f'  cartoon (--since {since})',
+        f'  cartoon ({label})',
         f'    {"calls":<{CARTOON_ROW_WIDTH}} {stats["calls"]:>10,}',
         f'    {"tokens saved":<{CARTOON_ROW_WIDTH}} {tokens_saved:>10}',
     ]
@@ -1641,7 +1655,7 @@ def format_report(
     repos: list[RepoReport] | None = None,
     explain: bool = False,
     cartoon: dict | None = None,
-    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    cartoon_since: str | None = DEFAULT_CARTOON_SINCE,
 ) -> str:
     if width is None:
         width = shutil.get_terminal_size(FALLBACK_TERMINAL_SIZE).columns
@@ -1870,7 +1884,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_CARTOON_SINCE,
         help=(
             'window for `cartoon stats`, e.g. 7d|24h|30m '
-            f'(default: {DEFAULT_CARTOON_SINCE}); skipped if cartoon is '
+            '(default: all time); skipped if cartoon is '
             'not installed'
         ),
     )
@@ -1903,6 +1917,246 @@ def record_today(
         conn.close()
 
 
+def _db_table_exists(
+    conn: sqlite3.Connection,
+    table: str,
+) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    return row is not None
+
+
+def _db_where_clause(
+    since: date | None,
+    until: date | None,
+) -> tuple[str, list[str]]:
+    clauses: list[str] = []
+    params: list[str] = []
+    if since:
+        clauses.append('day >= ?')
+        params.append(since.isoformat())
+    if until:
+        clauses.append('day <= ?')
+        params.append(until.isoformat())
+    where = (' WHERE ' + ' AND '.join(clauses)) if clauses else ''
+    return where, params
+
+
+def _db_load_counters(
+    conn: sqlite3.Connection,
+    where: str,
+    params: list[str],
+    stats: UsageStats,
+) -> None:
+    for mr in conn.execute(
+        f'SELECT model, SUM(output_tokens), SUM(input_tokens),'
+        f' SUM(cache_read_tokens), SUM(cache_write_tokens)'
+        f' FROM daily_model_usage{where}'
+        f' GROUP BY model',
+        params,
+    ):
+        stats.models[mr[0]] = mr[1]
+        stats.model_usage[mr[0]] = ModelUsage(
+            output_tokens=mr[1] or 0,
+            input_tokens=mr[2] or 0,
+            cache_read_tokens=mr[3] or 0,
+            cache_write_tokens=mr[4] or 0,
+        )
+
+    if _db_table_exists(conn, 'daily_model_effort_usage'):
+        for mer in conn.execute(
+            f'SELECT model_effort,'
+            f' SUM(output_tokens), SUM(input_tokens),'
+            f' SUM(cache_read_tokens), SUM(cache_write_tokens)'
+            f' FROM daily_model_effort_usage{where}'
+            f' GROUP BY model_effort',
+            params,
+        ):
+            stats.model_effort_counts[mer[0]] = 1
+            stats.model_effort_usage[mer[0]] = ModelUsage(
+                output_tokens=mer[1] or 0,
+                input_tokens=mer[2] or 0,
+                cache_read_tokens=mer[3] or 0,
+                cache_write_tokens=mer[4] or 0,
+            )
+
+    _db_load_keyed_counter(
+        conn,
+        'daily_tool_usage',
+        'tool',
+        stats.tools,
+        where=where,
+        params=params,
+    )
+    _db_load_keyed_counter(
+        conn,
+        'daily_effort_usage',
+        'effort',
+        stats.efforts,
+        where=where,
+        params=params,
+    )
+    _db_load_keyed_counter(
+        conn,
+        'daily_hour_usage',
+        'hour',
+        stats.hours,
+        where=where,
+        params=params,
+    )
+    _db_load_keyed_counter(
+        conn,
+        'daily_skill_usage',
+        'skill',
+        stats.skills,
+        where=where,
+        params=params,
+    )
+
+
+def _db_load_keyed_counter(
+    conn: sqlite3.Connection,
+    table: str,
+    key_col: str,
+    target: Counter,
+    *,
+    where: str,
+    params: list[str],
+) -> None:
+    if not _db_table_exists(conn, table):
+        return
+    for row in conn.execute(
+        f'SELECT {key_col}, SUM(count) FROM {table}{where} GROUP BY {key_col}',
+        params,
+    ):
+        target[row[0]] = row[1]
+
+
+def _load_stats_from_rows(
+    conn: sqlite3.Connection,
+    where: str,
+    params: list[str],
+) -> UsageStats:
+    stats = UsageStats()
+    row = conn.execute(
+        'SELECT'
+        ' SUM(sessions), SUM(prompts), SUM(replies),'
+        ' SUM(thinking_blocks), SUM(subagent_runs),'
+        ' SUM(lines_added), SUM(lines_removed),'
+        ' SUM(output_tokens), SUM(input_tokens),'
+        ' SUM(cache_read_tokens), SUM(cache_write_tokens),'
+        ' MIN(day), MAX(day)'
+        f' FROM daily_totals{where}',
+        params,
+    ).fetchone()
+    if not row or row[0] is None:
+        return stats
+
+    total_sessions = row[0] or 0
+    stats.session_ids = {str(i) for i in range(total_sessions)}
+    stats.prompts = row[1] or 0
+    stats.replies = row[2] or 0
+    stats.thinking_blocks = row[3] or 0
+    stats.subagent_runs = row[4] or 0
+    stats.lines_added = row[5] or 0
+    stats.lines_removed = row[6] or 0
+    stats.output_tokens = row[7] or 0
+    stats.input_tokens = row[8] or 0
+    stats.cache_read_tokens = row[9] or 0
+    stats.cache_write_tokens = row[10] or 0
+    if row[11]:
+        stats.first_seen = datetime.fromisoformat(row[11])
+    if row[12]:
+        stats.last_seen = datetime.fromisoformat(row[12])
+
+    for day_row in conn.execute(
+        f'SELECT day, output_tokens FROM daily_totals{where}',
+        params,
+    ):
+        stats.output_tokens_by_day[date.fromisoformat(day_row[0])] = day_row[1]
+
+    _db_load_counters(conn, where, params, stats)
+    return stats
+
+
+def collect_stats_from_db(
+    db_path: Path,
+    since: date | None = None,
+    until: date | None = None,
+) -> UsageStats:
+    conn = sqlite3.connect(db_path)
+    try:
+        where, params = _db_where_clause(since, until)
+        return _load_stats_from_rows(conn, where, params)
+    finally:
+        conn.close()
+
+
+def collect_stats_by_repo_from_db(
+    db_path: Path,
+    since: date | None = None,
+    until: date | None = None,
+) -> dict[str, UsageStats]:
+    conn = sqlite3.connect(db_path)
+    try:
+        where, params = _db_where_clause(since, until)
+        overall = _load_stats_from_rows(conn, where, params)
+
+        by_repo: dict[str, UsageStats] = {}
+        repo_where = (
+            where.replace(
+                'WHERE',
+                'WHERE 1=1 AND',
+            )
+            if where
+            else ' WHERE 1=1'
+        )
+
+        for rr in conn.execute(
+            f'SELECT repo, SUM(sessions), SUM(prompts),'
+            f' SUM(replies), SUM(lines_added), SUM(lines_removed),'
+            f' SUM(output_tokens), SUM(input_tokens),'
+            f' SUM(cache_read_tokens), SUM(cache_write_tokens),'
+            f' SUM(cost), MIN(day), MAX(day)'
+            f' FROM daily_repo_usage{where}'
+            f' GROUP BY repo'
+            f' ORDER BY SUM(output_tokens) DESC',
+            params,
+        ):
+            rs = UsageStats()
+            repo_sessions = rr[1] or 0
+            rs.session_ids = {str(i) for i in range(repo_sessions)}
+            rs.prompts = rr[2] or 0
+            rs.replies = rr[3] or 0
+            rs.lines_added = rr[4] or 0
+            rs.lines_removed = rr[5] or 0
+            rs.output_tokens = rr[6] or 0
+            rs.input_tokens = rr[7] or 0
+            rs.cache_read_tokens = rr[8] or 0
+            rs.cache_write_tokens = rr[9] or 0
+            if rr[11]:
+                rs.first_seen = datetime.fromisoformat(rr[11])
+            if rr[12]:
+                rs.last_seen = datetime.fromisoformat(rr[12])
+            for day_row in conn.execute(
+                'SELECT day, output_tokens'
+                ' FROM daily_repo_usage'
+                f'{repo_where} AND repo = ?',
+                [*params, rr[0]],
+            ):
+                rs.output_tokens_by_day[date.fromisoformat(day_row[0])] = (
+                    day_row[1]
+                )
+            rs.model_usage = overall.model_usage
+            by_repo[rr[0]] = rs
+
+        return by_repo
+    finally:
+        conn.close()
+
+
 def print_report(
     roots: list[Path],
     *,
@@ -1910,16 +2164,30 @@ def print_report(
     until: date | None = None,
     pricing_path: Path = DEFAULT_PRICING_PATH,
     db_path: Path = DEFAULT_DB_PATH,
-    cartoon_since: str = DEFAULT_CARTOON_SINCE,
+    cartoon_since: str | None = DEFAULT_CARTOON_SINCE,
     json_output: bool = False,
     color: bool | None = None,
     explain: bool = False,
 ) -> None:
-    """Print the usage report for `roots`, recording today's snapshot too."""
+    """Print the usage report, reading from the db for all-time stats."""
     pricing = load_pricing_or_warn(pricing_path)
 
-    by_repo = collect_stats_by_repo(roots, since=since, until=until)
-    stats = merge_stats(by_repo.values())
+    record_today(roots, db_path, pricing)
+
+    if db_path.exists():
+        by_repo = collect_stats_by_repo_from_db(
+            db_path,
+            since=since,
+            until=until,
+        )
+        stats = collect_stats_from_db(
+            db_path,
+            since=since,
+            until=until,
+        )
+    else:
+        by_repo = collect_stats_by_repo(roots, since=since, until=until)
+        stats = merge_stats(by_repo.values())
     repos = build_repo_reports(by_repo, pricing)
     cost = compute_cost(stats, pricing) if pricing else None
 
@@ -1927,8 +2195,6 @@ def print_report(
     cartoon = (
         parse_cartoon_stats(cartoon_raw) if cartoon_raw is not None else None
     )
-
-    record_today(roots, db_path, pricing)
 
     if json_output:
         print(json.dumps(stats_as_dict(stats, cost, repos, cartoon), indent=2))
