@@ -1,3 +1,9 @@
+## v0.3.5 (2026-09-12)
+
+### Fix
+
+- history now goes back longer than 30 days on ccstats, cartoon matches
+
 ## v0.3.4 (2026-09-12)
 
 ### Fix
