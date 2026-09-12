@@ -1,3 +1,9 @@
+## v0.4.0 (2026-09-12)
+
+### Feat
+
+- add --merge-repo flag, and --record flag to patch old records
+
 ## v0.3.5 (2026-09-12)
 
 ### Fix
