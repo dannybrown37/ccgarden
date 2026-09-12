@@ -68,6 +68,7 @@ class ModelUsage:
     input_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    count: int = 0
 
 
 @dataclass(frozen=True)
@@ -145,6 +146,11 @@ class UsageStats:
     )
     first_seen: datetime | None = None
     last_seen: datetime | None = None
+    # Set only when read back from daily_repo_usage, whose cost column was
+    # priced per-repo at write time -- model_usage isn't stored per repo,
+    # so recomputing cost from it here would price every repo off the
+    # whole run's model mix instead of its own.
+    stored_cost_total: float | None = None
 
     @property
     def sessions(self) -> int:
@@ -405,6 +411,7 @@ def tally_assistant(stats: UsageStats, record: dict, day: date | None) -> None:
         combo_usage = stats.model_effort_usage.setdefault(
             combo_label, ModelUsage()
         )
+        combo_usage.count += 1
         _accumulate_usage(combo_usage, tokens)
 
     if day is not None and output:
@@ -653,18 +660,43 @@ def label_repo_roots(roots: Iterable[Path]) -> dict[Path, str]:
     }
 
 
-def group_logs_by_repo(logs: Iterable[Path]) -> dict[str, list[Path]]:
-    """Bucket transcripts by the repo their launch directory resolves to."""
+def group_logs_by_repo(
+    logs: Iterable[Path],
+    aliases: dict[str, str] | None = None,
+) -> dict[str, list[Path]]:
+    """Bucket transcripts by the repo their launch directory resolves to.
+
+    `aliases` remaps a raw repo label to a merge target so a rename set
+    with ``--merge-repo`` survives a re-record.
+    """
     cwd_by_log = {path: peek_cwd(path) for path in logs}
     root_by_cwd = resolve_repo_roots(cwd_by_log.values())
     labels = label_repo_roots(root_by_cwd.values())
+    alias_map = aliases or {}
 
     grouped: dict[str, list[Path]] = {}
     for path, cwd in cwd_by_log.items():
         root = root_by_cwd.get(cwd) if cwd else None
         label = UNKNOWN_REPO if root is None else labels[root]
+        label = alias_map.get(label, label)
         grouped.setdefault(label, []).append(path)
     return grouped
+
+
+def load_repo_aliases(conn: sqlite3.Connection) -> dict[str, str]:
+    """Return {old: final} with chains (A->B, B->C ⇒ A->C) collapsed."""
+    if not _db_table_exists(conn, 'repo_aliases'):
+        return {}
+    raw = dict(conn.execute('SELECT old, new FROM repo_aliases').fetchall())
+    resolved: dict[str, str] = {}
+    for old, first in raw.items():
+        target = first
+        seen = {old}
+        while target in raw and target not in seen:
+            seen.add(target)
+            target = raw[target]
+        resolved[old] = target
+    return resolved
 
 
 def merge_model_usage(merged: UsageStats, part: UsageStats) -> None:
@@ -681,6 +713,7 @@ def merge_model_usage(merged: UsageStats, part: UsageStats) -> None:
         target.input_tokens += usage.input_tokens
         target.cache_read_tokens += usage.cache_read_tokens
         target.cache_write_tokens += usage.cache_write_tokens
+        target.count += usage.count
 
 
 def merge_durations(merged: UsageStats, part: UsageStats) -> None:
@@ -938,6 +971,7 @@ CREATE TABLE IF NOT EXISTS daily_model_effort_usage (
     input_tokens INTEGER NOT NULL,
     cache_read_tokens INTEGER NOT NULL,
     cache_write_tokens INTEGER NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, model_effort)
 );
 
@@ -956,11 +990,27 @@ CREATE TABLE IF NOT EXISTS daily_repo_usage (
     cost REAL,
     PRIMARY KEY (day, repo)
 );
+
+CREATE TABLE IF NOT EXISTS repo_aliases (
+    old TEXT PRIMARY KEY,
+    new TEXT NOT NULL
+);
 """
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(DAILY_STATS_SCHEMA)
+    columns = {
+        row[1]
+        for row in conn.execute(
+            'PRAGMA table_info(daily_model_effort_usage)',
+        )
+    }
+    if 'count' not in columns:
+        conn.execute(
+            'ALTER TABLE daily_model_effort_usage '
+            'ADD COLUMN count INTEGER NOT NULL DEFAULT 0',
+        )
 
 
 def record_day(
@@ -1064,8 +1114,8 @@ def record_day(
             """
             INSERT INTO daily_model_effort_usage (
                 day, model_effort, output_tokens, input_tokens,
-                cache_read_tokens, cache_write_tokens
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                cache_read_tokens, cache_write_tokens, count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 day_key,
@@ -1074,6 +1124,7 @@ def record_day(
                 usage.input_tokens,
                 usage.cache_read_tokens,
                 usage.cache_write_tokens,
+                usage.count,
             ),
         )
 
@@ -1123,6 +1174,91 @@ def record_repo_day(
         )
 
 
+def merge_repo(conn: sqlite3.Connection, old: str, new: str) -> int:
+    """Fold `old`'s daily_repo_usage rows into `new`, for a repo rename.
+
+    A day where both names already have a row (old logs already replayed
+    under the new name) is summed rather than overwritten, cost included --
+    a plain rename UPDATE would collide on the (day, repo) primary key.
+    Returns the number of days merged.
+    """
+    old_rows = conn.execute(
+        """
+        SELECT day, sessions, prompts, replies, lines_added, lines_removed,
+               output_tokens, input_tokens, cache_read_tokens,
+               cache_write_tokens, cost
+        FROM daily_repo_usage WHERE repo = ?
+        """,
+        (old,),
+    ).fetchall()
+
+    for row in old_rows:
+        day = row[0]
+        existing = conn.execute(
+            """
+            SELECT sessions, prompts, replies, lines_added, lines_removed,
+                   output_tokens, input_tokens, cache_read_tokens,
+                   cache_write_tokens, cost
+            FROM daily_repo_usage WHERE day = ? AND repo = ?
+            """,
+            (day, new),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                'UPDATE daily_repo_usage SET repo = ? '
+                'WHERE day = ? AND repo = ?',
+                (new, day, old),
+            )
+            continue
+
+        old_cost, new_cost = row[10], existing[9]
+        merged_cost = (
+            (old_cost or 0) + (new_cost or 0)
+            if old_cost is not None or new_cost is not None
+            else None
+        )
+        conn.execute(
+            """
+            UPDATE daily_repo_usage SET
+                sessions = ?, prompts = ?, replies = ?,
+                lines_added = ?, lines_removed = ?, output_tokens = ?,
+                input_tokens = ?, cache_read_tokens = ?,
+                cache_write_tokens = ?, cost = ?
+            WHERE day = ? AND repo = ?
+            """,
+            (
+                row[1] + existing[0],
+                row[2] + existing[1],
+                row[3] + existing[2],
+                row[4] + existing[3],
+                row[5] + existing[4],
+                row[6] + existing[5],
+                row[7] + existing[6],
+                row[8] + existing[7],
+                row[9] + existing[8],
+                merged_cost,
+                day,
+                new,
+            ),
+        )
+        conn.execute(
+            'DELETE FROM daily_repo_usage WHERE day = ? AND repo = ?',
+            (day, old),
+        )
+
+    conn.execute(
+        'INSERT OR REPLACE INTO repo_aliases (old, new) VALUES (?, ?)',
+        (old, new),
+    )
+    conn.execute(
+        'UPDATE repo_aliases SET new = ? WHERE new = ?',
+        (new, old),
+    )
+
+    return len(old_rows)
+
+
 def iter_days(since: date, until: date) -> Iterator[date]:
     day = since
     while day <= until:
@@ -1142,7 +1278,7 @@ def record_range(
     Logs are grouped by repo once up front rather than per day, so a long
     backfill doesn't re-sniff every transcript's launch directory.
     """
-    grouped = group_logs_by_repo(find_logs(roots))
+    grouped = group_logs_by_repo(find_logs(roots), load_repo_aliases(conn))
     written = 0
     for day in iter_days(since, until):
         by_repo = collect_grouped_stats(grouped, since=day, until=day)
@@ -1318,16 +1454,38 @@ def totals_and_tokens_lines(
 REPO_LABEL_WIDTH = 16
 
 
+def _repo_cost(
+    stats: UsageStats,
+    pricing: PricingTable | None,
+) -> CostBreakdown | None:
+    if stats.stored_cost_total is not None:
+        return CostBreakdown(
+            total=stats.stored_cost_total,
+            by_category={},
+            by_model={},
+            unpriced_models=set(),
+            expired_models=set(),
+            pricing_as_of=pricing.as_of if pricing else date.today(),
+            pricing_stale=False,
+        )
+    return compute_cost(stats, pricing) if pricing else None
+
+
 def build_repo_reports(
     by_repo: dict[str, UsageStats],
     pricing: PricingTable | None,
 ) -> list[RepoReport]:
-    """Priced per-repo slices, busiest first, with idle repos dropped."""
+    """Priced per-repo slices, busiest first, with idle repos dropped.
+
+    Repos read back from daily_repo_usage carry their own stored_cost_total
+    (priced per-repo at write time) rather than recomputed model_usage,
+    which isn't stored per repo.
+    """
     return [
         RepoReport(
             label=label,
             stats=stats,
-            cost=compute_cost(stats, pricing) if pricing else None,
+            cost=_repo_cost(stats, pricing),
         )
         for label, stats in by_repo.items()
         if stats.session_ids
@@ -1880,6 +2038,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=f'sqlite history db (default: {DEFAULT_DB_PATH})',
     )
     parser.add_argument(
+        '--merge-repo',
+        nargs=2,
+        metavar=('OLD', 'NEW'),
+        help=(
+            'fold OLD repo history into NEW in --db-path (for a rename), '
+            'summing any colliding days, then exit'
+        ),
+    )
+    parser.add_argument(
         '--cartoon-since',
         default=DEFAULT_CARTOON_SINCE,
         help=(
@@ -1969,17 +2136,19 @@ def _db_load_counters(
         for mer in conn.execute(
             f'SELECT model_effort,'
             f' SUM(output_tokens), SUM(input_tokens),'
-            f' SUM(cache_read_tokens), SUM(cache_write_tokens)'
+            f' SUM(cache_read_tokens), SUM(cache_write_tokens),'
+            f' SUM(count)'
             f' FROM daily_model_effort_usage{where}'
             f' GROUP BY model_effort',
             params,
         ):
-            stats.model_effort_counts[mer[0]] = 1
+            stats.model_effort_counts[mer[0]] = mer[5] or 0
             stats.model_effort_usage[mer[0]] = ModelUsage(
                 output_tokens=mer[1] or 0,
                 input_tokens=mer[2] or 0,
                 cache_read_tokens=mer[3] or 0,
                 cache_write_tokens=mer[4] or 0,
+                count=mer[5] or 0,
             )
 
     _db_load_keyed_counter(
@@ -2102,7 +2271,6 @@ def collect_stats_by_repo_from_db(
     conn = sqlite3.connect(db_path)
     try:
         where, params = _db_where_clause(since, until)
-        overall = _load_stats_from_rows(conn, where, params)
 
         by_repo: dict[str, UsageStats] = {}
         repo_where = (
@@ -2136,6 +2304,7 @@ def collect_stats_by_repo_from_db(
             rs.input_tokens = rr[7] or 0
             rs.cache_read_tokens = rr[8] or 0
             rs.cache_write_tokens = rr[9] or 0
+            rs.stored_cost_total = rr[10]
             if rr[11]:
                 rs.first_seen = datetime.fromisoformat(rr[11])
             if rr[12]:
@@ -2149,7 +2318,6 @@ def collect_stats_by_repo_from_db(
                 rs.output_tokens_by_day[date.fromisoformat(day_row[0])] = (
                     day_row[1]
                 )
-            rs.model_usage = overall.model_usage
             by_repo[rr[0]] = rs
 
         return by_repo
@@ -2214,6 +2382,19 @@ def print_report(
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.merge_repo:
+        old, new = args.merge_repo
+        conn = sqlite3.connect(args.db_path)
+        try:
+            ensure_schema(conn)
+            merged = merge_repo(conn, old, new)
+            conn.commit()
+        finally:
+            conn.close()
+        print(f'merged {merged} day(s) of {old!r} into {new!r}')
+        return
+
     roots = args.log_root or [DEFAULT_LOG_ROOT]
 
     missing = [root for root in roots if not root.exists()]

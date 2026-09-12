@@ -19,7 +19,11 @@ from ccgarden.claude_stats import (
     cartoon_lines,
     collect_stats,
     collect_stats_by_repo,
+    collect_stats_by_repo_from_db,
+    collect_stats_from_db,
     collect_stats_from_logs,
+    load_repo_aliases,
+    merge_repo,
     compute_cost,
     CostBreakdown,
     daily_series,
@@ -1208,6 +1212,78 @@ def test_record_day_removes_stale_effort_rows_on_replace() -> None:
     assert efforts == {'high'}
 
 
+def test_record_day_writes_model_effort_count() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    stats = _day_stats(
+        model_effort_usage={
+            'claude-sonnet-5 (high)': ModelUsage(
+                output_tokens=DAY_OUTPUT_TOKENS,
+                count=3,
+            ),
+        },
+    )
+
+    record_day(conn, DAY, stats, cost=None)
+
+    row = conn.execute(
+        'SELECT count FROM daily_model_effort_usage'
+        ' WHERE day = ? AND model_effort = ?',
+        (DAY.isoformat(), 'claude-sonnet-5 (high)'),
+    ).fetchone()
+    assert row == (3,)
+
+
+def test_ensure_schema_adds_count_column_to_existing_table() -> None:
+    """Older dbs created daily_model_effort_usage before `count` existed."""
+    conn = sqlite3.connect(':memory:')
+    conn.execute(
+        """
+        CREATE TABLE daily_model_effort_usage (
+            day TEXT NOT NULL,
+            model_effort TEXT NOT NULL,
+            output_tokens INTEGER NOT NULL,
+            input_tokens INTEGER NOT NULL,
+            cache_read_tokens INTEGER NOT NULL,
+            cache_write_tokens INTEGER NOT NULL,
+            PRIMARY KEY (day, model_effort)
+        )
+        """,
+    )
+
+    ensure_schema(conn)
+
+    columns = {
+        row[1]
+        for row in conn.execute(
+            'PRAGMA table_info(daily_model_effort_usage)',
+        )
+    }
+    assert 'count' in columns
+
+
+def test_collect_stats_from_db_recovers_real_model_effort_counts(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / 'stats.db'
+    conn = sqlite3.connect(db_path)
+    ensure_schema(conn)
+    stats = _day_stats(
+        model_effort_usage={
+            'claude-sonnet-5 (high)': ModelUsage(count=3),
+            'claude-opus-5 (low)': ModelUsage(count=1),
+        },
+    )
+    record_day(conn, DAY, stats, cost=None)
+    conn.commit()
+    conn.close()
+
+    loaded = collect_stats_from_db(db_path)
+
+    assert loaded.model_effort_counts['claude-sonnet-5 (high)'] == 3
+    assert loaded.model_effort_counts['claude-opus-5 (low)'] == 1
+
+
 def test_record_day_writes_per_skill_row() -> None:
     conn = sqlite3.connect(':memory:')
     ensure_schema(conn)
@@ -1557,6 +1633,15 @@ def test_group_logs_by_repo_labels_a_scratch_session_unknown(
     assert set(group_logs_by_repo([log])) == {UNKNOWN_REPO}
 
 
+def test_group_logs_by_repo_applies_aliases(tmp_path: Path) -> None:
+    repo = _make_repo(tmp_path / 'deluge')
+    log = _write_log(tmp_path, [_prompt(cwd=str(repo))])
+
+    grouped = group_logs_by_repo([log], aliases={'deluge': 'deluge-quest'})
+
+    assert set(grouped) == {'deluge-quest'}
+
+
 def test_label_repo_roots_uses_basenames_when_unambiguous() -> None:
     labels = label_repo_roots([Path('/p/dotfiles'), Path('/p/gtd')])
 
@@ -1597,6 +1682,24 @@ def test_merge_stats_matches_collecting_the_same_logs_at_once(
     at_once = collect_stats([tmp_path])
 
     assert stats_as_dict(merged) == stats_as_dict(at_once)
+
+
+def test_merge_stats_sums_model_effort_usage_counts() -> None:
+    """Guards a merge helper used before every db write.
+
+    record_range merges per-repo stats before writing to the db -- the
+    merge must carry ModelUsage.count along, or every backfilled day reads
+    back as a fake count of 1 (or 0) per combo regardless of how many
+    replies actually used it.
+    """
+    part_a = UsageStats(session_ids={'a'})
+    part_a.model_effort_usage['claude-sonnet-5 (high)'] = ModelUsage(count=2)
+    part_b = UsageStats(session_ids={'b'})
+    part_b.model_effort_usage['claude-sonnet-5 (high)'] = ModelUsage(count=3)
+
+    merged = merge_stats([part_a, part_b])
+
+    assert merged.model_effort_usage['claude-sonnet-5 (high)'].count == 5
 
 
 def test_merge_stats_of_nothing_is_an_empty_snapshot() -> None:
@@ -1691,6 +1794,112 @@ def test_record_repo_day_removes_stale_repo_rows_on_replace() -> None:
     assert repos == {'dotfiles'}
 
 
+def test_merge_repo_renames_days_with_no_collision() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(conn, DAY, {'old-name': _day_stats()}, pricing=None)
+
+    merged = merge_repo(conn, 'old-name', 'new-name')
+
+    repos = {
+        row[0] for row in conn.execute('SELECT repo FROM daily_repo_usage')
+    }
+    assert repos == {'new-name'}
+    assert merged == 1
+
+
+def test_merge_repo_sums_colliding_days() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(
+        conn,
+        DAY,
+        {
+            'old-name': _day_stats(),
+            'new-name': _day_stats(output_tokens=GTD_DAY_OUTPUT_TOKENS),
+        },
+        pricing=None,
+    )
+
+    merge_repo(conn, 'old-name', 'new-name')
+
+    rows = conn.execute(
+        'SELECT repo, output_tokens FROM daily_repo_usage',
+    ).fetchall()
+    assert rows == [('new-name', DAY_OUTPUT_TOKENS + GTD_DAY_OUTPUT_TOKENS)]
+
+
+def test_merge_repo_sums_cost_on_colliding_days(tmp_path: Path) -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    pricing = load_pricing(_write_pricing(tmp_path))
+    solo_conn = sqlite3.connect(':memory:')
+    ensure_schema(solo_conn)
+    record_repo_day(
+        solo_conn,
+        DAY,
+        {'new-name': _day_stats()},
+        pricing=pricing,
+    )
+    (solo_cost,) = solo_conn.execute(
+        'SELECT cost FROM daily_repo_usage WHERE repo = ?',
+        ('new-name',),
+    ).fetchone()
+
+    record_repo_day(
+        conn,
+        DAY,
+        {'old-name': _day_stats(), 'new-name': _day_stats()},
+        pricing=pricing,
+    )
+    merge_repo(conn, 'old-name', 'new-name')
+
+    (merged_cost,) = conn.execute(
+        'SELECT cost FROM daily_repo_usage WHERE repo = ?',
+        ('new-name',),
+    ).fetchone()
+    assert merged_cost == pytest.approx(solo_cost * 2)
+
+
+def test_merge_repo_persists_alias() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(conn, DAY, {'old-name': _day_stats()}, pricing=None)
+
+    merge_repo(conn, 'old-name', 'new-name')
+
+    assert load_repo_aliases(conn) == {'old-name': 'new-name'}
+
+
+def test_merge_repo_chains_prior_aliases() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(conn, DAY, {'a': _day_stats()}, pricing=None)
+    merge_repo(conn, 'a', 'b')
+    record_repo_day(conn, DAY, {'b': _day_stats()}, pricing=None)
+    merge_repo(conn, 'b', 'c')
+
+    assert load_repo_aliases(conn) == {'a': 'c', 'b': 'c'}
+
+
+def test_merge_repo_leaves_unrelated_repos_untouched() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(
+        conn,
+        DAY,
+        {'old-name': _day_stats(), 'other': _day_stats()},
+        pricing=None,
+    )
+
+    merge_repo(conn, 'old-name', 'new-name')
+
+    repos = {
+        row[0] for row in conn.execute('SELECT repo FROM daily_repo_usage')
+    }
+    assert repos == {'new-name', 'other'}
+
+
 def test_record_repo_day_prices_each_repo_separately(tmp_path: Path) -> None:
     conn = sqlite3.connect(':memory:')
     ensure_schema(conn)
@@ -1709,6 +1918,35 @@ def test_record_repo_day_prices_each_repo_separately(tmp_path: Path) -> None:
     costs = dict(conn.execute('SELECT repo, cost FROM daily_repo_usage'))
     assert costs['dotfiles'] > 0
     assert costs['gtd'] == 0
+
+
+def test_collect_stats_by_repo_from_db_prices_each_repo_separately(
+    tmp_path: Path,
+) -> None:
+    """Repos must not all inherit the whole run's spend on readback."""
+    db_path = tmp_path / 'stats.db'
+    conn = sqlite3.connect(db_path)
+    ensure_schema(conn)
+    pricing = load_pricing(_write_pricing(tmp_path))
+    record_repo_day(
+        conn,
+        DAY,
+        {
+            'dotfiles': _day_stats(),
+            'gtd': _day_stats(model_usage={}),
+        },
+        pricing=pricing,
+    )
+    conn.commit()
+    conn.close()
+
+    by_repo = collect_stats_by_repo_from_db(db_path)
+    reports = {
+        report.label: report for report in build_repo_reports(by_repo, pricing)
+    }
+
+    assert reports['gtd'].cost.total == 0
+    assert reports['dotfiles'].cost.total > reports['gtd'].cost.total
 
 
 def test_record_repo_day_leaves_cost_null_without_pricing() -> None:
