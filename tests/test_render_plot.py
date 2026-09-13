@@ -39,6 +39,7 @@ from ccgarden.render_plot import (
     _place_beds,
     _place_plants_in_bed,
     _render_bed,
+    _perimeter_points,
     _render_bed_borders,
     _render_furrows,
     _render_irrigation,
@@ -49,6 +50,7 @@ from ccgarden.render_plot import (
     _render_sky_band,
     _render_soil,
     _render_stats_bar,
+    _render_timeline_bed,
     _render_vegetables,
     _timeline_final_garden,
     _tool_glyph,
@@ -450,6 +452,24 @@ def test_render_bed_borders_empty_efforts_renders_nothing() -> None:
     assert _render_bed_borders([], [placement]) == ''
 
 
+def test_perimeter_points_cover_all_four_sides() -> None:
+    """Border plants must ring the whole bed, not just top and bottom."""
+    placement = BedPlacement(repo='dotfiles', x=50.0, y=50.0, w=100.0, h=80.0)
+
+    points = _perimeter_points(placement)
+
+    left_edge = placement.x
+    right_edge = placement.x + placement.w
+    xs = {x for x, _ in points}
+    assert any(x < left_edge for x in xs), 'no points left of the bed'
+    assert any(x > right_edge for x in xs), 'no points right of the bed'
+    top_edge = placement.y
+    bottom_edge = placement.y + placement.h
+    ys = {y for _, y in points}
+    assert any(y < top_edge for y in ys), 'no points above the bed'
+    assert any(y > bottom_edge for y in ys), 'no points below the bed'
+
+
 def test_render_irrigation_connects_beds_when_cache_tokens_present() -> None:
     beds = [
         BedPlacement(repo='a', x=0.0, y=0.0, w=50.0, h=50.0),
@@ -601,6 +621,39 @@ def test_render_plot_timeline_svg_new_repo_starts_at_zero_opacity() -> None:
     )
     assert opacity_animate is not None
     assert opacity_animate.group(1).split(';')[0] == '0'
+
+
+def test_render_timeline_bed_final_size_matches_placement() -> None:
+    """A bed scaled down to fit must animate to its own placement size.
+
+    Not the unscaled size for that session count -- or it grows into
+    its neighbors.
+    """
+    placement = BedPlacement(repo='dotfiles', x=100.0, y=50.0, w=80.0, h=60.0)
+    branch_days = [
+        RepoBranchDay(
+            day='2026-01-01',
+            sessions=200,
+            lines_added=0,
+            lines_removed=0,
+            output_tokens=0,
+            input_tokens=0,
+            cost=0.0,
+        )
+    ]
+
+    svg = _render_timeline_bed(
+        'dotfiles', placement, branch_days, [0.0], 1.0, vitality=1.0
+    )
+
+    width_match = re.search(r'attributeName="width"[^>]*values="([^"]+)"', svg)
+    height_match = re.search(
+        r'attributeName="height"[^>]*values="([^"]+)"', svg
+    )
+    assert width_match is not None
+    assert height_match is not None
+    assert float(width_match.group(1).split(';')[-1]) == placement.w
+    assert float(height_match.group(1).split(';')[-1]) == placement.h
 
 
 def test_render_plot_timeline_svg_includes_scrubber() -> None:

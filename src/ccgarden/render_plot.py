@@ -43,7 +43,7 @@ SKY_BAND_HEIGHT = 60
 STATS_BAR_HEIGHT = 40
 
 PLOT_MARGIN = 16.0
-BED_GAP = 12.0
+BED_GAP = 24.0
 
 SOIL_DORMANT = '#6b4a35'
 SOIL_LIVING = '#4a3524'
@@ -95,7 +95,7 @@ POLLINATOR_SIZE = 5.0
 
 BORDER_PLANT_COLOR = '#5f8a4a'
 BORDER_PLANT_SPACING = 14.0
-BORDER_PLANT_RADIUS = 2.5
+BORDER_PLANT_RADIUS = 3.0
 
 IRRIGATION_COLOR = '#5aa0c9'
 IRRIGATION_TOKENS_SATURATION = 5_000_000
@@ -456,12 +456,19 @@ def _perimeter_points(placement: BedPlacement) -> list[tuple[float, float]]:
     pad = BORDER_PLANT_RADIUS + 2.0
     top = placement.y - pad
     bottom = placement.y + placement.h + pad
+    left = placement.x - pad
+    right = placement.x + placement.w + pad
     points = []
-    steps = max(int(placement.w // BORDER_PLANT_SPACING), 1)
-    for i in range(steps + 1):
-        x = placement.x + (placement.w / steps) * i
+    x_steps = max(int(placement.w // BORDER_PLANT_SPACING), 1)
+    for i in range(x_steps + 1):
+        x = placement.x + (placement.w / x_steps) * i
         points.append((x, top))
         points.append((x, bottom))
+    y_steps = max(int(placement.h // BORDER_PLANT_SPACING), 1)
+    for i in range(1, y_steps):
+        y = placement.y + (placement.h / y_steps) * i
+        points.append((left, y))
+        points.append((right, y))
     return points
 
 
@@ -641,6 +648,10 @@ def _render_timeline_bed(
 
     Fades in on the day its repo first appears.
     """
+    final_sessions = branch_days[-1].sessions
+    raw_final_w, raw_final_h = _bed_dimensions(final_sessions)
+    scale_w = placement.w / raw_final_w if raw_final_w else 1.0
+    scale_h = placement.h / raw_final_h if raw_final_h else 1.0
     widths = []
     heights = []
     opacities = []
@@ -651,8 +662,8 @@ def _render_timeline_bed(
             opacities.append('0')
         else:
             w, h = _bed_dimensions(day.sessions)
-            widths.append(f'{w:.1f}')
-            heights.append(f'{h:.1f}')
+            widths.append(f'{w * scale_w:.1f}')
+            heights.append(f'{h * scale_h:.1f}')
             opacities.append('1')
     color = _blend_hex(BED_SOIL_DORMANT, BED_SOIL_LIVING, vitality)
     return (
