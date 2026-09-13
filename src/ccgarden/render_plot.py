@@ -330,10 +330,10 @@ def _render_plant_glyph(
 def _place_plants_in_bed(
     count: int, placement: BedPlacement, *, seed: str
 ) -> list[tuple[float, float]]:
-    """Seeded jitter grid of plant positions inset within the bed."""
+    """Row-crop grid of plant positions inset within the bed."""
+    del seed
     if count <= 0:
         return []
-    rng = random.Random(seed)
     inset_x = placement.x + PLANT_MARGIN
     inset_y = placement.y + PLANT_MARGIN
     inset_w = max(placement.w - 2 * PLANT_MARGIN, 0.0)
@@ -346,10 +346,8 @@ def _place_plants_in_bed(
     for i in range(count):
         col = i % columns
         row = i // columns
-        cell_x = inset_x + col * cell_w
-        cell_y = inset_y + row * cell_h
-        x = cell_x + rng.uniform(0.1, 0.9) * cell_w
-        y = cell_y + rng.uniform(0.1, 0.9) * cell_h
+        x = inset_x + (col + 0.5) * cell_w
+        y = inset_y + (row + 0.5) * cell_h
         positions.append((x, y))
     return positions
 

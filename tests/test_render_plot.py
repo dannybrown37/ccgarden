@@ -1,3 +1,5 @@
+import itertools
+import math
 import re
 
 import pytest
@@ -343,6 +345,32 @@ def test_place_plants_in_bed_zero_count_returns_empty() -> None:
     placement = BedPlacement(repo='dotfiles', x=0.0, y=0.0, w=200.0, h=150.0)
 
     assert _place_plants_in_bed(0, placement, seed='dotfiles') == []
+
+
+def test_place_plants_in_bed_rows_share_same_y() -> None:
+    """A row of a neatly planted bed sits on one line, not jittered."""
+    placement = BedPlacement(repo='dotfiles', x=0.0, y=0.0, w=200.0, h=150.0)
+
+    positions = _place_plants_in_bed(9, placement, seed='dotfiles')
+
+    columns = math.ceil(math.sqrt(9))
+    for row_start in range(0, 9, columns):
+        row = positions[row_start : row_start + columns]
+        ys = {y for _, y in row}
+        assert len(ys) == 1
+
+
+def test_place_plants_in_bed_columns_evenly_spaced() -> None:
+    """Plants within a row sit at equal spacing, not random offsets."""
+    placement = BedPlacement(repo='dotfiles', x=0.0, y=0.0, w=200.0, h=150.0)
+
+    positions = _place_plants_in_bed(9, placement, seed='dotfiles')
+
+    columns = math.ceil(math.sqrt(9))
+    row = positions[:columns]
+    xs = [x for x, _ in row]
+    gaps = [b - a for a, b in itertools.pairwise(xs)]
+    assert all(math.isclose(gap, gaps[0]) for gap in gaps)
 
 
 def test_render_plants_count_capped_at_density_cap() -> None:
