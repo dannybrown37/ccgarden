@@ -5238,6 +5238,8 @@ def _render_scrubber(
     key_times: list[float],
     duration: float,
     scrubber_top: float = LEGEND_BAND_BOTTOM,
+    *,
+    start_paused_at_end: bool = False,
 ) -> str:
     """A ground-strip slider that seeks the timelapse's own SMIL clock.
 
@@ -5248,6 +5250,13 @@ def _render_scrubber(
     drag, with no separate day-state to keep in sync. Stays hidden and
     non-interactive until the initial playthrough finishes, per the request
     to add the scrubber *after* the animation rather than replacing it.
+
+    `start_paused_at_end` skips that playthrough entirely: the document
+    is paused and seeked to the final day immediately, and the scrubber
+    is revealed right away instead of waiting for a completion that
+    never happens. The plot renderer uses this -- its timelapse auto-play
+    was judged not worth the animation machinery once the scrubber can
+    reach any day directly.
     """
     day_count = len(timeline.days)
     day_labels = [_format_day(day) for day in timeline.days]
@@ -5291,6 +5300,14 @@ def _render_scrubber(
         f'style="opacity:0;pointer-events:none;transition:opacity 0.6s ease;">'
         f'{panel}{foreign}</g>'
     )
+    startup = (
+        '  paused = true;\n'
+        '  svg.pauseAnimations();\n'
+        '  seek(keyTimes.length - 1);\n'
+        '  reveal();\n'
+        if start_paused_at_end
+        else '  window.setTimeout(reveal, duration * 1000 + 150);\n'
+    )
     script = (
         '<script><![CDATA[\n'
         '(function () {\n'
@@ -5314,7 +5331,7 @@ def _render_scrubber(
         '  input.addEventListener("input", function () {\n'
         '    seek(parseInt(input.value, 10));\n'
         '  });\n'
-        '  window.setTimeout(reveal, duration * 1000 + 150);\n'
+        f'{startup}'
         '})();\n'
         ']]></script>'
     )

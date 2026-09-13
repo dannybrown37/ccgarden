@@ -98,6 +98,7 @@ from ccgarden.render import (
     RAIN_DROP_COUNT,
     _rain_field,
     _render_rain,
+    _render_scrubber,
     render_svg,
     render_timeline_svg,
     _sky_body_opacities,
@@ -706,6 +707,36 @@ def test_render_timeline_svg_includes_tap_tooltip_layer() -> None:
     # thing in the document -- an earlier layer would be drawn under the
     # bushes and clouds it describes.
     assert svg.index('id="ccgarden-tooltip"') > svg.index('class="bush"')
+
+
+def test_render_scrubber_default_autoplays_then_reveals() -> None:
+    timeline = GardenTimeline(
+        days=['2026-07-20', '2026-07-21'],
+        daily_sessions=[1, 2],
+        cumulative_sessions=[1, 3],
+        branch_order=[],
+        branch_days={},
+    )
+
+    svg = _render_scrubber(timeline, [0.0, 1.0], 4.0)
+
+    assert 'setTimeout(reveal' in svg
+    assert 'seek(keyTimes.length - 1)' not in svg
+
+
+def test_render_scrubber_start_paused_at_end_skips_the_playthrough() -> None:
+    timeline = GardenTimeline(
+        days=['2026-07-20', '2026-07-21'],
+        daily_sessions=[1, 2],
+        cumulative_sessions=[1, 3],
+        branch_order=[],
+        branch_days={},
+    )
+
+    svg = _render_scrubber(timeline, [0.0, 1.0], 4.0, start_paused_at_end=True)
+
+    assert 'setTimeout(reveal' not in svg
+    assert 'svg.pauseAnimations();\n  seek(keyTimes.length - 1);\n' in svg
 
 
 def test_tap_tooltip_ignores_the_scrubber_subtree() -> None:

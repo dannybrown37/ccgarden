@@ -61,6 +61,8 @@ class RepoBranch:
     input_tokens: int
     cost: float
     prompts: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -136,6 +138,8 @@ class RepoBranchDay:
     input_tokens: int
     cost: float
     prompts: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -562,20 +566,22 @@ def _load_branch_days(
 ) -> tuple[list[str], dict[str, list[RepoBranchDay]]]:
     cursor = conn.execute(
         'SELECT day, repo, sessions, lines_added, lines_removed, '
-        'output_tokens, input_tokens, cost, prompts '
+        'output_tokens, input_tokens, cost, prompts, '
+        'cache_read_tokens, cache_write_tokens '
         f'FROM daily_repo_usage{days_range.clause()} ORDER BY day ASC',
         days_range.params,
     )
 
     day_count = len(days)
     deltas: dict[
-        str, list[tuple[int, int, int, int, int, float, int] | None]
+        str, list[tuple[int, int, int, int, int, float, int, int, int] | None]
     ] = {}
     lines_added_totals: dict[str, int] = {}
 
     for row in cursor.fetchall():
         day, repo, sessions, lines_added, lines_removed = row[:5]
-        output_tokens, input_tokens, cost, prompts = row[5:]
+        output_tokens, input_tokens, cost, prompts = row[5:9]
+        cache_read_tokens, cache_write_tokens = row[9:]
         index = day_index.get(day)
         if index is None:
             continue
@@ -587,6 +593,8 @@ def _load_branch_days(
             input_tokens,
             cost or 0.0,
             prompts,
+            cache_read_tokens,
+            cache_write_tokens,
         )
         lines_added_totals[repo] = (
             lines_added_totals.get(repo, 0) + lines_added
@@ -605,12 +613,13 @@ def _load_branch_days(
 
 def _cumulative_branch_days(
     days: list[str],
-    deltas: list[tuple[int, int, int, int, int, float, int] | None],
+    deltas: list[tuple[int, int, int, int, int, float, int, int, int] | None],
 ) -> list[RepoBranchDay]:
     running_sessions = running_added = running_removed = 0
     running_output = running_input = 0
     running_cost = 0.0
     running_prompts = 0
+    running_cache_read = running_cache_write = 0
     rows = []
     for day, delta in zip(days, deltas, strict=True):
         if delta is not None:
@@ -622,6 +631,8 @@ def _cumulative_branch_days(
                 input_,
                 cost,
                 prompts,
+                cache_read,
+                cache_write,
             ) = delta
             running_sessions += sessions
             running_added += lines_added
@@ -630,6 +641,8 @@ def _cumulative_branch_days(
             running_input += input_
             running_cost += cost
             running_prompts += prompts
+            running_cache_read += cache_read
+            running_cache_write += cache_write
         rows.append(
             RepoBranchDay(
                 day=day,
@@ -640,6 +653,8 @@ def _cumulative_branch_days(
                 input_tokens=running_input,
                 cost=running_cost,
                 prompts=running_prompts,
+                cache_read_tokens=running_cache_read,
+                cache_write_tokens=running_cache_write,
             )
         )
     return rows
@@ -1090,7 +1105,9 @@ def _load_branches(
                SUM(output_tokens),
                SUM(input_tokens),
                SUM(cost),
-               SUM(prompts)
+               SUM(prompts),
+               SUM(cache_read_tokens),
+               SUM(cache_write_tokens)
         FROM daily_repo_usage{days.clause()}
         GROUP BY repo
         ORDER BY SUM(lines_added) DESC
@@ -1107,6 +1124,8 @@ def _load_branches(
             input_tokens=row[5],
             cost=row[6],
             prompts=row[7],
+            cache_read_tokens=row[8],
+            cache_write_tokens=row[9],
         )
         for row in cursor.fetchall()
     ]

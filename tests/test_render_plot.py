@@ -23,19 +23,29 @@ from ccgarden.render_plot import (
     BED_MAX_WIDTH,
     BED_MIN_HEIGHT,
     BED_MIN_WIDTH,
+    LEGEND_ROWS,
     MODEL_COLOR_FAMILIES,
     PLANT_DENSITY_CAP,
+    PLANT_FADE_LEAD_OPACITY,
     PLANT_GLYPHS,
     POLLINATOR_COUNT_CAP,
+    POLLINATOR_FLIT_CLASS,
     SKY_BAND_HEIGHT,
+    SOIL_TEXTURE_PATTERN_ID,
     STATS_BAR_HEIGHT,
     TOTAL_HEIGHT,
     VEGETABLE_DENSITY_CAP,
     VIEWBOX_HEIGHT,
     VIEWBOX_WIDTH,
+    WOOD_GRAIN_PATTERN_ID,
     BedPlacement,
     _bed_dimensions,
+    _bed_tooltip_text,
+    _effort_slug,
     _model_color,
+    _plant_opacity_ramp,
+    _plant_tooltip_text,
+    _render_plot_defs,
     _place_beds,
     _place_plants_in_bed,
     _render_bed,
@@ -44,14 +54,18 @@ from ccgarden.render_plot import (
     _render_furrows,
     _render_irrigation,
     _render_legend,
+    _render_legend_icon,
     _render_plant_glyph,
     _render_plants,
+    _render_plot_wind_style,
     _render_pollinators,
     _render_sky_band,
     _render_soil,
+    _render_sprinkler,
     _render_stats_bar,
     _render_timeline_bed,
     _render_vegetables,
+    _sprinkler_intensity,
     _timeline_final_garden,
     _tool_glyph,
     render_plot_svg,
@@ -238,13 +252,111 @@ def test_place_beds_shrinks_to_fit_when_rows_overflow_area_height() -> None:
 def test_render_bed_includes_repo_title_and_position() -> None:
     placement = BedPlacement(repo='dotfiles', x=10.0, y=20.0, w=80.0, h=60.0)
 
-    bed = _render_bed(placement, vitality=0.7)
+    bed = _render_bed(placement, vitality=0.7, tooltip='dotfiles — stats')
 
     assert 'dotfiles' in bed
     assert 'x="10' in bed
     assert 'y="20' in bed
     assert 'width="80' in bed
     assert 'height="60' in bed
+
+
+def test_bed_tooltip_text_reports_stats() -> None:
+    repo_branch = branch('dotfiles', sessions=3, lines_added=100)
+
+    text = _bed_tooltip_text(repo_branch)
+
+    assert 'dotfiles' in text
+    assert '3 sessions' in text
+    assert '+100' in text
+    assert '$1.00' in text
+
+
+def test_plant_tooltip_text_combines_tool_and_model() -> None:
+    assert _plant_tooltip_text('Bash', 'sonnet-5') == 'Bash · sonnet-5'
+
+
+def test_render_plants_include_tool_model_tooltip() -> None:
+    branches = [branch('dotfiles', sessions=1)]
+    tools = [ToolBush(tool='Bash', count=1)]
+    models = [ModelCloud(model='sonnet-5', output_tokens=1, input_tokens=1)]
+    beds = _place_beds(branches, VIEWBOX_WIDTH, VIEWBOX_HEIGHT)
+
+    svg = _render_plants(branches, tools, models, beds)
+
+    assert 'Bash · sonnet-5' in svg
+
+
+def test_render_timeline_bed_uses_data_tt_per_day() -> None:
+    placement = BedPlacement(repo='dotfiles', x=0.0, y=0.0, w=80.0, h=60.0)
+    branch_days = [
+        RepoBranchDay(
+            day='2026-07-01',
+            sessions=1,
+            lines_added=10,
+            lines_removed=1,
+            output_tokens=100,
+            input_tokens=10,
+            cost=0.1,
+            prompts=2,
+        ),
+        RepoBranchDay(
+            day='2026-07-02',
+            sessions=2,
+            lines_added=20,
+            lines_removed=2,
+            output_tokens=200,
+            input_tokens=20,
+            cost=0.2,
+            prompts=4,
+        ),
+    ]
+
+    bed = _render_timeline_bed(
+        'dotfiles', placement, branch_days, [0.0, 1.0], 10.0, vitality=0.7
+    )
+
+    assert 'data-tt=' in bed
+    assert '1 sessions' in bed
+    assert '2 sessions' in bed
+
+
+def test_render_plot_defs_declares_wood_grain_and_soil_texture() -> None:
+    defs = _render_plot_defs()
+
+    assert f'id="{WOOD_GRAIN_PATTERN_ID}"' in defs
+    assert f'id="{SOIL_TEXTURE_PATTERN_ID}"' in defs
+
+
+def test_render_bed_references_pattern_defs() -> None:
+    placement = BedPlacement(repo='dotfiles', x=10.0, y=20.0, w=80.0, h=60.0)
+
+    bed = _render_bed(placement, vitality=0.7, tooltip='dotfiles — stats')
+
+    assert f'url(#{WOOD_GRAIN_PATTERN_ID})' in bed
+    assert f'url(#{SOIL_TEXTURE_PATTERN_ID})' in bed
+
+
+def test_render_plot_svg_includes_pattern_defs() -> None:
+    garden = GardenData(
+        rings=[],
+        branches=[branch('dotfiles', sessions=3)],
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        models=[],
+        tools=[],
+        efforts=[],
+        skills=[],
+        birds=[],
+        total_tokens=100,
+        nightness=0.0,
+        vitality=1.0,
+    )
+
+    svg = render_plot_svg(garden)
+
+    assert f'id="{WOOD_GRAIN_PATTERN_ID}"' in svg
+    assert f'id="{SOIL_TEXTURE_PATTERN_ID}"' in svg
 
 
 def test_render_furrows_stay_within_bed_bounds() -> None:
@@ -437,6 +549,32 @@ def test_render_pollinators_empty_birds_renders_nothing() -> None:
     assert _render_pollinators([], VIEWBOX_WIDTH, VIEWBOX_HEIGHT) == ''
 
 
+def test_render_pollinators_render_butterfly_shapes() -> None:
+    birds = [CartoonBird(adapter='adapter-0', calls=1, tokens_saved=1)]
+
+    svg = _render_pollinators(birds, VIEWBOX_WIDTH, VIEWBOX_HEIGHT)
+
+    assert svg.count('<ellipse') == 2
+    assert POLLINATOR_FLIT_CLASS in svg
+    assert 'animation-duration' in svg
+    assert 'animation-delay' in svg
+
+
+def test_render_plot_wind_style_declares_flit_keyframes() -> None:
+    style = _render_plot_wind_style()
+
+    assert f'@keyframes {POLLINATOR_FLIT_CLASS}' in style
+    assert f'.{POLLINATOR_FLIT_CLASS}' in style
+
+
+def test_render_plot_svg_includes_wind_style() -> None:
+    garden = GardenData(rings=[], branches=[])
+
+    svg = render_plot_svg(garden)
+
+    assert f'@keyframes {POLLINATOR_FLIT_CLASS}' in svg
+
+
 def test_render_bed_borders_surrounds_bed() -> None:
     placement = BedPlacement(repo='dotfiles', x=50.0, y=50.0, w=100.0, h=80.0)
     efforts = [EffortBush(effort='high', count=10)]
@@ -444,6 +582,24 @@ def test_render_bed_borders_surrounds_bed() -> None:
     svg = _render_bed_borders(efforts, [placement])
 
     assert 'plot-bed-border' in svg
+
+
+def test_render_bed_borders_have_effort_specific_classes() -> None:
+    placement = BedPlacement(repo='dotfiles', x=50.0, y=50.0, w=100.0, h=80.0)
+    efforts = [
+        EffortBush(effort='low', count=1),
+        EffortBush(effort='high', count=10),
+    ]
+
+    svg = _render_bed_borders(efforts, [placement])
+
+    assert 'plot-border-effort-low' in svg
+    assert 'plot-border-effort-high' in svg
+    assert 'plot-border-plant' in svg
+
+
+def test_effort_slug_is_css_safe() -> None:
+    assert _effort_slug('Ultra High') == 'ultra-high'
 
 
 def test_render_bed_borders_empty_efforts_renders_nothing() -> None:
@@ -470,30 +626,66 @@ def test_perimeter_points_cover_all_four_sides() -> None:
     assert any(y > bottom_edge for y in ys), 'no points below the bed'
 
 
-def test_render_irrigation_connects_beds_when_cache_tokens_present() -> None:
+def test_sprinkler_intensity_scales_with_cache_tokens() -> None:
+    assert _sprinkler_intensity(0, 0) == 0.0
+    low = _sprinkler_intensity(1_000, 0)
+    high = _sprinkler_intensity(5_000_000, 5_000_000)
+    assert 0.0 < low < high <= 1.0
+
+
+def test_render_sprinkler_scales_arm_length_with_intensity() -> None:
+    faint = _render_sprinkler(50.0, 50.0, 40.0, 0.1, seed='a')
+    strong = _render_sprinkler(50.0, 50.0, 40.0, 1.0, seed='a')
+
+    def max_arm_length(svg: str) -> float:
+        xs = [abs(float(x)) for x in re.findall(r'x2="(-?[\d.]+)"', svg)]
+        return max(xs)
+
+    assert max_arm_length(strong) > max_arm_length(faint)
+
+
+def test_render_sprinkler_zero_intensity_renders_nothing() -> None:
+    assert _render_sprinkler(50.0, 50.0, 40.0, 0.0, seed='a') == ''
+
+
+def test_render_irrigation_one_sprinkler_per_repo_with_cache_tokens() -> None:
+    branches = [
+        RepoBranch(
+            repo='a',
+            sessions=1,
+            lines_added=1,
+            lines_removed=0,
+            output_tokens=1,
+            input_tokens=1,
+            cost=0.0,
+            cache_read_tokens=500_000,
+            cache_write_tokens=0,
+        ),
+        RepoBranch(
+            repo='b',
+            sessions=1,
+            lines_added=1,
+            lines_removed=0,
+            output_tokens=1,
+            input_tokens=1,
+            cost=0.0,
+        ),
+    ]
     beds = [
         BedPlacement(repo='a', x=0.0, y=0.0, w=50.0, h=50.0),
         BedPlacement(repo='b', x=100.0, y=0.0, w=50.0, h=50.0),
     ]
 
-    svg = _render_irrigation(500_000, 100_000, beds)
+    svg = _render_irrigation(branches, beds)
 
-    assert 'plot-irrigation' in svg
+    assert svg.count('plot-sprinkler') == 1
 
 
 def test_render_irrigation_no_cache_tokens_renders_nothing() -> None:
-    beds = [
-        BedPlacement(repo='a', x=0.0, y=0.0, w=50.0, h=50.0),
-        BedPlacement(repo='b', x=100.0, y=0.0, w=50.0, h=50.0),
-    ]
-
-    assert _render_irrigation(0, 0, beds) == ''
-
-
-def test_render_irrigation_single_bed_renders_nothing() -> None:
+    branches = [branch('a', sessions=1)]
     beds = [BedPlacement(repo='a', x=0.0, y=0.0, w=50.0, h=50.0)]
 
-    assert _render_irrigation(500_000, 100_000, beds) == ''
+    assert _render_irrigation(branches, beds) == ''
 
 
 def test_render_legend_includes_key_sections() -> None:
@@ -504,6 +696,24 @@ def test_render_legend_includes_key_sections() -> None:
     assert 'plot-legend' in svg
     assert 'Bed' in svg
     assert 'Plant' in svg
+
+
+def test_render_legend_includes_mini_icons_not_just_text() -> None:
+    garden = GardenData(rings=[], branches=[])
+
+    svg = _render_legend(garden)
+
+    assert 'plot-legend-icon' in svg
+    assert svg.count('plot-legend-icon') == len(LEGEND_ROWS)
+    assert '<ellipse' in svg
+    assert '<path' in svg
+
+
+@pytest.mark.parametrize('label', [row[0] for row in LEGEND_ROWS])
+def test_render_legend_icon_produces_svg_for_every_row(label: str) -> None:
+    icon = _render_legend_icon(label, 10.0, 10.0)
+
+    assert icon != ''
 
 
 def test_render_plot_svg_extends_canvas_for_legend() -> None:
@@ -653,7 +863,54 @@ def test_render_timeline_bed_final_size_matches_placement() -> None:
     assert width_match is not None
     assert height_match is not None
     assert float(width_match.group(1).split(';')[-1]) == placement.w
-    assert float(height_match.group(1).split(';')[-1]) == placement.h
+
+
+def test_render_timeline_bed_grows_from_center() -> None:
+    placement = BedPlacement(repo='dotfiles', x=100.0, y=50.0, w=80.0, h=60.0)
+    branch_days = [
+        RepoBranchDay(
+            day='2026-01-01',
+            sessions=1,
+            lines_added=0,
+            lines_removed=0,
+            output_tokens=0,
+            input_tokens=0,
+            cost=0.0,
+        ),
+        RepoBranchDay(
+            day='2026-01-02',
+            sessions=200,
+            lines_added=0,
+            lines_removed=0,
+            output_tokens=0,
+            input_tokens=0,
+            cost=0.0,
+        ),
+    ]
+
+    svg = _render_timeline_bed(
+        'dotfiles', placement, branch_days, [0.0, 1.0], 1.0, vitality=1.0
+    )
+
+    x_match = re.search(r'attributeName="x"[^>]*values="([^"]+)"', svg)
+    y_match = re.search(r'attributeName="y"[^>]*values="([^"]+)"', svg)
+    assert x_match is not None
+    assert y_match is not None
+    first_x, last_x = (
+        x_match.group(1).split(';')[0],
+        x_match.group(1).split(';')[-1],
+    )
+    assert float(first_x) != float(last_x)
+    assert float(last_x) == placement.x
+    assert float(y_match.group(1).split(';')[-1]) == placement.y
+
+
+def test_plant_opacity_ramp_fades_in_over_one_day() -> None:
+    day_sessions = [0, 0, 1]
+
+    opacities = _plant_opacity_ramp(day_sessions, plant_index=0)
+
+    assert opacities == ['0', PLANT_FADE_LEAD_OPACITY, '1']
 
 
 def test_render_plot_timeline_svg_includes_scrubber() -> None:
@@ -662,3 +919,17 @@ def test_render_plot_timeline_svg_includes_scrubber() -> None:
     svg = render_plot_timeline_svg(timeline)
 
     assert 'ccgarden-scrubber' in svg
+
+
+def test_render_plot_timeline_svg_starts_paused_on_last_day() -> None:
+    """The plot skips auto-play: it should load paused at the final day.
+
+    Not necessary to watch a replay when the scrubber can jump anywhere
+    directly -- see docs/handoffs/NARRATIVE.md.
+    """
+    timeline = _two_day_timeline()
+
+    svg = render_plot_timeline_svg(timeline)
+
+    assert 'seek(keyTimes.length - 1)' in svg
+    assert 'svg.pauseAnimations();\n  seek' in svg
