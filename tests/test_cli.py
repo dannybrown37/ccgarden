@@ -77,6 +77,55 @@ def test_static_flag_renders_the_still_garden(calls, tmp_path):
     assert 'static_db' in calls
 
 
+def test_style_tree_is_default(calls, tmp_path):
+    target = tmp_path / 'tree.svg'
+
+    ccgarden.main(['--no-open', '--output', str(target)])
+
+    assert target.read_text() == '<svg/>'
+    assert 'static_db' not in calls
+
+
+def test_style_plot_uses_plot_timeline_renderer_by_default(
+    calls, tmp_path, monkeypatch
+):
+    import ccgarden.render_plot
+
+    def _plot_timeline(timeline) -> str:
+        calls['plot_timeline'] = timeline
+        return '<plot-timeline/>'
+
+    monkeypatch.setattr(
+        ccgarden.render_plot, 'render_plot_timeline_svg', _plot_timeline
+    )
+    target = tmp_path / 'plot.svg'
+
+    ccgarden.main(['--no-open', '--style', 'plot', '--output', str(target)])
+
+    assert target.read_text() == '<plot-timeline/>'
+    assert 'timeline_db' in calls
+
+
+def test_style_plot_static_uses_plot_static_renderer(
+    calls, tmp_path, monkeypatch
+):
+    import ccgarden.render_plot
+
+    def _plot(garden) -> str:
+        calls['plot_garden'] = garden
+        return '<plot/>'
+
+    monkeypatch.setattr(ccgarden.render_plot, 'render_plot_svg', _plot)
+    target = tmp_path / 'plot.svg'
+
+    ccgarden.main(
+        ['--no-open', '--style', 'plot', '--static', '--output', str(target)]
+    )
+
+    assert target.read_text() == '<plot/>'
+    assert 'static_db' in calls
+
+
 def test_db_flag_selects_the_database(calls, tmp_path):
     ccgarden.main(['--no-open', '--db', str(tmp_path / 'other.db')])
 

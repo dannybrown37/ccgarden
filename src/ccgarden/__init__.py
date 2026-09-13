@@ -88,6 +88,15 @@ def build_parser() -> argparse.ArgumentParser:
         help='render one still garden instead of the animated timelapse',
     )
     parser.add_argument(
+        '--style',
+        choices=['tree', 'plot'],
+        default='tree',
+        help=(
+            'garden style: a tree silhouette, or a top-down plot of '
+            'raised beds (default: tree)'
+        ),
+    )
+    parser.add_argument(
         '--since', type=parse_day, metavar='YYYY-MM-DD', help='earliest day'
     )
     parser.add_argument(
@@ -113,7 +122,19 @@ def main(argv: list[str] | None = None) -> None:
         since=args.since.isoformat() if args.since else None,
         until=args.until.isoformat() if args.until else None,
     )
-    if args.static:
+    if args.style == 'plot':
+        from ccgarden.render_plot import (
+            render_plot_svg,
+            render_plot_timeline_svg,
+        )
+
+        if args.static:
+            svg = render_plot_svg(load_garden_data(str(args.db), days=days))
+        else:
+            svg = render_plot_timeline_svg(
+                load_garden_timeline(str(args.db), days=days)
+            )
+    elif args.static:
         svg = render_svg(load_garden_data(str(args.db), days=days))
     else:
         svg = render_timeline_svg(
