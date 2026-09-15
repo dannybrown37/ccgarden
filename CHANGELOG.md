@@ -1,3 +1,16 @@
+## v0.5.0 (2026-09-15)
+
+### Feat
+
+- **plot**: add --style plot option for a top-down garden look. It's currently ugly but we shall work on that.
+
+### Fix
+
+- revert all --plot nonsense, it looked terrible. Add a --delete-repo flag to clean bad data
+- don't animate plot (for now at least). Have timeline scrubber but fix to last day on render
+- bed width in plot
+- **plot**: 'plants' are now more lined up in each bed
+
 ## v0.4.0 (2026-09-12)
 
 ### Feat
