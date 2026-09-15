@@ -28,7 +28,9 @@ def calls(monkeypatch, tmp_path):
     monkeypatch.setattr(ccgarden, 'print_report', _report)
     monkeypatch.setattr(ccgarden, 'load_garden_timeline', _timeline)
     monkeypatch.setattr(ccgarden, 'load_garden_data', _static)
-    monkeypatch.setattr(ccgarden, 'render_timeline_svg', lambda _t: '<svg/>')
+    monkeypatch.setattr(
+        ccgarden, 'render_timeline_svg', lambda _t, **_kw: '<svg/>'
+    )
     monkeypatch.setattr(ccgarden, 'render_svg', lambda _g: '<static/>')
     monkeypatch.setattr(
         ccgarden, 'DEFAULT_OUTPUT_PATH', tmp_path / 'ccgarden.svg'
@@ -86,46 +88,6 @@ def test_style_tree_is_default(calls, tmp_path):
     assert 'static_db' not in calls
 
 
-def test_style_plot_uses_plot_timeline_renderer_by_default(
-    calls, tmp_path, monkeypatch
-):
-    import ccgarden.render_plot
-
-    def _plot_timeline(timeline) -> str:
-        calls['plot_timeline'] = timeline
-        return '<plot-timeline/>'
-
-    monkeypatch.setattr(
-        ccgarden.render_plot, 'render_plot_timeline_svg', _plot_timeline
-    )
-    target = tmp_path / 'plot.svg'
-
-    ccgarden.main(['--no-open', '--style', 'plot', '--output', str(target)])
-
-    assert target.read_text() == '<plot-timeline/>'
-    assert 'timeline_db' in calls
-
-
-def test_style_plot_static_uses_plot_static_renderer(
-    calls, tmp_path, monkeypatch
-):
-    import ccgarden.render_plot
-
-    def _plot(garden) -> str:
-        calls['plot_garden'] = garden
-        return '<plot/>'
-
-    monkeypatch.setattr(ccgarden.render_plot, 'render_plot_svg', _plot)
-    target = tmp_path / 'plot.svg'
-
-    ccgarden.main(
-        ['--no-open', '--style', 'plot', '--static', '--output', str(target)]
-    )
-
-    assert target.read_text() == '<plot/>'
-    assert 'static_db' in calls
-
-
 def test_db_flag_selects_the_database(calls, tmp_path):
     ccgarden.main(['--no-open', '--db', str(tmp_path / 'other.db')])
 
@@ -173,6 +135,62 @@ def test_log_root_is_repeatable(calls, tmp_path):
 
     roots, _kwargs = calls['reports'][0]
     assert roots == [tmp_path / 'a', tmp_path / 'b']
+
+
+def test_poster_passes_start_paused_at_end(calls, monkeypatch):  # noqa: ARG001
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        ccgarden,
+        'render_timeline_svg',
+        lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
+    )
+    ccgarden.main(['--no-open', '--poster'])
+
+    assert captured.get('start_paused_at_end') is True
+
+
+def test_poster_default_is_false(calls, monkeypatch):  # noqa: ARG001
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        ccgarden,
+        'render_timeline_svg',
+        lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
+    )
+    ccgarden.main(['--no-open'])
+
+    assert captured.get('start_paused_at_end') is False
+
+
+def test_exclude_repo_filters_timeline(calls, monkeypatch):  # noqa: ARG001
+    from ccgarden.data import GardenTimeline, RepoBranchDay
+
+    fake_timeline = GardenTimeline(
+        days=['2026-01-01'],
+        daily_sessions=[1],
+        cumulative_sessions=[1],
+        branch_order=['keep', 'drop'],
+        branch_days={
+            'keep': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
+            'drop': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
+        },
+    )
+    monkeypatch.setattr(
+        ccgarden,
+        'load_garden_timeline',
+        lambda *_a, **_kw: fake_timeline,
+    )
+    passed: dict[str, list[str]] = {}
+    monkeypatch.setattr(
+        ccgarden,
+        'render_timeline_svg',
+        lambda t, **_kw: (
+            passed.update(branch_order=t.branch_order),
+            '<svg/>',
+        )[1],
+    )
+    ccgarden.main(['--no-open', '--exclude-repo', 'drop'])
+
+    assert passed['branch_order'] == ['keep']
 
 
 def test_version_flag_exits_cleanly(capsys):

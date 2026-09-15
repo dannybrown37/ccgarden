@@ -63,6 +63,11 @@ class RepoBranch:
     prompts: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    first_day: str = ''
+    last_day: str = ''
+    # Session counts by "model (effort)" label, e.g. "claude-opus-5 (high)".
+    # Empty for repos recorded before daily_repo_model_effort_usage existed.
+    model_effort_counts: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1093,6 +1098,26 @@ def _load_rings(
     ]
 
 
+def _load_repo_model_effort_counts(
+    conn: sqlite3.Connection, days: DayRange = ALL_DAYS
+) -> dict[str, dict[str, int]]:
+    if not _table_exists(conn, 'daily_repo_model_effort_usage'):
+        return {}
+    cursor = conn.execute(
+        f"""
+        SELECT repo, model_effort, SUM(count)
+        FROM daily_repo_model_effort_usage{days.clause()}
+        GROUP BY repo, model_effort
+        HAVING SUM(count) > 0
+        """,
+        days.params,
+    )
+    counts: dict[str, dict[str, int]] = {}
+    for repo, model_effort, count in cursor.fetchall():
+        counts.setdefault(repo, {})[model_effort] = count
+    return counts
+
+
 def _load_branches(
     conn: sqlite3.Connection, days: DayRange = ALL_DAYS
 ) -> list[RepoBranch]:
@@ -1107,13 +1132,16 @@ def _load_branches(
                SUM(cost),
                SUM(prompts),
                SUM(cache_read_tokens),
-               SUM(cache_write_tokens)
+               SUM(cache_write_tokens),
+               MIN(day),
+               MAX(day)
         FROM daily_repo_usage{days.clause()}
         GROUP BY repo
         ORDER BY SUM(lines_added) DESC
         """,
         days.params,
     )
+    model_effort_counts = _load_repo_model_effort_counts(conn, days)
     return [
         RepoBranch(
             repo=row[0],
@@ -1126,6 +1154,32 @@ def _load_branches(
             prompts=row[7],
             cache_read_tokens=row[8],
             cache_write_tokens=row[9],
+            first_day=row[10] or '',
+            last_day=row[11] or '',
+            model_effort_counts=model_effort_counts.get(row[0], {}),
         )
         for row in cursor.fetchall()
     ]
+
+
+def exclude_repos_from_data(garden: GardenData, repos: set[str]) -> GardenData:
+    """Return a copy with the named repos stripped from branches."""
+    return replace(
+        garden,
+        branches=[b for b in garden.branches if b.repo not in repos],
+    )
+
+
+def exclude_repos_from_timeline(
+    timeline: GardenTimeline, repos: set[str]
+) -> GardenTimeline:
+    """Return a copy with the named repos stripped from branch data."""
+    return replace(
+        timeline,
+        branch_order=[r for r in timeline.branch_order if r not in repos],
+        branch_days={
+            r: days
+            for r, days in timeline.branch_days.items()
+            if r not in repos
+        },
+    )

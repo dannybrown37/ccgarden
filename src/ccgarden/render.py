@@ -5338,7 +5338,11 @@ def _render_scrubber(
     return ground_fill + group + script
 
 
-def render_timeline_svg(timeline: GardenTimeline) -> str:
+def render_timeline_svg(
+    timeline: GardenTimeline,
+    *,
+    start_paused_at_end: bool = False,
+) -> str:
     """Render the tree with its real day-by-day history replayed as growth.
 
     Every shape's geometry is driven by a SMIL <animate> keyed to the
@@ -5346,6 +5350,9 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
     grows exactly the way the underlying repos actually grew. Falls back
     to the plain (non-animated) render when there's fewer than two days
     of history to replay.
+
+    ``start_paused_at_end`` skips the auto-play and shows the finished
+    tree with the scrubber revealed immediately — the "poster" mode.
     """
     day_count = len(timeline.days)
     if day_count < TIMELINE_MIN_DAYS_TO_ANIMATE:
@@ -5436,6 +5443,7 @@ def render_timeline_svg(timeline: GardenTimeline) -> str:
             key_times,
             duration,
             scrubber_top=LEGEND_BAND_BOTTOM + fk_height,
+            start_paused_at_end=start_paused_at_end,
         )
         + _render_tap_tooltip(
             TIMELINE_VIEWBOX_HEIGHT + fk_height,

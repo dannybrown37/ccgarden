@@ -91,6 +91,18 @@ CREATE TABLE daily_model_effort_usage (
     PRIMARY KEY (day, model_effort)
 );
 
+CREATE TABLE daily_repo_model_effort_usage (
+    day TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    model_effort TEXT NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, repo, model_effort)
+);
+
 CREATE TABLE IF NOT EXISTS daily_hour_usage (
     day TEXT NOT NULL,
     hour INTEGER NOT NULL,
@@ -118,6 +130,7 @@ def make_db(
     model_effort_rows: list[tuple] | None = None,
     hour_rows: list[tuple] | None = None,
     skill_rows: list[tuple] | None = None,
+    repo_model_effort_rows: list[tuple] | None = None,
 ) -> str:
     db_path = tmp_path / 'ccstats.db'
     conn = sqlite3.connect(db_path)
@@ -153,6 +166,10 @@ def make_db(
     conn.executemany(
         'INSERT INTO daily_skill_usage VALUES (?,?,?)',
         skill_rows or [],
+    )
+    conn.executemany(
+        'INSERT INTO daily_repo_model_effort_usage VALUES (?,?,?,?,?,?,?,?)',
+        repo_model_effort_rows or [],
     )
     conn.commit()
     conn.close()
@@ -209,6 +226,29 @@ def model_effort_row(
 
 def effort_row(day: str, effort: str, *, count: int = 0) -> tuple:
     return (day, effort, count)
+
+
+def repo_model_effort_row(
+    day: str,
+    repo: str,
+    model_effort: str,
+    *,
+    output_tokens: int = 0,
+    input_tokens: int = 0,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+    count: int = 0,
+) -> tuple:
+    return (
+        day,
+        repo,
+        model_effort,
+        output_tokens,
+        input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        count,
+    )
 
 
 def totals_row(
@@ -407,8 +447,67 @@ def test_load_branches_aggregates_same_repo_across_days(
             output_tokens=1200,
             input_tokens=120,
             cost=4.0,
+            first_day='2026-07-26',
+            last_day='2026-07-27',
         )
     ]
+
+
+def test_load_branches_aggregates_model_effort_mix_per_repo(
+    tmp_path: Path,
+) -> None:
+    repo_rows = [
+        repo_row(
+            '2026-07-26',
+            'dotfiles',
+            sessions=2,
+            lines_added=1,
+            lines_removed=0,
+        ),
+    ]
+    repo_model_effort_rows = [
+        repo_model_effort_row(
+            '2026-07-26', 'dotfiles', 'claude-opus-5 (high)', count=1
+        ),
+        repo_model_effort_row(
+            '2026-07-27', 'dotfiles', 'claude-opus-5 (high)', count=2
+        ),
+        repo_model_effort_row(
+            '2026-07-26', 'dotfiles', 'claude-sonnet-5 (low)', count=1
+        ),
+    ]
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[],
+        repo_rows=repo_rows,
+        repo_model_effort_rows=repo_model_effort_rows,
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert garden.branches[0].model_effort_counts == {
+        'claude-opus-5 (high)': 3,
+        'claude-sonnet-5 (low)': 1,
+    }
+
+
+def test_load_branches_model_effort_mix_defaults_empty(
+    tmp_path: Path,
+) -> None:
+    repo_rows = [
+        repo_row(
+            '2026-07-26',
+            'dotfiles',
+            sessions=1,
+            lines_added=1,
+            lines_removed=0,
+        )
+    ]
+    db_path = make_db(tmp_path, totals_rows=[], repo_rows=repo_rows)
+
+    garden = load_garden_data(db_path)
+
+    assert garden.branches[0].model_effort_counts == {}
 
 
 def test_load_branches_sorts_by_lines_added_descending(tmp_path: Path) -> None:
@@ -1108,3 +1207,43 @@ def test_vitality_decays_with_days_since_the_last_active_day() -> None:
     assert vitality[0] == pytest.approx(1.0)
     assert vitality[1] == pytest.approx(0.5, abs=0.01)
     assert vitality[2] == pytest.approx(0.25, abs=0.01)
+
+
+def test_exclude_repos_from_data_strips_named_repos() -> None:
+    from ccgarden.data import GardenData, RepoBranch, exclude_repos_from_data
+
+    garden = GardenData(
+        rings=[],
+        branches=[
+            RepoBranch('keep', 1, 0, 0, 0, 0, 0.0),
+            RepoBranch('drop', 1, 0, 0, 0, 0, 0.0),
+        ],
+    )
+
+    result = exclude_repos_from_data(garden, {'drop'})
+
+    assert [b.repo for b in result.branches] == ['keep']
+
+
+def test_exclude_repos_from_timeline_strips_named_repos() -> None:
+    from ccgarden.data import (
+        GardenTimeline,
+        RepoBranchDay,
+        exclude_repos_from_timeline,
+    )
+
+    timeline = GardenTimeline(
+        days=['2026-01-01'],
+        daily_sessions=[1],
+        cumulative_sessions=[1],
+        branch_order=['keep', 'drop'],
+        branch_days={
+            'keep': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
+            'drop': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
+        },
+    )
+
+    result = exclude_repos_from_timeline(timeline, {'drop'})
+
+    assert result.branch_order == ['keep']
+    assert 'drop' not in result.branch_days

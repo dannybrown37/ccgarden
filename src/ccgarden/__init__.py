@@ -5,7 +5,13 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from ccgarden.claude_stats import DEFAULT_LOG_ROOT, parse_day, print_report
-from ccgarden.data import DayRange, load_garden_data, load_garden_timeline
+from ccgarden.data import (
+    DayRange,
+    exclude_repos_from_data,
+    exclude_repos_from_timeline,
+    load_garden_data,
+    load_garden_timeline,
+)
 from ccgarden.render import render_svg, render_timeline_svg
 
 DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
@@ -88,15 +94,6 @@ def build_parser() -> argparse.ArgumentParser:
         help='render one still garden instead of the animated timelapse',
     )
     parser.add_argument(
-        '--style',
-        choices=['tree', 'plot'],
-        default='tree',
-        help=(
-            'garden style: a tree silhouette, or a top-down plot of '
-            'raised beds (default: tree)'
-        ),
-    )
-    parser.add_argument(
         '--since', type=parse_day, metavar='YYYY-MM-DD', help='earliest day'
     )
     parser.add_argument(
@@ -106,6 +103,21 @@ def build_parser() -> argparse.ArgumentParser:
         '--no-record',
         action='store_true',
         help="render the db as-is, without recording today's snapshot first",
+    )
+    parser.add_argument(
+        '--poster',
+        action='store_true',
+        help=(
+            'render the finished tree with the scrubber visible '
+            'but no auto-play animation (for embedding on a website)'
+        ),
+    )
+    parser.add_argument(
+        '--exclude-repo',
+        action='append',
+        dest='exclude_repos',
+        metavar='REPO',
+        help='exclude a repo from the render; repeatable',
     )
     return parser
 
@@ -122,24 +134,17 @@ def main(argv: list[str] | None = None) -> None:
         since=args.since.isoformat() if args.since else None,
         until=args.until.isoformat() if args.until else None,
     )
-    if args.style == 'plot':
-        from ccgarden.render_plot import (
-            render_plot_svg,
-            render_plot_timeline_svg,
-        )
-
-        if args.static:
-            svg = render_plot_svg(load_garden_data(str(args.db), days=days))
-        else:
-            svg = render_plot_timeline_svg(
-                load_garden_timeline(str(args.db), days=days)
-            )
-    elif args.static:
-        svg = render_svg(load_garden_data(str(args.db), days=days))
+    excluded = set(args.exclude_repos or [])
+    if args.static:
+        garden = load_garden_data(str(args.db), days=days)
+        if excluded:
+            garden = exclude_repos_from_data(garden, excluded)
+        svg = render_svg(garden)
     else:
-        svg = render_timeline_svg(
-            load_garden_timeline(str(args.db), days=days)
-        )
+        timeline = load_garden_timeline(str(args.db), days=days)
+        if excluded:
+            timeline = exclude_repos_from_timeline(timeline, excluded)
+        svg = render_timeline_svg(timeline, start_paused_at_end=args.poster)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(svg)

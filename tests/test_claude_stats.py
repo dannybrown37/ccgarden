@@ -1113,6 +1113,7 @@ def test_ensure_schema_creates_tables() -> None:
         'daily_totals',
         'daily_model_usage',
         'daily_repo_usage',
+        'daily_repo_model_effort_usage',
         'daily_tool_usage',
         'daily_effort_usage',
         'daily_skill_usage',
@@ -1794,6 +1795,83 @@ def test_record_repo_day_removes_stale_repo_rows_on_replace() -> None:
     assert repos == {'dotfiles'}
 
 
+def test_record_repo_day_writes_per_repo_model_effort_row() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    stats = _day_stats()
+    stats.model_effort_usage['claude-opus-5 (high)'] = ModelUsage(
+        output_tokens=DAY_OUTPUT_TOKENS, count=3
+    )
+
+    record_repo_day(conn, DAY, {'dotfiles': stats}, pricing=None)
+
+    row = conn.execute(
+        'SELECT output_tokens, count FROM daily_repo_model_effort_usage'
+        ' WHERE day = ? AND repo = ? AND model_effort = ?',
+        (DAY.isoformat(), 'dotfiles', 'claude-opus-5 (high)'),
+    ).fetchone()
+    assert row == (DAY_OUTPUT_TOKENS, 3)
+
+
+def test_record_repo_day_removes_stale_model_effort_rows_on_replace() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    stats = _day_stats()
+    stats.model_effort_usage['claude-opus-5 (high)'] = ModelUsage(count=1)
+    record_repo_day(conn, DAY, {'dotfiles': stats}, pricing=None)
+
+    record_repo_day(conn, DAY, {'dotfiles': _day_stats()}, pricing=None)
+
+    rows = conn.execute(
+        'SELECT model_effort FROM daily_repo_model_effort_usage'
+        ' WHERE day = ? AND repo = ?',
+        (DAY.isoformat(), 'dotfiles'),
+    ).fetchall()
+    assert rows == []
+
+
+def test_merge_repo_sums_model_effort_rows_on_collision() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    old_stats = _day_stats()
+    old_stats.model_effort_usage['claude-opus-5 (high)'] = ModelUsage(
+        output_tokens=100, count=2
+    )
+    new_stats = _day_stats()
+    new_stats.model_effort_usage['claude-opus-5 (high)'] = ModelUsage(
+        output_tokens=200, count=3
+    )
+    record_repo_day(conn, DAY, {'old-name': old_stats}, pricing=None)
+    record_repo_day(conn, DAY, {'new-name': new_stats}, pricing=None)
+
+    merge_repo(conn, 'old-name', 'new-name')
+
+    row = conn.execute(
+        'SELECT output_tokens, count FROM daily_repo_model_effort_usage'
+        ' WHERE day = ? AND repo = ? AND model_effort = ?',
+        (DAY.isoformat(), 'new-name', 'claude-opus-5 (high)'),
+    ).fetchone()
+    assert row == (300, 5)
+
+
+def test_merge_repo_renames_model_effort_rows_with_no_collision() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    stats = _day_stats()
+    stats.model_effort_usage['claude-opus-5 (high)'] = ModelUsage(count=1)
+    record_repo_day(conn, DAY, {'old-name': stats}, pricing=None)
+
+    merge_repo(conn, 'old-name', 'new-name')
+
+    rows = {
+        row[0]
+        for row in conn.execute(
+            'SELECT repo FROM daily_repo_model_effort_usage',
+        )
+    }
+    assert rows == {'new-name'}
+
+
 def test_merge_repo_renames_days_with_no_collision() -> None:
     conn = sqlite3.connect(':memory:')
     ensure_schema(conn)
@@ -1898,6 +1976,36 @@ def test_merge_repo_leaves_unrelated_repos_untouched() -> None:
         row[0] for row in conn.execute('SELECT repo FROM daily_repo_usage')
     }
     assert repos == {'new-name', 'other'}
+
+
+def test_delete_repo_removes_all_rows() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+    record_repo_day(
+        conn,
+        DAY,
+        {'target': _day_stats(), 'keep': _day_stats()},
+        pricing=None,
+    )
+
+    from ccgarden.claude_stats import delete_repo
+
+    deleted = delete_repo(conn, 'target')
+
+    assert deleted > 0
+    repos = {
+        row[0] for row in conn.execute('SELECT repo FROM daily_repo_usage')
+    }
+    assert repos == {'keep'}
+
+
+def test_delete_repo_returns_zero_for_missing() -> None:
+    conn = sqlite3.connect(':memory:')
+    ensure_schema(conn)
+
+    from ccgarden.claude_stats import delete_repo
+
+    assert delete_repo(conn, 'nonexistent') == 0
 
 
 def test_record_repo_day_prices_each_repo_separately(tmp_path: Path) -> None:

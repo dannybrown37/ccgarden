@@ -991,6 +991,18 @@ CREATE TABLE IF NOT EXISTS daily_repo_usage (
     PRIMARY KEY (day, repo)
 );
 
+CREATE TABLE IF NOT EXISTS daily_repo_model_effort_usage (
+    day TEXT NOT NULL,
+    repo TEXT NOT NULL,
+    model_effort TEXT NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, repo, model_effort)
+);
+
 CREATE TABLE IF NOT EXISTS repo_aliases (
     old TEXT PRIMARY KEY,
     new TEXT NOT NULL
@@ -1173,6 +1185,31 @@ def record_repo_day(
             ),
         )
 
+        conn.execute(
+            'DELETE FROM daily_repo_model_effort_usage '
+            'WHERE day = ? AND repo = ?',
+            (day_key, repo),
+        )
+        for label, usage in stats.model_effort_usage.items():
+            conn.execute(
+                """
+                INSERT INTO daily_repo_model_effort_usage (
+                    day, repo, model_effort, output_tokens, input_tokens,
+                    cache_read_tokens, cache_write_tokens, count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    day_key,
+                    repo,
+                    label,
+                    usage.output_tokens,
+                    usage.input_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_write_tokens,
+                    usage.count,
+                ),
+            )
+
 
 def merge_repo(conn: sqlite3.Connection, old: str, new: str) -> int:
     """Fold `old`'s daily_repo_usage rows into `new`, for a repo rename.
@@ -1247,6 +1284,8 @@ def merge_repo(conn: sqlite3.Connection, old: str, new: str) -> int:
             (day, old),
         )
 
+    _merge_repo_model_effort(conn, old, new)
+
     conn.execute(
         'INSERT OR REPLACE INTO repo_aliases (old, new) VALUES (?, ?)',
         (old, new),
@@ -1257,6 +1296,80 @@ def merge_repo(conn: sqlite3.Connection, old: str, new: str) -> int:
     )
 
     return len(old_rows)
+
+
+def _merge_repo_model_effort(
+    conn: sqlite3.Connection, old: str, new: str
+) -> None:
+    """Fold `old`'s daily_repo_model_effort_usage rows into `new`.
+
+    Same collision handling as `merge_repo`'s daily_repo_usage pass, one
+    level finer-grained (day, repo, model_effort) rather than (day, repo).
+    """
+    old_rows = conn.execute(
+        """
+        SELECT day, model_effort, output_tokens, input_tokens,
+               cache_read_tokens, cache_write_tokens, count
+        FROM daily_repo_model_effort_usage WHERE repo = ?
+        """,
+        (old,),
+    ).fetchall()
+
+    for row in old_rows:
+        day, model_effort = row[0], row[1]
+        existing = conn.execute(
+            """
+            SELECT output_tokens, input_tokens, cache_read_tokens,
+                   cache_write_tokens, count
+            FROM daily_repo_model_effort_usage
+            WHERE day = ? AND repo = ? AND model_effort = ?
+            """,
+            (day, new, model_effort),
+        ).fetchone()
+
+        if existing is None:
+            conn.execute(
+                'UPDATE daily_repo_model_effort_usage SET repo = ? '
+                'WHERE day = ? AND repo = ? AND model_effort = ?',
+                (new, day, old, model_effort),
+            )
+            continue
+
+        conn.execute(
+            """
+            UPDATE daily_repo_model_effort_usage SET
+                output_tokens = ?, input_tokens = ?, cache_read_tokens = ?,
+                cache_write_tokens = ?, count = ?
+            WHERE day = ? AND repo = ? AND model_effort = ?
+            """,
+            (
+                row[2] + existing[0],
+                row[3] + existing[1],
+                row[4] + existing[2],
+                row[5] + existing[3],
+                row[6] + existing[4],
+                day,
+                new,
+                model_effort,
+            ),
+        )
+        conn.execute(
+            'DELETE FROM daily_repo_model_effort_usage '
+            'WHERE day = ? AND repo = ? AND model_effort = ?',
+            (day, old, model_effort),
+        )
+
+
+def delete_repo(conn: sqlite3.Connection, repo: str) -> int:
+    """Permanently remove all history for *repo* from every repo table."""
+    tables = ['daily_repo_usage', 'daily_repo_model_effort_usage']
+    total = 0
+    for table in tables:
+        cursor = conn.execute(f'DELETE FROM {table} WHERE repo = ?', (repo,))
+        total += cursor.rowcount
+    conn.execute('DELETE FROM repo_aliases WHERE old = ?', (repo,))
+    conn.execute('DELETE FROM repo_aliases WHERE new = ?', (repo,))
+    return total
 
 
 def iter_days(since: date, until: date) -> Iterator[date]:
@@ -2047,6 +2160,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        '--delete-repo',
+        metavar='REPO',
+        help=(
+            'permanently delete all history for REPO from --db-path, then exit'
+        ),
+    )
+    parser.add_argument(
         '--cartoon-since',
         default=DEFAULT_CARTOON_SINCE,
         help=(
@@ -2382,6 +2502,18 @@ def print_report(
 
 def main() -> None:
     args = build_parser().parse_args()
+
+    if args.delete_repo:
+        repo = args.delete_repo
+        conn = sqlite3.connect(args.db_path)
+        try:
+            ensure_schema(conn)
+            deleted = delete_repo(conn, repo)
+            conn.commit()
+        finally:
+            conn.close()
+        print(f'deleted {deleted} row(s) for {repo!r}')
+        return
 
     if args.merge_repo:
         old, new = args.merge_repo
