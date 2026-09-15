@@ -31,7 +31,7 @@ def calls(monkeypatch, tmp_path):
     monkeypatch.setattr(
         ccgarden, 'render_timeline_svg', lambda _t, **_kw: '<svg/>'
     )
-    monkeypatch.setattr(ccgarden, 'render_svg', lambda _g: '<static/>')
+    monkeypatch.setattr(ccgarden, 'render_svg', lambda _g, **_kw: '<static/>')
     monkeypatch.setattr(
         ccgarden, 'DEFAULT_OUTPUT_PATH', tmp_path / 'ccgarden.svg'
     )

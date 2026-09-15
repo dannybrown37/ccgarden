@@ -467,101 +467,33 @@ def test_render_svg_caps_bushes_at_max_bushes() -> None:
     assert svg.count('class="bush"') == MAX_BUSHES
 
 
-def timeline_with_sunflowers(
-    prompts_by_day: dict[str, list[int]],
-) -> GardenTimeline:
-    day_count = len(next(iter(prompts_by_day.values())))
-    days = [f'2026-07-{20 + i}' for i in range(day_count)]
-    return GardenTimeline(
-        days=days,
-        daily_sessions=[1] * day_count,
-        cumulative_sessions=list(range(1, day_count + 1)),
-        branch_order=list(prompts_by_day),
-        branch_days={
-            repo: [
-                RepoBranchDay(
-                    day=day,
-                    sessions=1,
-                    lines_added=10,
-                    lines_removed=1,
-                    output_tokens=100,
-                    input_tokens=10,
-                    cost=0.1,
-                    prompts=prompts,
-                )
-                for day, prompts in zip(days, counts, strict=True)
-            ]
-            for repo, counts in prompts_by_day.items()
-        },
+@pytest.mark.parametrize('hour_count', [1, 2, 5])
+def test_render_svg_draws_one_sunflower_per_active_hour(
+    hour_count,
+) -> None:
+    hour_counts = dict.fromkeys(range(hour_count), 50)
+    garden = GardenData(
+        rings=[],
+        branches=[],
+        hour_counts=hour_counts,
     )
-
-
-def sunflower_branch(repo: str, *, prompts: int) -> RepoBranch:
-    return RepoBranch(
-        repo=repo,
-        sessions=1,
-        lines_added=100,
-        lines_removed=10,
-        output_tokens=1000,
-        input_tokens=100,
-        cost=1.0,
-        prompts=prompts,
-    )
-
-
-@pytest.mark.parametrize('repo_count', [1, 2, 5])
-def test_render_svg_draws_one_sunflower_per_repo(repo_count: int) -> None:
-    branches = [
-        sunflower_branch(f'repo-{i}', prompts=50) for i in range(repo_count)
-    ]
-    garden = GardenData(rings=[], branches=branches)
 
     svg = render_svg(garden)
 
-    assert svg.count('class="sunflower"') == repo_count
+    assert svg.count('class="sunflower"') == hour_count
 
 
-def test_render_svg_draws_no_sunflower_for_a_repo_without_prompts() -> None:
+def test_render_svg_draws_no_sunflower_for_zero_prompt_hours() -> None:
     garden = GardenData(
         rings=[],
-        branches=[
-            sunflower_branch('quiet', prompts=0),
-            sunflower_branch('busy', prompts=10),
-        ],
+        branches=[],
+        hour_counts={9: 0, 14: 10},
     )
 
     svg = render_svg(garden)
 
     assert svg.count('class="sunflower"') == 1
-    assert 'busy — 10 prompts' in svg
-    assert 'quiet' not in svg.split('class="sunflower"')[1]
-
-
-def test_render_svg_caps_sunflowers_at_max_sunflowers() -> None:
-    branches = [
-        sunflower_branch(f'repo-{i}', prompts=50)
-        for i in range(MAX_SUNFLOWERS + 4)
-    ]
-    garden = GardenData(rings=[], branches=branches)
-
-    svg = render_svg(garden)
-
-    assert svg.count('class="sunflower"') == MAX_SUNFLOWERS
-
-
-def test_render_svg_keeps_the_tallest_sunflowers_when_capped() -> None:
-    branches = [
-        sunflower_branch(f'repo-{i}', prompts=i + 1)
-        for i in range(MAX_SUNFLOWERS + 2)
-    ]
-    garden = GardenData(rings=[], branches=branches)
-
-    svg = render_svg(garden)
-
-    # repo-0 and repo-1 have the fewest prompts, so they lose their slot.
-    assert 'repo-0 — 1 prompts' not in svg
-    assert 'repo-1 — 2 prompts' not in svg
-    assert f'repo-{MAX_SUNFLOWERS + 1} — {MAX_SUNFLOWERS + 2} prompts' in svg
+    assert '2 PM' in svg
 
 
 def test_sunflower_height_grows_with_prompts() -> None:
@@ -591,26 +523,34 @@ def test_sunflowers_alternate_between_the_two_flank_bands() -> None:
     assert sides == [False, True, False, True]
 
 
-def test_render_timeline_svg_sunflower_carries_per_day_prompt_totals() -> None:
-    timeline = timeline_with_sunflowers({'ccgarden': [2, 5, 9]})
+def test_render_timeline_svg_sunflowers_fade_in() -> None:
+    timeline = GardenTimeline(
+        days=['2026-07-20', '2026-07-21', '2026-07-22'],
+        daily_sessions=[1, 1, 1],
+        cumulative_sessions=[1, 2, 3],
+        branch_order=['ccgarden'],
+        branch_days={
+            'ccgarden': [
+                RepoBranchDay(
+                    day=d,
+                    sessions=1,
+                    lines_added=10,
+                    lines_removed=1,
+                    output_tokens=100,
+                    input_tokens=10,
+                    cost=0.1,
+                    prompts=5,
+                )
+                for d in ['2026-07-20', '2026-07-21', '2026-07-22']
+            ],
+        },
+        hour_counts={10: 15},
+    )
 
     svg = render_timeline_svg(timeline)
 
-    group = svg.split('class="sunflower"')[1].split('</g>')[0]
-    assert 'ccgarden — 2 prompts' in group
-    assert 'ccgarden — 5 prompts' in group
-    assert 'ccgarden — 9 prompts' in group
-
-
-def test_render_timeline_svg_grows_sunflowers_out_of_the_ground() -> None:
-    timeline = timeline_with_sunflowers({'ccgarden': [1, 500, 1500]})
-
-    svg = render_timeline_svg(timeline)
-
-    block = svg.split('class="sunflower"')[1]
-    scales = [float(value) for value in _animate_values(block, 'transform')]
-    assert scales == sorted(scales)
-    assert scales[-1] == pytest.approx(1.0)
+    assert 'class="sunflowers"' in svg
+    assert '10 AM' in svg
 
 
 def _flower_blocks(svg: str) -> list[str]:
@@ -2311,9 +2251,11 @@ def test_timeline_fruit_ripens_only_at_the_end() -> None:
     key_times = [float(t) for t in ripen.group(1).split(';')]
     assert ripen.group(2) == '0;0;1'
     assert key_times == [0.0, 1.0 - FRUIT_RIPEN_FRACTION, 1.0]
-    # One shared fade for the whole crop, not one animation per fruit.
+    # One fade per limb, not one animation per individual fruit.
     assert svg.count('class="fruit"') > 1
-    assert svg.count('class="fruit-crop"') == 1
+    fruit_crop_count = svg.count('class="fruit-crop"')
+    assert fruit_crop_count >= 1
+    assert fruit_crop_count <= svg.count('class="fruit"')
 
 
 def test_timeline_fruit_labels_use_final_counts() -> None:

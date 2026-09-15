@@ -119,6 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
         metavar='REPO',
         help='exclude a repo from the render; repeatable',
     )
+    parser.add_argument(
+        '--web',
+        action='store_true',
+        help=(
+            'render a garden for embedding on a web page: '
+            'light wind animation, no scrubber, date range in the legend'
+        ),
+    )
     return parser
 
 
@@ -135,11 +143,14 @@ def main(argv: list[str] | None = None) -> None:
         until=args.until.isoformat() if args.until else None,
     )
     excluded = set(args.exclude_repos or [])
-    if args.static:
+    if args.static or args.web:
         garden = load_garden_data(str(args.db), days=days)
         if excluded:
             garden = exclude_repos_from_data(garden, excluded)
-        svg = render_svg(garden)
+        date_range = None
+        if args.web and garden.rings:
+            date_range = (garden.rings[0].day, garden.rings[-1].day)
+        svg = render_svg(garden, date_range=date_range)
     else:
         timeline = load_garden_timeline(str(args.db), days=days)
         if excluded:

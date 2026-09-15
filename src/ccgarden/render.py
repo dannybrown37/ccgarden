@@ -191,8 +191,8 @@ FRUIT_EXTENT_REACH = math.hypot(FRUIT_EXTENT_HALF_WIDTH, FRUIT_EXTENT_BOTTOM)
 FRUIT_PLACEMENT_TRIES = 24
 # Centre-to-centre spacing as a multiple of the two radii summed: just
 # clear of touching, so a crop reads as scattered rather than as clumps.
-FRUIT_MIN_GAP = 1.05
-MAX_FRUIT_PER_LIMB = 12
+FRUIT_MIN_GAP = 1.55
+MAX_FRUIT_PER_LIMB = 8
 
 # One cloud per model used, sized by how many tokens that model produced.
 CLOUD_MARGIN = 24.0
@@ -296,20 +296,16 @@ BUSH_PUFFS = (
     (0.28, -0.55, 0.5),
 )
 
-# One sunflower per repo, standing as tall as that repo's prompt count.
-# Prompts are the one thing *you* contribute rather than the tree, so they
-# get a plant of their own instead of another dimension on the branches.
-# Sunflowers are planted in the two flank bands either side of the tree --
-# the widest stretch of empty ground in the frame, and far enough from the
-# trunk that a tall stalk rises into open sky rather than into the canopy.
-MAX_SUNFLOWERS = 8
+# One sunflower per active hour of the day — a sundial along the ground.
+# Height = how many prompts fell in that hour.
+MAX_SUNFLOWERS = 24
 SUNFLOWER_MARGIN = 20.0
 SUNFLOWER_BAND_WIDTH = 150.0
-SUNFLOWER_HEIGHT_MIN = 70.0
-SUNFLOWER_HEIGHT_MAX = 200.0
-SUNFLOWER_PROMPTS_SATURATION = 1500
-SUNFLOWER_GROWTH_EXPONENT = 0.6
-SUNFLOWER_PETAL_COUNT = 12
+SUNFLOWER_HEIGHT_MIN = 30.0
+SUNFLOWER_HEIGHT_MAX = 120.0
+SUNFLOWER_PROMPTS_SATURATION = 800
+SUNFLOWER_GROWTH_EXPONENT = 0.5
+SUNFLOWER_PETAL_COUNT = 10
 SUNFLOWER_PETAL_COLORS = ('#f5b731', '#f0a92a', '#ffc94d')
 SUNFLOWER_STALK_COLOR = '#4f8f4f'
 
@@ -1586,6 +1582,41 @@ def _clamp_cloud_position(
     return x, y
 
 
+def _clear_cloud_of_sun(
+    x: float,
+    y: float,
+    radius: float,
+    sun: tuple[float, float, float],
+) -> tuple[float, float]:
+    """Push a cloud radially out of the sun's halo.
+
+    If pushing hits the viewbox edge and the cloud is still inside
+    the keepout, mirror it to the opposite side of the sky.
+    """
+    sun_x, sun_y, sun_radius = sun
+    half_width, up, down = _cloud_extent()
+    keepout = sun_radius * SUN_HALO_RADIUS_FACTOR + radius * half_width
+    dx, dy = x - sun_x, y - sun_y
+    distance = math.hypot(dx, dy)
+    if distance >= keepout:
+        return x, y
+    if distance < EPSILON:
+        dx, dy, distance = 0.0, 1.0, 1.0
+    scale = keepout / distance
+    pushed_x = sun_x + dx * scale
+    pushed_y = sun_y + dy * scale
+    x_lo = half_width * radius
+    x_hi = VIEWBOX_WIDTH - half_width * radius
+    y_lo = up * radius
+    y_hi = GROUND_Y - down * radius
+    pushed_x = min(max(pushed_x, x_lo), x_hi)
+    pushed_y = min(max(pushed_y, y_lo), y_hi)
+    if math.hypot(pushed_x - sun_x, pushed_y - sun_y) < keepout:
+        pushed_x = VIEWBOX_WIDTH - x if sun_x > VIEWBOX_WIDTH / 2 else x
+        pushed_x = min(max(pushed_x, x_lo), x_hi)
+    return pushed_x, pushed_y
+
+
 def _render_cloud(
     cx: float, cy: float, radius: float, seed: str, effort: str | None = None
 ) -> str:
@@ -1669,7 +1700,10 @@ def _cloud_positions(count: int) -> list[tuple[float, float]]:
     return positions
 
 
-def _render_clouds(models: list[ModelCloud]) -> str:
+def _render_clouds(
+    models: list[ModelCloud],
+    sun: tuple[float, float, float],
+) -> str:
     if not models:
         return ''
     positions = _cloud_positions(len(models))
@@ -1678,6 +1712,7 @@ def _render_clouds(models: list[ModelCloud]) -> str:
         total_tokens = model_cloud.output_tokens + model_cloud.input_tokens
         radius = _cloud_radius(total_tokens)
         cx, cy = _clamp_cloud_position(x, y, radius)
+        cx, cy = _clear_cloud_of_sun(cx, cy, radius, sun)
         effort = _effort_from_cloud_label(model_cloud.model)
         title = _title(f'{model_cloud.model} — {total_tokens:,} tokens')
         elements.append(
@@ -2300,27 +2335,39 @@ def _render_sunflower(
     )
 
 
-def _sunflower_repos(branches: list[RepoBranch]) -> list[RepoBranch]:
-    """The repos that get a sunflower, tallest (most prompts) first."""
-    with_prompts = [branch for branch in branches if branch.prompts > 0]
-    with_prompts.sort(key=lambda branch: branch.prompts, reverse=True)
-    return with_prompts[:MAX_SUNFLOWERS]
+_NOON = 12
 
 
-def _render_sunflowers(branches: list[RepoBranch]) -> str:
-    repos = _sunflower_repos(branches)
-    if not repos:
+def _hour_label(hour: int) -> str:
+    if hour == 0:
+        return f'{_NOON} AM'
+    if hour < _NOON:
+        return f'{hour} AM'
+    if hour == _NOON:
+        return f'{_NOON} PM'
+    return f'{hour - _NOON} PM'
+
+
+def _render_sunflowers(hour_counts: dict[int, int]) -> str:
+    active = sorted(
+        ((h, c) for h, c in hour_counts.items() if c > 0),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:MAX_SUNFLOWERS]
+    if not active:
         return ''
-    xs = _sunflower_x_positions(len(repos))
+    active.sort(key=lambda pair: pair[0])
+    xs = _sunflower_x_positions(len(active))
     parts = []
-    for x, branch in zip(xs, repos, strict=True):
+    for x, (hour, count) in zip(xs, active, strict=True):
         plant = _render_sunflower(
-            x, GROUND_Y, _sunflower_height(branch.prompts), branch.repo
+            x, GROUND_Y, _sunflower_height(count), f'hour-{hour}'
         )
+        label = _hour_label(hour)
         parts.append(
             '<g class="sunflower">'
-            f'{_title(f"{branch.repo} — {branch.prompts:,} prompts")}'
-            + _wind_group('ccg-sway-stalk', branch.repo, (x, GROUND_Y))
+            f'{_title(f"{label} — {count:,} prompts")}'
+            + _wind_group('ccg-sway-stalk', f'hour-{hour}', (x, GROUND_Y))
             + f'{plant}</g></g>'
         )
     return ''.join(parts)
@@ -2749,7 +2796,9 @@ def _render_crown(base_half_width: float, top_half_width: float) -> str:
 
 
 def _render_branches_and_leaves(
-    branches: list[RepoBranch], base_half_width: float
+    branches: list[RepoBranch],
+    base_half_width: float,
+    fruit_map: dict[str, str] | None = None,
 ) -> str:
     if not branches:
         return ''
@@ -2833,10 +2882,11 @@ def _render_branches_and_leaves(
         leaves = _render_leaves(
             repo_branch, origin_x, origin_y, end_x, end_y, seed=limb.key
         )
+        limb_fruit = (fruit_map or {}).get(limb.key, '')
         elements.append(
             f'<g class="repo-group">{title}'
             + _wind_group('ccg-sway-limb', limb.key, (origin_x, origin_y))
-            + f'{collar}{branch_path}{leaves}</g></g>'
+            + f'{collar}{branch_path}{leaves}{limb_fruit}</g></g>'
         )
     return ''.join(elements)
 
@@ -3442,26 +3492,27 @@ def _leafy_canopies(
     return canopies, wind
 
 
-def _render_fruit_on_branches(
+def _fruit_by_limb(  # noqa: C901
     skills: list[SkillFruit],
     branches: list[RepoBranch],
     base_half_width: float,
-) -> str:
+) -> dict[str, str]:
+    """Per-limb fruit SVG keyed by limb key."""
     if not skills or not branches:
-        return ''
+        return {}
 
     plan = _fruit_plan(skills)
     if not plan:
-        return ''
+        return {}
 
     by_repo = {branch.repo: branch for branch in branches}
     limbs = _plan_limbs([(b.repo, float(b.lines_added)) for b in branches])
     if not limbs:
-        return ''
+        return {}
 
     canopies, canopy_wind = _leafy_canopies(limbs, by_repo, base_half_width)
     if not canopies:
-        return ''
+        return {}
 
     placed: list[list[_FruitSpot]] = [[] for _ in canopies]
     rng = random.Random('ccgarden-fruit')
@@ -3469,9 +3520,6 @@ def _render_fruit_on_branches(
     buckets: list[list[str]] = [[] for _ in canopies]
     for index, skill in enumerate(_fruit_assignments(plan)):
         radius = _fruit_radius(skill.count)
-        # Start at this fruit's turn in the rotation, but walk on if that
-        # canopy is already full, so a crowded limb sheds fruit onto its
-        # neighbours instead of the crop simply shrinking.
         spot = None
         limb_index = None
         for offset in range(len(canopies)):
@@ -3494,11 +3542,11 @@ def _render_fruit_on_branches(
             )
         )
 
-    return ''.join(
-        _wind_group('ccg-sway-limb', key, pivot) + ''.join(bucket) + '</g>'
-        for (key, pivot), bucket in zip(canopy_wind, buckets, strict=True)
-        if bucket
-    )
+    result: dict[str, str] = {}
+    for (key, _pivot), bucket in zip(canopy_wind, buckets, strict=True):
+        if bucket:
+            result[key] = ''.join(bucket)
+    return result
 
 
 LEGEND_MARGIN = 4.0
@@ -3573,7 +3621,7 @@ LEGEND_ROWS = (
     ),
     (
         'Sunflowers',
-        ('one per repo;', 'taller = more prompts'),
+        ('one per active hour;', 'taller = more prompts'),
         'sunflower',
     ),
     (
@@ -3881,7 +3929,39 @@ def _render_fruit_key(
     return ''.join(parts)
 
 
-def render_svg(garden: GardenData) -> str:
+DATE_RANGE_HEIGHT = 20.0
+
+
+def _date_range_height(
+    date_range: tuple[str, str] | None,
+) -> float:
+    return DATE_RANGE_HEIGHT if date_range is not None else 0.0
+
+
+def _render_date_range(
+    date_range: tuple[str, str] | None,
+    top_y: float,
+) -> str:
+    if date_range is None:
+        return ''
+    first, last = date_range
+    text = f'{first} — {last}' if first != last else first
+    cx = VIEWBOX_WIDTH / 2
+    ty = top_y + DATE_RANGE_HEIGHT - 4.0
+    return (
+        f'<text x="{cx:.1f}" y="{ty:.1f}" '
+        f'text-anchor="middle" '
+        f'font-family="Georgia, serif" '
+        f'font-size="{LEGEND_DESC_SIZE + 1}" '
+        f'fill="#4a4a3a" opacity="0.5">{text}</text>'
+    )
+
+
+def render_svg(
+    garden: GardenData,
+    *,
+    date_range: tuple[str, str] | None = None,
+) -> str:
     total_sessions = sum(day_ring.sessions for day_ring in garden.rings)
     base_half_width = _trunk_half_width(total_sessions)
     flower_count = _cache_efficiency_flower_count(
@@ -3908,7 +3988,10 @@ def render_svg(garden: GardenData) -> str:
             garden.vitality,
         )
         + '</g></g>'
-        + _render_clouds(garden.model_efforts)
+        + _render_clouds(
+            garden.model_efforts,
+            (sun_x, sun_y, _sun_radius(garden.total_tokens)),
+        )
         + _render_birds(
             garden.birds,
             garden.cartoon_since,
@@ -3917,13 +4000,16 @@ def render_svg(garden: GardenData) -> str:
         + f'<g class="trunk-group">{trunk_title}'
         f'{_render_trunk(base_half_width)}</g>'
         + _render_rings(garden.rings, base_half_width)
-        + _render_branches_and_leaves(garden.branches, base_half_width)
-        + _render_fruit_on_branches(
-            garden.skills, garden.branches, base_half_width
+        + _render_branches_and_leaves(
+            garden.branches,
+            base_half_width,
+            fruit_map=_fruit_by_limb(
+                garden.skills, garden.branches, base_half_width
+            ),
         )
         # Sunflowers go down before the bushes so their stalks are rooted
         # behind the shrubbery rather than standing in front of it.
-        + _render_sunflowers(garden.branches)
+        + _render_sunflowers(garden.hour_counts)
         + _render_bushes(garden.tools)
         + _render_flowers_on_bushes(
             flower_count,
@@ -3952,12 +4038,22 @@ def render_svg(garden: GardenData) -> str:
             with_fruit=bool(garden.skills),
         )
         + _render_fruit_key(garden.skills, LEGEND_BAND_BOTTOM)
+        + _render_date_range(
+            date_range,
+            LEGEND_BAND_BOTTOM + _fruit_key_height(garden.skills),
+        )
         + _render_tap_tooltip(
-            LEGEND_BAND_BOTTOM + _fruit_key_height(garden.skills)
+            LEGEND_BAND_BOTTOM
+            + _fruit_key_height(garden.skills)
+            + _date_range_height(date_range)
         )
     )
 
-    total_height = LEGEND_BAND_BOTTOM + _fruit_key_height(garden.skills)
+    total_height = (
+        LEGEND_BAND_BOTTOM
+        + _fruit_key_height(garden.skills)
+        + _date_range_height(date_range)
+    )
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" '
         f'viewBox="0 0 {VIEWBOX_WIDTH} {total_height:.1f}" '
@@ -4177,12 +4273,13 @@ def _render_timeline_crown(
     )
 
 
-def _render_timeline_branches_and_leaves(
+def _render_timeline_branches_and_leaves(  # noqa: PLR0917
     timeline: GardenTimeline,
     final_base_half_width: float,
     base_half_width_by_day: list[float],
     key_times: list[float],
     duration: float,
+    fruit_map: dict[str, str] | None = None,
 ) -> str:
     if not timeline.branch_order:
         return ''
@@ -4366,10 +4463,11 @@ def _render_timeline_branches_and_leaves(
             duration=duration,
             vitality=vitality,
         )
+        limb_fruit = (fruit_map or {}).get(limb.key, '')
         elements.append(
             f'<g class="repo-group" {tt}>{title}'
             + _wind_group('ccg-sway-limb', limb.key, (origin_x, origin_y))
-            + f'{collar}{branch_path}{leaves}</g></g>'
+            + f'{collar}{branch_path}{leaves}{limb_fruit}</g></g>'
         )
     return ''.join(elements)
 
@@ -4665,6 +4763,14 @@ def _render_timeline_clouds(
     if not timeline.model_effort_order:
         return ''
 
+    final_total = (
+        timeline.cumulative_total_tokens[-1]
+        if timeline.cumulative_total_tokens
+        else 0
+    )
+    sun_x, sun_y = _sun_position(final_total)
+    sun = (sun_x, sun_y, _sun_radius(final_total))
+
     positions = _cloud_positions(len(timeline.model_effort_order))
     elements = []
     for (slot_x, slot_y), model in zip(
@@ -4677,6 +4783,7 @@ def _render_timeline_clouds(
         # animation while the cloud scales up into it, so fitting at full size
         # means it fits on every frame.
         cx, cy = _clamp_cloud_position(slot_x, slot_y, final_radius)
+        cx, cy = _clear_cloud_of_sun(cx, cy, final_radius, sun)
 
         # Grown as a share of the model's *final* radius, not the same
         # absolute-tokens formula re-evaluated per day -- see the identical
@@ -4912,22 +5019,14 @@ def _render_timeline_flowers_on_bushes(
     return f'<g class="flowers" {tt}>{title}{"".join(elements)}</g>'
 
 
-def _render_timeline_fruit(
+def _timeline_fruit_map(
     timeline: GardenTimeline,
     base_half_width: float,
     duration: float,
-) -> str:
-    """The whole crop, ripening together at the very end of the replay.
-
-    Skill counts are cumulative like every other shape, but fruit is the
-    one worth *not* walking day by day: it reads as the harvest the
-    finished garden is carrying rather than as something that grew, and
-    day-by-day ripening put full-grown fruit over a tree still rising out
-    of the soil. One shared fade also costs a single `<animate>` instead
-    of one per fruit.
-    """
+) -> dict[str, str]:
+    """Per-limb fruit SVG, each wrapped in a ripen fade."""
     if not timeline.skill_order or not timeline.branch_order:
-        return ''
+        return {}
 
     final_skills = [
         SkillFruit(skill=skill, count=timeline.skill_days[skill][-1].count)
@@ -4950,11 +5049,9 @@ def _render_timeline_fruit(
         )
     ]
 
-    crop = _render_fruit_on_branches(
-        final_skills, final_branches, base_half_width
-    )
-    if not crop:
-        return ''
+    by_limb = _fruit_by_limb(final_skills, final_branches, base_half_width)
+    if not by_limb:
+        return {}
 
     ripen = _animate_tag(
         'opacity',
@@ -4963,7 +5060,10 @@ def _render_timeline_fruit(
         duration,
         smooth=True,
     )
-    return f'<g class="fruit-crop" opacity="0">{ripen}{crop}</g>'
+    return {
+        key: f'<g class="fruit-crop" opacity="0">{ripen}{svg}</g>'
+        for key, svg in by_limb.items()
+    }
 
 
 def _render_timeline_sunflowers(
@@ -4971,64 +5071,50 @@ def _render_timeline_sunflowers(
     key_times: list[float],
     duration: float,
 ) -> str:
-    """Sunflowers growing out of the soil as each repo's prompts accumulate.
+    """Sunflowers growing out of the soil as hour-of-day prompts accumulate.
 
-    Scaled from the ground-contact point like `_render_timeline_bushes`,
-    so a stalk rises out of the earth rather than inflating in place, and
-    keyed to each day's share of the repo's *final* prompt count for the
-    same reason as `_bush_day_radii`.
+    Uses the overall hour histogram (not per-day), so all sunflowers
+    fade in together over the replay via a shared opacity animation.
     """
-    repos = _sunflower_repos(
-        [
-            RepoBranch(
-                repo=repo,
-                sessions=0,
-                lines_added=0,
-                lines_removed=0,
-                output_tokens=0,
-                input_tokens=0,
-                cost=0.0,
-                prompts=timeline.branch_days[repo][-1].prompts,
-            )
-            for repo in timeline.branch_order
-        ]
-    )
-    if not repos:
+    active = sorted(
+        ((h, c) for h, c in timeline.hour_counts.items() if c > 0),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )[:MAX_SUNFLOWERS]
+    if not active:
         return ''
+    active.sort(key=lambda pair: pair[0])
 
-    xs = _sunflower_x_positions(len(repos))
+    n_days = len(key_times)
+    opacity_values = [
+        f'{min(1.0, i / max(1, n_days - 1)):.4f}' for i in range(n_days)
+    ]
+    fade = _animate_tag(
+        'opacity',
+        opacity_values,
+        key_times,
+        duration,
+    )
+
+    xs = _sunflower_x_positions(len(active))
     elements = []
-    for x, branch in zip(xs, repos, strict=True):
-        days = timeline.branch_days[branch.repo]
-        final_height = _sunflower_height(branch.prompts)
-        final_prompts = days[-1].prompts
-        scale_values = []
-        for day_stat in days:
-            day_height = _grown_size(
-                day_stat.prompts,
-                final_prompts,
-                SUNFLOWER_HEIGHT_MIN,
-                final_height,
-            )
-            scale_values.append(f'{day_height / final_height:.4f}')
-        animate = _animate_transform_tag(
-            'scale', scale_values, key_times, duration
-        )
-        plant = _render_sunflower(0, 0, final_height, branch.repo)
-        day_labels = [
-            f'{branch.repo} — {day_stat.prompts:,} prompts'
-            for day_stat in days
-        ]
-        title = _title(day_labels[-1])
-        tt = _tt_attr(day_labels)
+    for x, (hour, count) in zip(xs, active, strict=True):
+        final_height = _sunflower_height(count)
+        plant = _render_sunflower(0, 0, final_height, f'hour-{hour}')
+        label = _hour_label(hour)
+        title = _title(f'{label} — {count:,} prompts')
         elements.append(
-            f'<g class="sunflower" {tt} '
+            f'<g class="sunflower" '
             f'transform="translate({x:.1f},{GROUND_Y})">{title}'
-            + _wind_group('ccg-sway-stalk', branch.repo)
-            + f'<g transform="scale(1)">{animate}{plant}</g>'
+            + _wind_group('ccg-sway-stalk', f'hour-{hour}')
+            + f'{plant}'
             f'</g></g>'
         )
-    return ''.join(elements)
+    return (
+        f'<g class="sunflowers" opacity="0">{fade}'
+        + ''.join(elements)
+        + '</g>'
+    )
 
 
 def _timeline_final_garden(timeline: GardenTimeline) -> GardenData:
@@ -5409,12 +5495,9 @@ def render_timeline_svg(
                 base_half_width_by_day,
                 key_times,
                 duration,
-            )
-            # Inside the growth group, not beside it: fruit hangs in the
-            # canopy, so it has to rise with the tree like anything else
-            # drawn into it.
-            + _render_timeline_fruit(
-                timeline, final_base_half_width, duration
+                fruit_map=_timeline_fruit_map(
+                    timeline, final_base_half_width, duration
+                ),
             ),
             _tree_growth_scales(timeline.cumulative_sessions),
             key_times,
