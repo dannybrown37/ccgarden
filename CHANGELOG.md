@@ -1,3 +1,9 @@
+## v0.5.2 (2026-09-17)
+
+### Fix
+
+- setup zizmor, version, other code quality improvements
+
 ## v0.5.1 (2026-09-17)
 
 ### Fix
