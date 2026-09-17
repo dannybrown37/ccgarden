@@ -2103,8 +2103,20 @@ def parse_day(raw: str) -> date:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        ver = version('ccgarden')
+    except PackageNotFoundError:
+        ver = 'unknown'
+
     parser = argparse.ArgumentParser(
         description='Summarize local Claude Code session logs.',
+    )
+    parser.add_argument(
+        '--version',
+        action='version',
+        version=f'ccstats {ver}',
     )
     parser.add_argument(
         'log_root',
