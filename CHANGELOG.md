@@ -1,3 +1,9 @@
+## v0.5.1 (2026-09-17)
+
+### Fix
+
+- add non-timeline but still-animated web version of poster
+
 ## v0.5.0 (2026-09-15)
 
 ### Feat
