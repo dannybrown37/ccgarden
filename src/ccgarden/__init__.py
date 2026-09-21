@@ -13,6 +13,7 @@ from ccgarden.data import (
     load_garden_timeline,
 )
 from ccgarden.render import render_svg, render_timeline_svg
+from ccgarden.render_plot import render_plot_svg
 
 DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
 DEFAULT_OUTPUT_PATH = Path.home() / '.claude' / 'ccgarden.svg'
@@ -127,6 +128,14 @@ def build_parser() -> argparse.ArgumentParser:
             'light wind animation, no scrubber, date range in the legend'
         ),
     )
+    parser.add_argument(
+        '--plot',
+        action='store_true',
+        help=(
+            'render a top-down garden plot instead of the tree: '
+            'repos as beds, models as plants, tools in a shed'
+        ),
+    )
     return parser
 
 
@@ -143,7 +152,12 @@ def main(argv: list[str] | None = None) -> None:
         until=args.until.isoformat() if args.until else None,
     )
     excluded = set(args.exclude_repos or [])
-    if args.static or args.web:
+    if args.plot:
+        garden = load_garden_data(str(args.db), days=days)
+        if excluded:
+            garden = exclude_repos_from_data(garden, excluded)
+        svg = render_plot_svg(garden)
+    elif args.static or args.web:
         garden = load_garden_data(str(args.db), days=days)
         if excluded:
             garden = exclude_repos_from_data(garden, excluded)
