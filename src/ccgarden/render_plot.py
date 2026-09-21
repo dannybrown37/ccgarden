@@ -47,7 +47,7 @@ BED_GUTTER = 8
 BED_MIN_DIM = 40
 
 LEGEND_BAND_Y = 740
-LEGEND_BAND_HEIGHT = 100
+LEGEND_BAND_HEIGHT = 130
 
 # ── Color palette ──────────────────────────────────────────────
 
@@ -75,6 +75,9 @@ PLANT_COLORS = {
     'unknown': '#6a9a5a',
 }
 PLANT_DORMANT = '#b8a88a'
+WEED_COLOR = '#8a7a55'
+WEED_VITALITY_THRESHOLD = 0.75
+WEED_MAX = 8
 
 FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
 FLOWER_CENTER = '#5a3d1a'
@@ -335,7 +338,24 @@ def _render_plant_defs() -> str:
         '</symbol>'
     )
 
-    return haiku + sonnet + opus + unknown
+    weed = (
+        '<symbol id="plant-weed" viewBox="-8 -8 16 16">'
+        '<line x1="0" y1="3" x2="0" y2="-5"'
+        f' stroke="{WEED_COLOR}" stroke-width="1"/>'
+        '<line x1="0" y1="-1" x2="-3" y2="-4"'
+        f' stroke="{WEED_COLOR}" stroke-width="0.8"/>'
+        '<line x1="0" y1="-3" x2="2.5" y2="-6"'
+        f' stroke="{WEED_COLOR}" stroke-width="0.8"/>'
+        '<ellipse cx="-3" cy="-4.5" rx="1.5" ry="1"'
+        f' fill="{WEED_COLOR}" opacity="0.7"/>'
+        '<ellipse cx="2.5" cy="-6.5" rx="1.3" ry="0.9"'
+        f' fill="{WEED_COLOR}" opacity="0.7"/>'
+        '<ellipse cx="0" cy="-5.5" rx="1.2" ry="0.8"'
+        f' fill="{WEED_COLOR}" opacity="0.6"/>'
+        '</symbol>'
+    )
+
+    return haiku + sonnet + opus + unknown + weed
 
 
 def _plant_color(
@@ -358,6 +378,41 @@ def _plant_color(
 
 def _plant_scale(effort: str | None) -> float:
     return EFFORT_SCALE.get(effort or 'medium', 1.0)
+
+
+# ── Weeds (dormancy) ──────────────────────────────────────────
+
+
+def _weed_count(vitality: float) -> int:
+    if vitality >= WEED_VITALITY_THRESHOLD:
+        return 0
+    frac = (WEED_VITALITY_THRESHOLD - vitality) / WEED_VITALITY_THRESHOLD
+    raw = math.sqrt(frac) * WEED_MAX
+    return max(1, min(WEED_MAX, int(raw)))
+
+
+def _render_bed_weeds(
+    bed: BedRect,
+    vitality: float,
+) -> str:
+    n = _weed_count(vitality)
+    if n <= 0:
+        return ''
+    rng = random.Random(f'weeds-{bed.repo}')
+    pad = 6
+    parts: list[str] = []
+    for _ in range(n):
+        wx = rng.uniform(bed.x + pad, bed.x + bed.w - pad)
+        wy = rng.uniform(bed.y + pad, bed.y + bed.h - pad)
+        size = rng.uniform(8, 12)
+        rot = rng.uniform(-30, 30)
+        parts.append(
+            f'<use href="#plant-weed"'
+            f' x="{wx - size / 2:.1f}" y="{wy - size / 2:.1f}"'
+            f' width="{size:.1f}" height="{size:.1f}"'
+            f' transform="rotate({rot:.0f} {wx:.1f} {wy:.1f})"/>'
+        )
+    return ''.join(parts)
 
 
 # ── Bed rendering ──────────────────────────────────────────────
@@ -540,6 +595,7 @@ def _render_beds(
             f'<g class="bed">{tt}'
             + _render_bed_soil(bed, vitality)
             + _render_bed_plants(bed, max_sessions, vitality)
+            + _render_bed_weeds(bed, vitality)
             + _render_bed_label(bed)
             + '</g>'
         )
@@ -837,15 +893,17 @@ def _render_plot_legend() -> str:
     entries = [
         ('Beds', 'repos (area = lines added)'),
         ('Plants', 'model sessions (shape = model)'),
+        ('Weeds', 'dormancy (low vitality)'),
         ('Flowers', 'skill usage'),
         ('Sundial', 'prompt hours'),
         ('Barrel', 'total tokens'),
         ('Shed', 'tool calls'),
     ]
-    col_w = (PLOT_VIEWBOX_WIDTH - 2 * lpad) / 3
+    n_cols = 3
+    col_w = (PLOT_VIEWBOX_WIDTH - 2 * lpad) / n_cols
     for i, (label, desc) in enumerate(entries):
-        col = i % 3
-        row = i // 3
+        col = i % n_cols
+        row = i // n_cols
         ex = lpad + 10 + col * col_w
         ey = ly + 22 + row * 36
         parts.append(
@@ -861,6 +919,97 @@ def _render_plot_legend() -> str:
             f'{_escape_xml(desc)}</text>'
         )
     return ''.join(parts)
+
+
+# ── Tap tooltip ───────────────────────────────────────────────
+
+TOOLTIP_PAD = 8.0
+TOOLTIP_FONT_SIZE = 11.0
+TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
+
+
+def _render_plot_tap_tooltip() -> str:
+    box = (
+        f'<rect id="plot-tooltip-box" x="0" y="0" width="10"'
+        f' height="{TOOLTIP_HEIGHT:.1f}" rx="5"'
+        f' fill="#fbfbf3" stroke="#3a2412"'
+        f' stroke-width="1" opacity="0.95"/>'
+    )
+    text = (
+        f'<text id="plot-tooltip-text"'
+        f' x="{TOOLTIP_PAD:.1f}"'
+        f' y="{TOOLTIP_PAD + TOOLTIP_FONT_SIZE * 0.8:.1f}"'
+        f' font-family="Georgia, serif"'
+        f' font-size="{TOOLTIP_FONT_SIZE:.1f}"'
+        f' fill="#2f3b23"></text>'
+    )
+    group = (
+        f'<g id="plot-tooltip" opacity="0"'
+        f' style="pointer-events:none;">{box}{text}</g>'
+    )
+    script = (
+        '<script><![CDATA[\n'
+        '(function(){\n'
+        '  var svg=document.documentElement;\n'
+        '  var g=document.getElementById("plot-tooltip");\n'
+        '  var bx=document.getElementById("plot-tooltip-box");\n'
+        '  var tx=document.getElementById("plot-tooltip-text");\n'
+        f'  var pad={TOOLTIP_PAD:.1f};\n'
+        f'  var bh={TOOLTIP_HEIGHT:.1f};\n'
+        f'  var vw={PLOT_VIEWBOX_WIDTH};\n'
+        f'  var vh={LEGEND_BAND_Y + LEGEND_BAND_HEIGHT};\n'
+        '  function findTooltip(n){\n'
+        '    while(n&&n!==svg){\n'
+        '      var c=n.childNodes||[];\n'
+        '      for(var i=0;i<c.length;i++){\n'
+        '        if(c[i].nodeName==="title")\n'
+        '          return c[i].textContent;\n'
+        '      }\n'
+        '      n=n.parentNode;\n'
+        '    }\n'
+        '    return null;\n'
+        '  }\n'
+        '  function pt(e){\n'
+        '    var m=svg.getScreenCTM();\n'
+        '    if(!m)return null;\n'
+        '    var p=svg.createSVGPoint();\n'
+        '    p.x=e.clientX;p.y=e.clientY;\n'
+        '    return p.matrixTransform(m.inverse());\n'
+        '  }\n'
+        '  function hide(){g.setAttribute("opacity","0");}\n'
+        '  function show(l,at){\n'
+        '    tx.textContent=l;\n'
+        '    var w=tx.getComputedTextLength()+pad*2;\n'
+        '    bx.setAttribute("width",w.toFixed(1));\n'
+        '    var x=at.x-w/2,y=at.y-bh-10;\n'
+        '    if(x<4)x=4;\n'
+        '    if(x+w>vw-4)x=vw-4-w;\n'
+        '    if(y<4)y=at.y+14;\n'
+        '    if(y+bh>vh-4)y=vh-4-bh;\n'
+        '    g.setAttribute("transform",'
+        '"translate("+x.toFixed(1)+","+y.toFixed(1)+")");\n'
+        '    g.setAttribute("opacity","1");\n'
+        '  }\n'
+        '  svg.addEventListener("pointerdown",function(e){\n'
+        '    if(e.pointerType==="mouse")return;\n'
+        '    var l=findTooltip(e.target);\n'
+        '    var a=l?pt(e):null;\n'
+        '    if(a)show(l,a);else hide();\n'
+        '  });\n'
+        '  svg.addEventListener("pointermove",function(e){\n'
+        '    if(e.pointerType!=="mouse")return;\n'
+        '    var l=findTooltip(e.target);\n'
+        '    var a=l?pt(e):null;\n'
+        '    if(a)show(l,a);else hide();\n'
+        '  });\n'
+        '  svg.addEventListener("pointerleave",function(e){\n'
+        '    if(e.pointerType!=="mouse")return;\n'
+        '    hide();\n'
+        '  });\n'
+        '})();\n'
+        ']]></script>'
+    )
+    return group + script
 
 
 # ── Main entry point ───────────────────────────────────────────
@@ -882,6 +1031,7 @@ def render_plot_svg(garden: GardenData) -> str:
         + _render_plot_rain(garden.vitality)
         + _render_plot_night(garden.nightness)
         + _render_plot_legend()
+        + _render_plot_tap_tooltip()
     )
 
     return (

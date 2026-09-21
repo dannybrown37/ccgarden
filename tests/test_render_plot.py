@@ -19,6 +19,7 @@ from ccgarden.render_plot import (
     _plant_specs,
     _point_in_any_bed,
     _squarify,
+    _weed_count,
     render_plot_svg,
 )
 
@@ -203,6 +204,42 @@ class TestFurrowCount:
         assert lo <= _furrow_count(lines) <= hi
 
 
+# ── Weeds (dormancy) ─────────────────────────────────────────
+
+
+class TestWeedCount:
+    @pytest.mark.parametrize(
+        ('vitality', 'expected_range'),
+        [
+            (1.0, (0, 0)),
+            (0.9, (0, 0)),
+            (0.6, (1, 3)),
+            (0.3, (3, 6)),
+            (0.0, (5, 8)),
+        ],
+    )
+    def test_weed_scaling(self, vitality, expected_range):
+        lo, hi = expected_range
+        assert lo <= _weed_count(vitality) <= hi
+
+
+class TestWeedsInSvg:
+    def test_no_weeds_at_full_vitality(self):
+        garden = _garden(vitality=1.0)
+        svg = render_plot_svg(garden)
+        assert 'href="#plant-weed"' not in svg
+
+    def test_weeds_appear_at_low_vitality(self):
+        garden = _garden(vitality=0.3)
+        svg = render_plot_svg(garden)
+        assert 'plant-weed' in svg
+
+    def test_weed_symbol_defined(self):
+        garden = _garden(vitality=0.3)
+        svg = render_plot_svg(garden)
+        assert 'id="plant-weed"' in svg
+
+
 # ── Stepping stones ──────────────────────────────────────────
 
 
@@ -218,6 +255,23 @@ class TestPointInAnyBed:
 
         bed = BedRect('r', 10, 10, 50, 50, _branch())
         assert not _point_in_any_bed(100, 100, [bed])
+
+
+# ── Tap tooltip ──────────────────────────────────────────────────
+
+
+class TestTapTooltip:
+    def test_tooltip_group_present(self):
+        svg = render_plot_svg(_garden())
+        assert 'id="plot-tooltip"' in svg
+
+    def test_tooltip_script_present(self):
+        svg = render_plot_svg(_garden())
+        assert '<script>' in svg or '<script><![CDATA[' in svg
+
+    def test_tooltip_finds_title(self):
+        svg = render_plot_svg(_garden())
+        assert 'findTooltip' in svg
 
 
 # ── SVG output ──────────────────────────────────────────────────
