@@ -188,6 +188,11 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
 - Beds are a squarified treemap. Minimum sizes go in *before* the
   layout (`_floored_metrics`); growing a bed afterwards pushes it past
   the fence. Everything above the fence is listed in `_feature_boxes`.
+- Plants are planted in blocks, not as a carpet: `_plant_layout` cuts
+  a bed along its long side into one strip per busy species (plus one
+  shared strip for species with under a row of plants), a
+  `PATCH_GAP` of bare soil between strips. `PLANT_OVERLAP` < 1 on
+  purpose — soil must show between plants, or it reads as wallpaper.
 - Static and timeline share every drawing function
   (`_render_bed_body`, `_plant_layout`, `_render_flower`,
   `_signboard`) and lay out from final totals, so the replay ends on

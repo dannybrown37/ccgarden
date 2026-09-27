@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 import re
-from itertools import pairwise
+from itertools import combinations, pairwise
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -30,6 +30,7 @@ from ccgarden.render_plot import (
     BED_ZONE_Y,
     FENCE_H,
     FENCE_Y,
+    PATCH_GAP,
     PLOT_VIEWBOX_WIDTH,
     _bed_area_metric,
     _bed_tooltip,
@@ -323,6 +324,44 @@ class TestPlantLayout:
     def test_deterministic(self):
         bed = _bed(sessions=30, model_effort_counts=MIXED)
         assert _plant_layout(bed, 30) == _plant_layout(bed, 30)
+
+    @pytest.mark.parametrize(
+        ('w', 'h'), [(200.0, 160.0), (400.0, 90.0), (90.0, 400.0)]
+    )
+    def test_busiest_bed_still_shows_soil(self, w, h):
+        bed = _bed(w=w, h=h, sessions=50, model_effort_counts=MIXED)
+        medium = [
+            p
+            for p in _plant_layout(bed, 50)
+            if p.spec.effort in {'medium', 'high'}
+        ]
+        for a, b in combinations(medium, 2):
+            gap = math.dist((a.x, a.y), (b.x, b.y)) - (a.size + b.size) / 2
+            assert gap > -0.2 * min(a.size, b.size)
+
+    @pytest.mark.parametrize(
+        ('w', 'h', 'axis'),
+        [(200.0, 300.0, 'y'), (400.0, 120.0, 'x')],
+    )
+    def test_species_patches_are_separate_strips(self, w, h, axis):
+        bed = _bed(w=w, h=h, sessions=50, model_effort_counts=MIXED)
+        plants = _plant_layout(bed, 50)
+        by_species: dict[str, list[float]] = {}
+        for p in plants:
+            by_species.setdefault(p.spec.species, []).append(
+                p.y if axis == 'y' else p.x
+            )
+        first, second = by_species.values()
+        assert max(first) < min(second)
+
+    def test_patches_have_a_path_between_them(self):
+        bed = _bed(w=200.0, h=300.0, sessions=50, model_effort_counts=MIXED)
+        plants = _plant_layout(bed, 50)
+        first = [p for p in plants if p.spec.species == plants[0].spec.species]
+        second = [p for p in plants if p not in first]
+        bottom = max(p.y + p.size / 2 for p in first)
+        top = min(p.y - p.size / 2 for p in second)
+        assert top - bottom >= PATCH_GAP * 0.5
 
 
 class TestPlantSymbols:
