@@ -195,6 +195,22 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   purpose — soil must show between plants, or it reads as wallpaper.
   Plant size is garden-wide (`PLANT_BASE_SIZE` × effort), never per
   bed: a quiet bed spaces its plants out instead of growing them big.
+  Spacing is per strip (`BedPlanting.spacings`), floored by the
+  strip's biggest plant, so high-effort blocks keep soil between
+  plants without thinning their neighbours.
+- Name tags come from `_bed_tag` (one source for text, font, place,
+  turn); a name that fits neither way is cut with `…` — the tooltip
+  keeps the full name.
+- In the timeline, plants and flowers *grow* (`_grow_about`: scale
+  about their own centre), never fade in: plant *i* sprouts at its
+  share of the bed's sessions and fills out over `SPROUT_SPAN`.
+  Bench tools lengthen too (`ToolGrowth` → `_tool_growth`: handle
+  `y2` plus a head riding the tip), ranked by final totals so the
+  slots never reshuffle mid-replay.
+  Weeds are the lapse's crop: `_bed_weeds` seeds `WEED_MAX` spots per
+  bed, the static render draws the first `_weed_count(vitality)`, and
+  the replay grows weed *k* on days that count passes *k* and pulls
+  it when you're back.
 - Plant rows run along each strip's long side (`_hex_rows`), and
   `_bed_furrows` lays one drill under every row from the same
   `_bed_planting`, so a plant always sits in a furrow. `lines_added`

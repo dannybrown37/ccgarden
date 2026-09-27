@@ -38,7 +38,14 @@ from ccgarden.render_plot import (
     PLOT_VIEWBOX_WIDTH,
     SHED_BOX,
     SHED_ROOF,
+    SOIL_COLOR,
+    TOOL_HEAD_LEN,
+    SOIL_DORMANT,
+    WEED_COLOR,
+    WEED_FLOWER,
     _bed_area_metric,
+    _bed_planting,
+    _bed_tag,
     _bed_tooltip,
     _barrel_water,
     _bench_tools,
@@ -46,7 +53,6 @@ from ccgarden.render_plot import (
     _flower_positions,
     _frame_planks,
     _bed_wood,
-    _label_vertical,
     _render_paths,
     _render_row_markers,
     _row_markers,
@@ -55,6 +61,7 @@ from ccgarden.render_plot import (
     _bed_furrows,
     _furrow_depth,
     _layout_beds,
+    _plant_area,
     _plant_layout,
     _plant_specs,
     _render_bed_label,
@@ -355,6 +362,50 @@ class TestPlantLayout:
             assert gap > -0.2 * min(a.size, b.size)
 
     @pytest.mark.parametrize(
+        ('w', 'h'), [(40.0, 160.0), (45.0, 200.0), (200.0, 45.0)]
+    )
+    def test_sparse_bed_is_planted_evenly_not_top_heavy(self, w, h):
+        combo = {'claude-sonnet-5 (medium)': 1}
+        bed = _bed(w=w, h=h, sessions=1, model_effort_counts=combo)
+        plants = _plant_layout(bed, 50)
+        ax, ay, aw, ah = _plant_area(bed)
+        mean_x = sum(p.x for p in plants) / len(plants)
+        mean_y = sum(p.y for p in plants) / len(plants)
+        assert mean_x == pytest.approx(ax + aw / 2, abs=0.06 * aw)
+        assert mean_y == pytest.approx(ay + ah / 2, abs=0.06 * ah)
+
+    def test_one_big_plant_does_not_thin_the_whole_bed(self):
+        low = {'claude-opus-4-6 (low)': 40, 'claude-sonnet-5 (low)': 40}
+        bed = _bed(w=300.0, h=240.0, sessions=50, model_effort_counts=low)
+        with_big = _bed(
+            w=300.0,
+            h=240.0,
+            sessions=50,
+            model_effort_counts={**low, 'claude-opus-5 (max)': 1},
+        )
+
+        def low_spacings(b: BedRect) -> list[float]:
+            planting = _bed_planting(b, 50)
+            return [
+                spacing
+                for group, spacing in zip(
+                    planting.groups, planting.spacings, strict=True
+                )
+                if all(spec.effort == 'low' for spec, _ in group)
+            ]
+
+        assert low_spacings(with_big) == pytest.approx(low_spacings(bed))
+
+    @pytest.mark.parametrize('effort', ['high', 'xhigh', 'max'])
+    def test_big_plants_are_spaced_for_their_size(self, effort):
+        combo = {f'claude-opus-5 ({effort})': 50}
+        bed = _bed(w=300.0, h=240.0, sessions=50, model_effort_counts=combo)
+        plants = _plant_layout(bed, 50)
+        for a, b in combinations(plants, 2):
+            gap = math.dist((a.x, a.y), (b.x, b.y)) - (a.size + b.size) / 2
+            assert gap > -0.1 * min(a.size, b.size)
+
+    @pytest.mark.parametrize(
         ('w', 'h', 'sessions'),
         [(40.0, 40.0, 50), (60.0, 90.0, 2), (400.0, 300.0, 5)],
     )
@@ -516,7 +567,7 @@ class TestRowMarkers:
 
     def test_marker_dodges_a_turned_label(self):
         bed = _bed('a-very-long-repo-name', w=40.0, h=300.0, sessions=50)
-        assert _label_vertical(bed)
+        assert _bed_tag(bed).vertical
         for m in _row_markers(bed, 50):
             assert m.x > bed.x + bed.w / 2
 
@@ -551,6 +602,47 @@ class TestBedLabel:
         label = _render_bed_label(_bed('short', w=200.0, h=100.0))
         assert 'rotate(' not in label
 
+    @pytest.mark.parametrize(
+        ('repo', 'w', 'h'),
+        [
+            ('my-repo', 200.0, 160.0),
+            ('fast-pr', 38.0, 76.0),
+            ('maad-goat-site', 53.0, 55.0),
+            ('a-very-very-long-repo-name', 30.0, 60.0),
+        ],
+    )
+    def test_tag_stays_on_its_bed(self, repo, w, h):
+        bed = _bed(repo, w=w, h=h)
+        x0, y0, x1, y1 = _bed_tag(bed).box
+        assert x0 >= bed.x
+        assert y0 >= bed.y
+        assert x1 <= bed.x + bed.w
+        assert y1 <= bed.y + bed.h
+
+    def test_name_too_long_for_the_bed_is_cut_short(self):
+        tag = _bed_tag(_bed('maad-goat-site', w=53.0, h=55.0))
+        assert tag.text.endswith('…')
+        assert tag.text.startswith('maad')
+        assert '-…' not in tag.text
+
+    def test_squarish_bed_keeps_label_flat(self):
+        assert not _bed_tag(_bed('maad-goat-site', w=53.0, h=55.0)).vertical
+
+    @pytest.mark.parametrize(
+        ('repo', 'w', 'h'),
+        [
+            ('fast-pr', 38.0, 76.0),
+            ('a-long-name', 40.0, 200.0),
+            ('my-repo', 200.0, 160.0),
+            ('maad-goat-site', 53.0, 55.0),
+        ],
+    )
+    def test_no_plant_rooted_under_the_tag(self, repo, w, h):
+        bed = _bed(repo, w=w, h=h, sessions=50, model_effort_counts=MIXED)
+        x0, y0, x1, y1 = _bed_tag(bed).box
+        for p in _plant_layout(bed, 50):
+            assert not (x0 < p.x < x1 and y0 < p.y < y1), (p.x, p.y)
+
 
 class TestTimelinePlants:
     def test_timeline_uses_repo_model_efforts(self):
@@ -565,6 +657,42 @@ class TestTimelinePlants:
             re.findall(r'href="#plant-([a-z-]+?)(?:-[bc])?"', garden_part)
         )
         assert used <= set(FAMILY_POOLS['opus'])
+
+    def test_plants_grow_out_of_the_soil(self):
+        svg = render_plot_timeline_svg(_timeline(n_days=8))
+        grows = _grow_scales(svg, 'plant-grow')
+        assert grows
+        for scales in grows:
+            assert scales[-1] == 1
+            assert scales == sorted(scales)
+        assert any(scales[0] == 0 for scales in grows)
+
+    def test_some_plant_takes_more_than_a_day_to_grow(self):
+        svg = render_plot_timeline_svg(_timeline(n_days=8))
+        assert any(
+            0 < s < 1
+            for scales in _grow_scales(svg, 'plant-grow')
+            for s in scales
+        )
+
+    def test_flowers_grow_with_their_calls(self):
+        svg = render_plot_timeline_svg(_timeline(n_days=8))
+        (scales,) = _grow_scales(svg, 'flower-grow')
+        assert scales[0] > 0
+        assert scales[-1] == 1
+        assert scales == sorted(scales)
+        assert len(set(scales)) > 2
+
+
+def _grow_scales(svg: str, cls: str) -> list[list[float]]:
+    return [
+        [float(v.split()[0]) for v in m.group(1).split(';')]
+        for m in re.finditer(
+            rf'<g class="{cls}"[^>]*><g><animateTransform[^>]*'
+            r'type="scale"[^>]*values="([^"]+)"',
+            svg,
+        )
+    ]
 
 
 # ── Garden features ──────────────────────────────────────────
@@ -665,6 +793,26 @@ class TestToolBench:
     def test_no_tools_still_renders_bench(self):
         assert 'class="bench"' in render_plot_svg(_garden(tools=[]))
 
+    def test_replay_tools_lengthen_with_their_calls(self):
+        svg = render_plot_timeline_svg(_timeline(n_days=6))
+        tools = re.findall(r'<g class="tool">.*?</text></g>', svg)
+        assert len(tools) == 2
+        for tool in tools:
+            ys = re.search(r'attributeName="y2"[^>]*values="([^"]+)"', tool)
+            tips = [float(v) for v in ys.group(1).split(';')]
+            assert tips == sorted(tips)
+            assert tips[0] < tips[-1]
+
+    def test_replay_tools_end_where_the_static_bench_does(self):
+        tl = _timeline(n_days=6)
+        final = [ToolBush(t, tl.tool_days[t][-1].count) for t in tl.tool_order]
+        replay = render_plot_timeline_svg(tl)
+        for placed in _bench_tools(final):
+            tip = placed.y + placed.length - TOOL_HEAD_LEN
+            assert re.search(
+                rf'attributeName="y2"[^>]*values="[^"]*;{tip:.1f}"', replay
+            )
+
 
 class TestSundial:
     def test_peak_hour_has_longest_wedge(self):
@@ -709,6 +857,16 @@ class TestSignboard:
         assert 'id="plot-date"' in svg
         assert 'id="plot-sessions"' in svg
         assert '"3 sessions"' in svg
+
+    def test_timeline_sign_reads_right_without_its_script(self):
+        tl = _timeline(n_days=6)
+        seeded = replace(
+            tl, cumulative_sessions=[0, *tl.cumulative_sessions[1:]]
+        )
+        svg = render_plot_timeline_svg(seeded)
+        label = re.search(r'id="plot-date"[^>]*>([^<]*)<', svg).group(1)
+        assert label == 'Jan 2, 2026 to Jan 6, 2026'
+        assert '>18 sessions</text>' in svg
 
 
 # ── Life and motion ─────────────────────────────────────────
@@ -1064,6 +1222,44 @@ class TestWeedsInSvg:
         garden = _garden(vitality=0.3)
         svg = render_plot_svg(garden)
         assert 'plant-weed' in svg
+
+    @pytest.mark.parametrize('soil', [SOIL_COLOR, SOIL_DORMANT])
+    def test_weeds_stand_out_from_the_soil(self, soil):
+        assert abs(_luma(WEED_COLOR) - _luma(soil)) > 40
+
+    def test_weeds_flower_like_dandelions(self):
+        svg = render_plot_svg(_garden(vitality=0.3))
+        start = svg.index('<symbol id="plant-weed"')
+        weed = svg[start : svg.index('</symbol>', start)]
+        assert f'fill="{WEED_FLOWER}"' in weed
+
+    def test_replay_grows_weeds_in_a_lapse_and_pulls_them_after(self):
+        tl = replace(
+            _timeline(n_days=6),
+            daily_vitality=[1.0, 1.0, 0.2, 0.1, 1.0, 1.0],
+        )
+        grows = _grow_scales(render_plot_timeline_svg(tl), 'weed-grow')
+        assert grows
+        assert any(max(scales) == 1 for scales in grows)
+        for scales in grows:
+            assert scales[0] == 0
+            assert scales[-1] == 0
+
+    def test_no_replay_weeds_without_a_lapse(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'class="weed-grow"' not in svg
+
+    def test_worse_lapse_grows_more_weeds(self):
+        def grown(vitality: float) -> int:
+            tl = replace(
+                _timeline(n_days=4), daily_vitality=[1.0, vitality, 1.0, 1.0]
+            )
+            svg = render_plot_timeline_svg(tl)
+            return sum(
+                max(scales) == 1 for scales in _grow_scales(svg, 'weed-grow')
+            )
+
+        assert grown(0.0) > grown(0.6) > 0
 
     def test_weed_symbol_defined(self):
         garden = _garden(vitality=0.3)

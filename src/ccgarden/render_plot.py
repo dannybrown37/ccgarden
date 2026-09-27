@@ -20,6 +20,7 @@ from ccgarden.plot_species import (
 )
 from ccgarden.render_utils import (
     _animate_tag,
+    _animate_transform_tag,
     _blend_hex,
     _escape_xml,
     _frame_weights,
@@ -179,7 +180,14 @@ BARREL_BAND = '#4a4a4a'
 BARREL_WATER = '#4a90c4'
 
 PLANT_DORMANT = '#b8a88a'
-WEED_COLOR = '#8a7a55'
+WEED_COLOR = '#b5bf4a'
+WEED_FLOWER = '#f5cd2e'
+# A dandelion leaf, pointing up from the rosette's heart: toothed edges
+# are what make it read as a weed next to a crop's smooth foliage.
+WEED_LEAF = (
+    'M0 0 L-1.9 -1.6 L-0.9 -2.4 L-2.8 -3.5 L-1.2 -4.3 L-2.4 -5.6 L0 -7.6'
+    ' L2.4 -5.6 L1.2 -4.3 L2.8 -3.5 L0.9 -2.4 L1.9 -1.6 Z'
+)
 WEED_VITALITY_THRESHOLD = 0.75
 WEED_MAX = 8
 
@@ -213,13 +221,14 @@ PLANT_FILL_MIN = 0.2
 PLANT_JITTER_FRACTION = 0.06
 PLANT_SIZE_JITTER = 0.08
 PLANT_EDGE_PAD = 4.0
+SPROUT_SPAN = 0.25
 HEX_ROW_RATIO = math.sqrt(3) / 2
 
 LABEL_FONT_SIZE = 9.0
 LABEL_MIN_FONT = 5.5
 LABEL_CHAR_WIDTH = 0.55
 LABEL_PAD = 4.0
-LABEL_RESERVE = 12.0
+LABEL_TURN_RATIO = 1.5
 TAG_FILL = '#efe3c4'
 TAG_EDGE = '#7a5a36'
 TAG_TEXT = '#3a2a18'
@@ -267,6 +276,27 @@ class PlantSpec(NamedTuple):
     replies: int
     label: str = ''
     species: str = 'sprout'
+
+
+class BedTag(NamedTuple):
+    text: str
+    font: float
+    cx: float
+    cy: float
+    w: float
+    h: float
+    vertical: bool
+
+    @property
+    def box(self) -> tuple[float, float, float, float]:
+        """Its footprint on the page, after any turn."""
+        hw, hh = (self.h, self.w) if self.vertical else (self.w, self.h)
+        return (
+            self.cx - hw / 2,
+            self.cy - hh / 2,
+            self.cx + hw / 2,
+            self.cy + hh / 2,
+        )
 
 
 class RowMarker(NamedTuple):
@@ -574,18 +604,15 @@ def _render_plant_defs(species: set[str] | None = None) -> str:
     )
     weed = (
         '<symbol id="plant-weed" viewBox="-8 -8 16 16">'
-        '<line x1="0" y1="3" x2="0" y2="-5"'
-        f' stroke="{WEED_COLOR}" stroke-width="1"/>'
-        '<line x1="0" y1="-1" x2="-3" y2="-4"'
-        f' stroke="{WEED_COLOR}" stroke-width="0.8"/>'
-        '<line x1="0" y1="-3" x2="2.5" y2="-6"'
-        f' stroke="{WEED_COLOR}" stroke-width="0.8"/>'
-        '<ellipse cx="-3" cy="-4.5" rx="1.5" ry="1"'
-        f' fill="{WEED_COLOR}" opacity="0.7"/>'
-        '<ellipse cx="2.5" cy="-6.5" rx="1.3" ry="0.9"'
-        f' fill="{WEED_COLOR}" opacity="0.7"/>'
-        '<ellipse cx="0" cy="-5.5" rx="1.2" ry="0.8"'
-        f' fill="{WEED_COLOR}" opacity="0.6"/>'
+        + ''.join(
+            f'<path d="{WEED_LEAF}" transform="rotate({angle})"'
+            f' fill="{WEED_COLOR}" stroke="{_shade(WEED_COLOR, -0.45)}"'
+            ' stroke-width="0.35" stroke-linejoin="round"/>'
+            for angle in (0, 55, 125, 180, 235, 300)
+        )
+        + f'<circle r="2" fill="{WEED_FLOWER}"'
+        f' stroke="{_shade(WEED_FLOWER, -0.3)}" stroke-width="0.3"/>'
+        f'<circle r="0.7" fill="{_shade(WEED_FLOWER, -0.25)}"/>'
         '</symbol>'
     )
     shine = (
@@ -617,52 +644,113 @@ def _weed_count(vitality: float) -> int:
     return max(1, min(WEED_MAX, int(raw)))
 
 
+class Weed(NamedTuple):
+    x: float
+    y: float
+    size: float
+    rot: float
+
+
+def _bed_weeds(bed: BedRect) -> list[Weed]:
+    """Every spot a weed can come up in this bed, in the order they do."""
+    rng = random.Random(f'weeds-{bed.repo}')
+    pad = 6
+    return [
+        Weed(
+            rng.uniform(bed.x + pad, bed.x + bed.w - pad),
+            rng.uniform(bed.y + pad, bed.y + bed.h - pad),
+            rng.uniform(10, 15),
+            rng.uniform(-30, 30),
+        )
+        for _ in range(WEED_MAX)
+    ]
+
+
+def _weed_use(weed: Weed) -> str:
+    x, y, size = weed.x, weed.y, weed.size
+    return (
+        f'<use href="#plant-weed"'
+        f' x="{x - size / 2:.1f}" y="{y - size / 2:.1f}"'
+        f' width="{size:.1f}" height="{size:.1f}"'
+        f' transform="rotate({weed.rot:.0f} {x:.1f} {y:.1f})"/>'
+    )
+
+
 def _render_bed_weeds(
     bed: BedRect,
     vitality: float,
 ) -> str:
     n = _weed_count(vitality)
-    if n <= 0:
-        return ''
-    rng = random.Random(f'weeds-{bed.repo}')
-    pad = 6
-    parts: list[str] = []
-    for _ in range(n):
-        wx = rng.uniform(bed.x + pad, bed.x + bed.w - pad)
-        wy = rng.uniform(bed.y + pad, bed.y + bed.h - pad)
-        size = rng.uniform(8, 12)
-        rot = rng.uniform(-30, 30)
-        parts.append(
-            f'<use href="#plant-weed"'
-            f' x="{wx - size / 2:.1f}" y="{wy - size / 2:.1f}"'
-            f' width="{size:.1f}" height="{size:.1f}"'
-            f' transform="rotate({rot:.0f} {wx:.1f} {wy:.1f})"/>'
+    return ''.join(_weed_use(w) for w in _bed_weeds(bed)[:n])
+
+
+def _render_timeline_weeds(
+    bed: BedRect,
+    vitality: list[float],
+    clock: tuple[list[float], float],
+) -> str:
+    """Weeds come up through a lapse and are pulled when you're back."""
+    counts = [_weed_count(v) for v in vitality]
+    return ''.join(
+        _grow_about(
+            'weed-grow',
+            (weed.x, weed.y),
+            [1.0 if c > k else 0.0 for c in counts],
+            clock,
+            _weed_use(weed),
         )
-    return ''.join(parts)
+        for k, weed in enumerate(_bed_weeds(bed)[: max(counts, default=0)])
+    )
 
 
 # ── Bed rendering ──────────────────────────────────────────────
 
 
-def _label_vertical(bed: BedRect) -> bool:
-    _, _, sw, sh = _soil_rect(bed)
-    text_w = len(bed.repo) * LABEL_FONT_SIZE * LABEL_CHAR_WIDTH
-    return text_w + 2 * LABEL_PAD > sw and sh > sw
+def _tag_fit(name: str, length: float) -> tuple[str, float]:
+    """The largest font that fits, cutting the name short at the floor."""
+    room = length - 2 * LABEL_PAD
+    font = min(LABEL_FONT_SIZE, room / (LABEL_CHAR_WIDTH * max(len(name), 1)))
+    if font >= LABEL_MIN_FONT:
+        return name, font
+    chars = max(1, int(room / (LABEL_CHAR_WIDTH * LABEL_MIN_FONT)) - 1)
+    return name[:chars].rstrip('-_. ') + '…', LABEL_MIN_FONT
+
+
+def _bed_tag(bed: BedRect) -> BedTag:
+    """A bed's name tag: pinned to the bottom board, or to the left one.
+
+    A narrow bed turns its tag on its side rather than shrinking the
+    text into illegibility; a name too long either way is cut short --
+    the full name is still in the bed's tooltip.
+    """
+    sx, sy, sw, sh = _soil_rect(bed)
+    flat_text, flat_font = _tag_fit(bed.repo, sw)
+    vertical = flat_font < LABEL_FONT_SIZE and sh > sw * LABEL_TURN_RATIO
+    text, font = _tag_fit(bed.repo, sh) if vertical else (flat_text, flat_font)
+    w = LABEL_CHAR_WIDTH * len(text) * font + 2 * LABEL_PAD
+    h = font + 5
+    if vertical:
+        cx, cy = bed.x + h / 2 + 1, sy + sh - w / 2 - 2
+    else:
+        cx, cy = sx + w / 2 + 2, bed.y + bed.h - h / 2 - 1
+    return BedTag(text, font, cx, cy, w, h, vertical=vertical)
 
 
 def _plant_area(bed: BedRect) -> tuple[float, float, float, float]:
     """The soil a bed's plants may be centred in: clear of the tag."""
     sx, sy, sw, sh = _soil_rect(bed)
     pad = PLANT_EDGE_PAD
-    if _label_vertical(bed):
-        reserve = min(LABEL_RESERVE, sw / 3)
+    tag = _bed_tag(bed)
+    _, y0, x1, _ = tag.box
+    if tag.vertical:
+        reserve = max(0.0, x1 - sx)
         return (
             sx + pad + reserve,
             sy + pad,
             sw - 2 * pad - reserve,
             sh - 2 * pad,
         )
-    reserve = min(LABEL_RESERVE, sh / 3)
+    reserve = max(0.0, sy + sh - y0)
     return (sx + pad, sy + pad, sw - 2 * pad, sh - 2 * pad - reserve)
 
 
@@ -718,7 +806,7 @@ def _patch_sizes(specs: list[PlantSpec], total: int) -> list[int]:
 
 def _strip_split(
     area: tuple[float, float, float, float],
-    weights: list[int],
+    weights: list[float],
     floor: float,
 ) -> list[tuple[float, float, float, float]]:
     """Cut ``area`` along its long side into strips sized by weight.
@@ -758,9 +846,13 @@ def _patch_groups(
 
 
 class BedPlanting(NamedTuple):
-    spacing: float
+    spacings: list[float]
     groups: list[list[tuple[PlantSpec, int]]]
     strips: list[tuple[float, float, float, float]]
+
+
+def _group_scale(group: list[tuple[PlantSpec, int]]) -> float:
+    return max(1.0, *(_plant_scale(spec.effort) for spec, _ in group))
 
 
 def _bed_planting(
@@ -768,11 +860,14 @@ def _bed_planting(
     max_sessions: int,
     species: dict[str, str] | None = None,
 ) -> BedPlanting | None:
-    """How a bed is planted: plant spacing and each block's strip.
+    """How a bed is planted: each block's strip and plant spacing.
 
     Density follows the repo's sessions relative to the busiest repo,
     so a busy bed is fuller and a quiet one is spread thin -- but
-    always across the whole bed, and never so full the soil vanishes.
+    always across the whole bed, and never so full the soil vanishes:
+    a block's tightest spacing is set by its biggest (highest-effort)
+    plant, or a block of big plants would pack into a carpet. Blocks
+    are sized by the ground their plants cover, not just their count.
     Each busy species gets its own block of the bed and the stragglers
     share one, so a bed's model mix reads at a glance.
     """
@@ -798,9 +893,17 @@ def _bed_planting(
     row_area = (ax, ay, aw, spacing) if aw > ah else (ax, ay, spacing, ah)
     groups = _patch_groups(planting, len(_hex_grid(row_area, spacing)))
     strips = _strip_split(
-        area, [sum(n for _, n in g) for g in groups], spacing
+        area,
+        [
+            sum(n * _plant_scale(spec.effort) ** 2 for spec, n in g)
+            for g in groups
+        ],
+        spacing,
     )
-    return BedPlanting(spacing, groups, strips)
+    spacings = [
+        max(spacing, PLANT_MIN_SPACING * _group_scale(g)) for g in groups
+    ]
+    return BedPlanting(spacings, groups, strips)
 
 
 def _plant_layout(
@@ -812,18 +915,19 @@ def _plant_layout(
     planting = _bed_planting(bed, max_sessions, species)
     if planting is None:
         return []
-    spacing = planting.spacing
     rng = random.Random(f'plot-plants-{bed.repo}')
-    jitter = spacing * PLANT_JITTER_FRACTION
     base = PLANT_BASE_SIZE
     plants: list[PlantPlacement] = []
-    for group, strip in zip(planting.groups, planting.strips, strict=True):
+    for group, strip, spacing in zip(
+        planting.groups, planting.strips, planting.spacings, strict=True
+    ):
+        jitter = spacing * PLANT_JITTER_FRACTION
         grid = _hex_grid(strip, spacing)
         sown = [spec for spec, n in group for _ in range(n)]
         count = min(len(sown), len(grid))
         sx, sy, sw, sh = strip
         for i in range(count):
-            px, py = grid[i * len(grid) // count]
+            px, py = grid[(2 * i + 1) * len(grid) // (2 * count)]
             spec = sown[i * len(sown) // count]
             plants.append(
                 PlantPlacement(
@@ -839,6 +943,29 @@ def _plant_layout(
                 )
             )
     return plants
+
+
+def _grow_about(
+    cls: str,
+    centre: tuple[float, float],
+    scales: list[float],
+    clock: tuple[list[float], float],
+    inner: str,
+) -> str:
+    """Scale ``inner`` about its own centre, one value per replay day.
+
+    SMIL scales about the origin, so the animated group sits between a
+    shift to the centre and a shift back.
+    """
+    x, y = centre
+    key_times, dur = clock
+    values = [f'{min(1.0, s):.3f}'.rstrip('0').rstrip('.') for s in scales]
+    return (
+        f'<g class="{cls}" transform="translate({x:.1f} {y:.1f})"><g>'
+        + _animate_transform_tag('scale', values, key_times, dur)
+        + f'<g transform="translate({-x:.1f} {-y:.1f})">{inner}</g>'
+        '</g></g>'
+    )
 
 
 def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
@@ -885,10 +1012,12 @@ def _bed_furrows(
     planting = _bed_planting(bed, max_sessions, species)
     if planting is None or _furrow_depth(bed.branch.lines_added) <= 0:
         return []
-    half = planting.spacing / 2
     furrows = []
-    for sx, sy, sw, sh in planting.strips:
-        for row in _hex_rows((sx, sy, sw, sh), planting.spacing):
+    for (sx, sy, sw, sh), spacing in zip(
+        planting.strips, planting.spacings, strict=True
+    ):
+        half = spacing / 2
+        for row in _hex_rows((sx, sy, sw, sh), spacing):
             (x1, y1), (x2, y2) = row[0], row[-1]
             if sh > sw:
                 y1, y2 = max(y1 - half, sy), min(y2 + half, sy + sh)
@@ -1079,7 +1208,7 @@ def _row_markers(
         return []
     fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
     left = bed.x + fw / 2
-    if _label_vertical(bed):
+    if _bed_tag(bed).vertical:
         left = bed.x + bed.w - fw / 2
     markers = []
     for group, (sx, sy, sw, sh) in zip(
@@ -1121,37 +1250,24 @@ def _render_row_markers(
 
 
 def _render_bed_label(bed: BedRect) -> str:
-    """A wooden plant marker pinned to the bed's frame.
-
-    A bed too narrow for its name turns the marker on its side rather
-    than shrinking the text into illegibility.
-    """
-    sx, sy, sw, sh = _soil_rect(bed)
-    vertical = _label_vertical(bed)
-    room = (sh if vertical else sw) - 2 * LABEL_PAD
-    per_char = LABEL_CHAR_WIDTH * max(len(bed.repo), 1)
-    font = max(LABEL_MIN_FONT, min(LABEL_FONT_SIZE, room / per_char))
-    tag_w = per_char * font + 2 * LABEL_PAD
-    tag_h = font + 5
-    if vertical:
-        cx = sx + tag_h / 2 + 1
-        cy = sy + sh - tag_w / 2 - 2
-    else:
-        cx = sx + tag_w / 2 + 2
-        cy = bed.y + bed.h - tag_h / 2 - 1
-    x, y = cx - tag_w / 2, cy - tag_h / 2
-    turn = f' transform="rotate(-90 {cx:.1f} {cy:.1f})"' if vertical else ''
+    """A wooden plant marker pinned to the bed's frame."""
+    tag = _bed_tag(bed)
+    cx, cy = tag.cx, tag.cy
+    x, y = cx - tag.w / 2, cy - tag.h / 2
+    turn = (
+        f' transform="rotate(-90 {cx:.1f} {cy:.1f})"' if tag.vertical else ''
+    )
     return (
         f'<g class="bed-tag"{turn}>'
-        f'<rect x="{x + 1.5:.1f}" y="{y + 2:.1f}" width="{tag_w:.1f}"'
-        f' height="{tag_h:.1f}" rx="2" fill="#000" opacity="0.3"/>'
-        f'<rect x="{x:.1f}" y="{y:.1f}" width="{tag_w:.1f}"'
-        f' height="{tag_h:.1f}" rx="2" fill="{TAG_FILL}"'
+        f'<rect x="{x + 1.5:.1f}" y="{y + 2:.1f}" width="{tag.w:.1f}"'
+        f' height="{tag.h:.1f}" rx="2" fill="#000" opacity="0.3"/>'
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{tag.w:.1f}"'
+        f' height="{tag.h:.1f}" rx="2" fill="{TAG_FILL}"'
         f' stroke="{TAG_EDGE}" stroke-width="0.8"/>'
-        f'<text x="{cx:.1f}" y="{cy + font * 0.35:.1f}"'
+        f'<text x="{cx:.1f}" y="{cy + tag.font * 0.35:.1f}"'
         f' text-anchor="middle" font-family="Georgia, serif"'
-        f' font-size="{font:.1f}" fill="{TAG_TEXT}">'
-        f'{_escape_xml(bed.repo)}</text></g>'
+        f' font-size="{tag.font:.1f}" fill="{TAG_TEXT}">'
+        f'{_escape_xml(tag.text)}</text></g>'
     )
 
 
@@ -1512,7 +1628,9 @@ def _shed_moss(slope: tuple[float, float, float, float]) -> str:
     return f'<g class="moss" opacity="0.8">{"".join(dots)}</g>'
 
 
-def _render_shed(tools: list[ToolBush]) -> str:
+def _render_shed(
+    tools: list[ToolBush], growth: ToolGrowth | None = None
+) -> str:
     """The shed from above: a cedar-shake gable, ridge running east-west."""
     x, y, w, h = SHED_BOX
     ridge = y + h / 2
@@ -1581,7 +1699,7 @@ def _render_shed(tools: list[ToolBush]) -> str:
         f'<path d="M{x + w},{y + h - 6} H{BARREL_CX - 4}'
         f' V{BARREL_CY - BARREL_R * 0.5}" fill="none"'
         f' stroke="{BARREL_BAND}" stroke-width="3" stroke-linejoin="round"/>'
-        f'</g>' + _render_bench(tools)
+        f'</g>' + _render_bench(tools, growth)
     )
 
 
@@ -1598,12 +1716,16 @@ def _bench_tools(tools: list[ToolBush]) -> list[ToolPlacement]:
             tool=tool,
             x=bx + BENCH_PAD + (i + 0.5) * slot,
             y=by + BENCH_PAD,
-            length=TOOL_MIN_LEN
-            + (TOOL_MAX_LEN - TOOL_MIN_LEN) * math.sqrt(tool.count / peak),
+            length=_tool_length(tool.count, peak),
             kind=TOOL_KINDS[i % len(TOOL_KINDS)],
         )
         for i, tool in enumerate(top)
     ]
+
+
+def _tool_length(count: int, peak: int) -> float:
+    share = math.sqrt(count / peak) if peak > 0 else 0.0
+    return TOOL_MIN_LEN + (TOOL_MAX_LEN - TOOL_MIN_LEN) * share
 
 
 def _tool_head(kind: str, x: float, y: float) -> str:
@@ -1646,7 +1768,77 @@ def _tool_head(kind: str, x: float, y: float) -> str:
     return heads[kind]
 
 
-def _render_bench(tools: list[ToolBush]) -> str:
+class ToolGrowth(NamedTuple):
+    counts: dict[str, list[int]]
+    key_times: list[float]
+    dur: float
+
+
+class ToolAnims(NamedTuple):
+    group: str
+    handle: str
+    head: str
+
+
+def _tool_growth(
+    placed: ToolPlacement,
+    peak: int,
+    growth: ToolGrowth,
+) -> ToolAnims | None:
+    """A tool's handle lengthening day by day, its head riding the tip."""
+    counts = growth.counts.get(placed.tool.tool, [])
+    if len(counts) != len(growth.key_times):
+        return None
+    lengths = [
+        _tool_length(c, peak) if c > 0 else TOOL_HEAD_LEN for c in counts
+    ]
+    tips = [placed.y + n - TOOL_HEAD_LEN for n in lengths]
+    clock = (growth.key_times, growth.dur)
+    return ToolAnims(
+        group=_animate_tag(
+            'opacity', ['1' if c > 0 else '0' for c in counts], *clock
+        ),
+        handle=_animate_tag('y2', [f'{t:.1f}' for t in tips], *clock),
+        head=_animate_transform_tag(
+            'translate',
+            [f'0 {t - tips[-1]:.1f}' for t in tips],
+            *clock,
+        ),
+    )
+
+
+def _render_tool(
+    placed: ToolPlacement,
+    label_y: float,
+    anims: ToolAnims | None = None,
+) -> str:
+    """One tool hanging on the bench, its label on the bottom plank."""
+    grow = anims or ToolAnims('', '', '')
+    tip_y = placed.y + placed.length - TOOL_HEAD_LEN
+    name = _escape_xml(placed.tool.tool[:TOOL_LABEL_CHARS])
+    handle = (
+        f'<line x1="{placed.x:.1f}" y1="{placed.y:.1f}"'
+        f' x2="{placed.x:.1f}" y2="{tip_y:.1f}"'
+    )
+    return (
+        f'<g class="tool">{grow.group}'
+        f'{_title(f"{placed.tool.tool}: {placed.tool.count:,} calls")}'
+        f'<g opacity="0.3" transform="translate(1.5 2)">'
+        f'{handle} stroke="#000" stroke-width="2.6"'
+        f' stroke-linecap="round">{grow.handle}</line></g>'
+        f'{handle} stroke="{TOOL_HANDLE}" stroke-width="2.4"'
+        f' stroke-linecap="round">{grow.handle}</line>'
+        f'<g>{grow.head}{_tool_head(placed.kind, placed.x, tip_y)}</g>'
+        f'<text x="{placed.x:.1f}" y="{label_y:.1f}"'
+        f' text-anchor="middle" font-family="Georgia, serif"'
+        f' font-size="6.5" fill="{TAG_TEXT}">{name}</text>'
+        f'</g>'
+    )
+
+
+def _render_bench(
+    tools: list[ToolBush], growth: ToolGrowth | None = None
+) -> str:
     x, y, w, h = BENCH_BOX
     planks = ''.join(
         f'<rect x="{x}" y="{y + i * h / 3:.1f}" width="{w}"'
@@ -1667,25 +1859,11 @@ def _render_bench(tools: list[ToolBush]) -> str:
             f' stroke="{_shade(FRAME_WOOD, -0.4)}" stroke-width="1"/>'
         ),
     ]
-    for placed in _bench_tools(tools):
-        tip_y = placed.y + placed.length - TOOL_HEAD_LEN
-        name = _escape_xml(placed.tool.tool[:TOOL_LABEL_CHARS])
-        parts.append(
-            f'<g class="tool">'
-            f'{_title(f"{placed.tool.tool}: {placed.tool.count:,} calls")}'
-            f'<g opacity="0.3" transform="translate(1.5 2)">'
-            f'<line x1="{placed.x:.1f}" y1="{placed.y:.1f}"'
-            f' x2="{placed.x:.1f}" y2="{tip_y:.1f}" stroke="#000"'
-            f' stroke-width="2.6" stroke-linecap="round"/></g>'
-            f'<line x1="{placed.x:.1f}" y1="{placed.y:.1f}"'
-            f' x2="{placed.x:.1f}" y2="{tip_y:.1f}" stroke="{TOOL_HANDLE}"'
-            f' stroke-width="2.4" stroke-linecap="round"/>'
-            f'{_tool_head(placed.kind, placed.x, tip_y)}'
-            f'<text x="{placed.x:.1f}" y="{y + h - 3:.1f}"'
-            f' text-anchor="middle" font-family="Georgia, serif"'
-            f' font-size="6.5" fill="{TAG_TEXT}">{name}</text>'
-            f'</g>'
-        )
+    placements = _bench_tools(tools)
+    peak = placements[0].tool.count if placements else 0
+    for placed in placements:
+        anims = _tool_growth(placed, peak, growth) if growth else None
+        parts.append(_render_tool(placed, y + h - 3, anims))
     parts.append('</g>')
     return ''.join(parts)
 
@@ -1915,16 +2093,19 @@ def _flower_color(skill: str) -> str:
     return random.Random(f'flower-{skill}').choice(FLOWER_COLORS)
 
 
+def _flower_radius(count: int, peak: int) -> float:
+    share = math.sqrt(count / peak) if peak > 0 else 0.0
+    return FLOWER_MIN_R + (FLOWER_MAX_R - FLOWER_MIN_R) * share
+
+
 def _render_flower(
     skill: SkillFruit,
     x: float,
     y: float,
     peak: int,
-    anim: str = '',
 ) -> str:
     """One top-down bloom over two leaves, sized by the skill's calls."""
-    share = math.sqrt(skill.count / peak) if peak > 0 else 0.0
-    r = FLOWER_MIN_R + (FLOWER_MAX_R - FLOWER_MIN_R) * share
+    r = _flower_radius(skill.count, peak)
     color = _flower_color(skill.skill)
     rng = random.Random(f'flower-sway-{skill.skill}')
     sway = SWAY_VARIANTS[rng.randrange(len(SWAY_VARIANTS))][1]
@@ -1942,7 +2123,7 @@ def _render_flower(
         for i in range(6)
     )
     return (
-        f'<g class="flower"{' opacity="0"' if anim else ""}>{anim}'
+        '<g class="flower">'
         f'{_title(f"{skill.skill}: {skill.count:,} calls")}'
         f'<ellipse cx="{x + 1.5:.1f}" cy="{y + 2:.1f}" rx="{r:.1f}"'
         f' ry="{r * 0.9:.1f}" fill="#000" opacity="0.25"/>'
@@ -2789,6 +2970,7 @@ def _render_timeline_beds(
             f'{opacity_anim}'
             f'{bed_soil}'
             f'{plant_parts}'
+            f'{_render_timeline_weeds(bed, vit_vals, (key_times, dur))}'
             f'{_render_row_markers(bed, max_sessions, species)}'
             f'{_render_bed_label(bed)}'
             f'</g>'
@@ -2818,18 +3000,20 @@ def _render_timeline_bed_plants(
         return ''
     parts: list[str] = []
     for i, plant in enumerate(plants):
-        threshold = i / len(plants)
-        opacity_vals = [
-            '1' if d.sessions / final_sessions > threshold else '0'
+        start = i / len(plants) * (1 - SPROUT_SPAN)
+        scales = [
+            max(0.0, d.sessions / final_sessions - start) / SPROUT_SPAN
             for d in days
         ]
         color = _plant_color(plant.spec.species, vitality[-1])
         parts.append(
-            _plant_use(
-                plant,
-                color,
-                _animate_tag('opacity', opacity_vals, key_times, dur),
-            ).replace('<use ', '<use opacity="0" ', 1)
+            _grow_about(
+                'plant-grow',
+                (plant.x, plant.y),
+                scales,
+                (key_times, dur),
+                _plant_use(plant, color),
+            )
         )
     return ''.join(parts)
 
@@ -2904,6 +3088,8 @@ def _render_date_label(
 
     SMIL can't animate text content, so one script reads the document
     clock and swaps the label -- one element instead of one per day.
+    Where scripts don't run (an ``<img>`` embed) the sign keeps its
+    static text: the finished garden's total and its span of days.
     """
     days = [_format_day(d) for d in timeline.days]
     counts = timeline.cumulative_sessions or [0] * len(days)
@@ -2935,7 +3121,11 @@ def _render_date_label(
         '})();\n'
         ']]></script>'
     )
-    return _signboard(counts[-1], days[0], live=True) + script
+    first = next((i for i, c in enumerate(counts) if c), 0)
+    span = days[-1]
+    if first < len(days) - 1:
+        span = f'{days[first]} to {days[-1]}'
+    return _signboard(counts[-1], span, live=True) + script
 
 
 def _render_plot_scrubber(
@@ -3041,15 +3231,19 @@ def _render_timeline_flowers(
         skills, _flower_positions(len(skills)), strict=True
     ):
         days = timeline.skill_days.get(skill.skill, [])
-        vals = ['1' if d.count > 0 else '0' for d in days]
-        vals += ['0'] * (len(timeline.days) - len(vals))
+        counts = [d.count for d in days]
+        counts += [0] * (len(timeline.days) - len(counts))
+        final_r = _flower_radius(skill.count, peak)
+        scales = [
+            _flower_radius(c, peak) / final_r if c > 0 else 0.0 for c in counts
+        ]
         parts.append(
-            _render_flower(
-                skill,
-                x,
-                y,
-                peak,
-                _animate_tag('opacity', vals, key_times, dur),
+            _grow_about(
+                'flower-grow',
+                (x, y),
+                scales,
+                (key_times, dur),
+                _render_flower(skill, x, y, peak),
             )
         )
     return ''.join(parts)
@@ -3105,7 +3299,15 @@ def render_plot_timeline_svg(
         + _render_fence()
         + _render_timeline_beds(beds, timeline, key_times, dur)
         + _render_shed(
-            [_tool_bush_final(timeline, t) for t in timeline.tool_order]
+            [_tool_bush_final(timeline, t) for t in timeline.tool_order],
+            ToolGrowth(
+                {
+                    t: [d.count for d in timeline.tool_days.get(t, [])]
+                    for t in timeline.tool_order
+                },
+                key_times,
+                dur,
+            ),
         )
         + _render_sundial(timeline.hour_counts)
         + _render_timeline_barrel(timeline, key_times, dur)
