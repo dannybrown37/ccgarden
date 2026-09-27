@@ -1,3 +1,9 @@
+## v0.7.3 (2026-09-27)
+
+### Fix
+
+- add a top gate from the toolshed, have sprinklers look for empty dirt rather than intersect with plants
+
 ## v0.7.2 (2026-09-27)
 
 ### Fix
