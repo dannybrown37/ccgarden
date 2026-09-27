@@ -30,9 +30,14 @@ from ccgarden.render_plot import (
     BED_ZONE_Y,
     FENCE_H,
     FENCE_Y,
+    FRAME_WOOD,
+    FRAME_WIDTH,
     PATCH_GAP,
+    STONE_STEP,
     PLANT_MAX_SPACING,
     PLOT_VIEWBOX_WIDTH,
+    SHED_BOX,
+    SHED_ROOF,
     _bed_area_metric,
     _bed_tooltip,
     _barrel_water,
@@ -40,12 +45,20 @@ from ccgarden.render_plot import (
     _feature_boxes,
     _flower_positions,
     _frame_planks,
+    _bed_wood,
+    _label_vertical,
+    _render_paths,
+    _render_row_markers,
+    _row_markers,
+    _shade,
+    _stepping_stones,
     _bed_furrows,
     _furrow_depth,
     _layout_beds,
     _plant_layout,
     _plant_specs,
     _render_bed_label,
+    _render_shed,
     _render_signboard,
     _sundial_wedges,
     _soil_rect,
@@ -342,6 +355,18 @@ class TestPlantLayout:
             assert gap > -0.2 * min(a.size, b.size)
 
     @pytest.mark.parametrize(
+        ('w', 'h', 'sessions'),
+        [(40.0, 40.0, 50), (60.0, 90.0, 2), (400.0, 300.0, 5)],
+    )
+    def test_plant_size_is_the_same_in_every_bed(self, w, h, sessions):
+        combo = {'claude-sonnet-5 (medium)': 1}
+        busy = _bed(w=400.0, h=300.0, sessions=50, model_effort_counts=combo)
+        other = _bed(w=w, h=h, sessions=sessions, model_effort_counts=combo)
+        reference = _plant_layout(busy, 50)[0].size
+        for p in _plant_layout(other, 50):
+            assert p.size == pytest.approx(reference, rel=0.2)
+
+    @pytest.mark.parametrize(
         ('w', 'h', 'axis'),
         [(200.0, 300.0, 'y'), (400.0, 120.0, 'x')],
     )
@@ -382,6 +407,136 @@ class TestPlantSymbols:
         assert 'class="plant-shadow"' in symbol
 
 
+def _side_by_side(gap=14.0) -> list[BedRect]:
+    return [
+        _bed('a', x=100.0, y=100.0, w=100.0, h=200.0),
+        _bed('b', x=200.0 + gap, y=140.0, w=100.0, h=200.0),
+    ]
+
+
+class TestSteppingStones:
+    def test_stones_follow_the_gutter_centre(self):
+        stones = _stepping_stones(_side_by_side())
+        assert len(stones) >= 5
+        for stone in stones:
+            assert stone.x == pytest.approx(207.0, abs=2.0)
+
+    def test_stones_only_where_beds_overlap(self):
+        for stone in _stepping_stones(_side_by_side()):
+            assert 140.0 <= stone.y <= 300.0
+
+    def test_stones_never_in_a_bed(self):
+        beds = _side_by_side()
+        for stone in _stepping_stones(beds):
+            assert not _point_in_any_bed(
+                stone.x, stone.y, beds, margin=stone.r * 0.5
+            )
+
+    def test_stones_do_not_pile_up(self):
+        stones = _stepping_stones(_side_by_side())
+        for a, b in combinations(stones, 2):
+            assert math.dist(a[:2], b[:2]) >= STONE_STEP * 0.6
+
+    def test_far_apart_beds_get_no_path(self):
+        assert _stepping_stones(_side_by_side(gap=80.0)) == []
+
+    def test_stones_know_which_beds_they_join(self):
+        for stone in _stepping_stones(_side_by_side()):
+            assert set(stone.repos) == {'a', 'b'}
+
+    def test_static_path_does_not_animate(self):
+        assert '<animate' not in _render_paths(_side_by_side())
+
+    def test_timeline_path_is_laid_with_its_first_bed(self):
+        paths = _render_paths(
+            _side_by_side(),
+            first_days={'a': 3, 'b': 1},
+            key_times=[0.0, 0.25, 0.5, 0.75, 1.0],
+            dur=10.0,
+        )
+        assert '<g class="path-stones" opacity="0">' in paths
+        assert 'keyTimes="0.0000;0.2500;1.0000" values="0;1;1"' in paths
+
+    def test_real_layout_gets_a_path(self):
+        assert _stepping_stones(_layout_beds(_even_branches(6)))
+
+
+class TestBedWood:
+    def test_same_repo_same_wood(self):
+        assert _bed_wood(_bed('x')) == _bed_wood(_bed('x'))
+
+    def test_beds_are_not_all_one_board(self):
+        tones = {_bed_wood(_bed(f'repo-{i}')) for i in range(8)}
+        assert len(tones) >= 6
+
+    @pytest.mark.parametrize('repo', [f'repo-{i}' for i in range(12)])
+    def test_wood_stays_wood(self, repo):
+        assert abs(_luma(_bed_wood(_bed(repo))) - _luma(FRAME_WOOD)) < 40
+
+    def test_frame_uses_the_bed_wood(self):
+        bed = _bed('cedar')
+        wood = _bed_wood(bed)
+        _, _, colour = next(p for p in _frame_planks(bed) if p[0] == 'top')
+        assert colour == _shade(wood, 0.2)
+
+
+MARKER_MIX = {
+    'claude-opus-4-6 (low)': 60,
+    'claude-sonnet-5 (low)': 40,
+}
+
+
+class TestRowMarkers:
+    def test_one_marker_per_single_species_block(self):
+        bed = _bed(
+            w=200.0, h=300.0, sessions=50, model_effort_counts=MARKER_MIX
+        )
+        markers = _row_markers(bed, 50)
+        assert sorted(m.species for m in markers) == ['cabbage', 'lettuce']
+
+    @pytest.mark.parametrize(('w', 'h'), [(200.0, 300.0), (400.0, 90.0)])
+    def test_markers_sit_on_the_frame(self, w, h):
+        bed = _bed(w=w, h=h, sessions=50, model_effort_counts=MARKER_MIX)
+        for m in _row_markers(bed, 50):
+            assert bed.x <= m.x <= bed.x + bed.w
+            assert bed.y <= m.y <= bed.y + bed.h
+            to_edge = min(
+                m.x - bed.x,
+                bed.x + bed.w - m.x,
+                m.y - bed.y,
+                bed.y + bed.h - m.y,
+            )
+            assert to_edge <= FRAME_WIDTH
+
+    def test_marker_names_the_combo(self):
+        bed = _bed(sessions=50, model_effort_counts=MARKER_MIX)
+        svg = _render_row_markers(bed, 50)
+        assert 'class="row-marker"' in svg
+        assert 'Opus 4.6 · low' in svg
+
+    def test_marker_dodges_a_turned_label(self):
+        bed = _bed('a-very-long-repo-name', w=40.0, h=300.0, sessions=50)
+        assert _label_vertical(bed)
+        for m in _row_markers(bed, 50):
+            assert m.x > bed.x + bed.w / 2
+
+    @pytest.mark.parametrize('timeline', [False, True])
+    def test_both_renders_draw_markers(self, timeline):
+        svg = (
+            render_plot_timeline_svg(
+                _timeline(), repo_model_efforts={'test-repo': MARKER_MIX}
+            )
+            if timeline
+            else render_plot_svg(
+                _garden(branches=[_branch(model_effort_counts=MARKER_MIX)])
+            )
+        )
+        assert 'class="row-marker"' in svg
+
+    def test_no_marker_without_model_data(self):
+        assert _row_markers(_bed(sessions=50), 50) == []
+
+
 class TestBedLabel:
     def test_label_is_a_wooden_tag(self):
         label = _render_bed_label(_bed('my-repo'))
@@ -413,6 +568,57 @@ class TestTimelinePlants:
 
 
 # ── Garden features ──────────────────────────────────────────
+
+
+TOOLS = [ToolBush('Read', 40), ToolBush('Edit', 20)]
+
+
+class TestShed:
+    def test_shingles_are_not_one_flat_colour(self):
+        shed = _render_shed(TOOLS)
+        fills = set(re.findall(r'class="shingle" fill="(#[0-9a-f]{6})"', shed))
+        assert len(fills) >= 5
+
+    @pytest.mark.parametrize(
+        'part',
+        [
+            'class="ridge-cap"',
+            'class="skylight"',
+            'class="moss"',
+            'class="stovepipe"',
+        ],
+    )
+    def test_roof_has_its_details(self, part):
+        assert part in _render_shed(TOOLS)
+
+    def test_roof_is_warm_wood_not_slate(self):
+        r, _, b = (int(SHED_ROOF[i : i + 2], 16) for i in (1, 3, 5))
+        assert r > b
+
+    def test_moss_grows_on_the_shaded_slope(self):
+        _, y, _, h = SHED_BOX
+        shed = _render_shed(TOOLS)
+        start = shed.index('class="moss"')
+        moss = shed[start : shed.index('</g>', start)]
+        for cy in re.findall(r'cy="([\d.]+)"', moss):
+            assert float(cy) > y + h / 2
+
+    def test_shingles_stay_on_the_roof(self):
+        x, y, w, h = SHED_BOX
+        shed = _render_shed(TOOLS)
+        for m in re.finditer(
+            r'class="shingle" fill="#[0-9a-f]{6}" x="([\d.]+)" y="([\d.]+)"'
+            r' width="([\d.]+)" height="([\d.]+)"',
+            shed,
+        ):
+            sx, sy, sw, sh = map(float, m.groups())
+            assert sx >= x - 0.01
+            assert sy >= y - 0.01
+            assert sx + sw <= x + w + 0.01
+            assert sy + sh <= y + h + 0.01
+
+    def test_shed_is_deterministic(self):
+        assert _render_shed(TOOLS) == _render_shed(TOOLS)
 
 
 class TestFeatureLayout:
@@ -1000,7 +1206,7 @@ class TestRenderPlotSvg:
             ]
         )
         svg = render_plot_svg(garden)
-        assert 'ellipse' in svg
+        assert 'class="stone"' in svg
 
     def test_bed_tooltip_in_svg(self):
         garden = _garden(

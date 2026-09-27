@@ -94,7 +94,6 @@ TOOL_MIN_LEN = 34.0
 TOOL_MAX_LEN = 72.0
 TOOL_HEAD_LEN = 12.0
 TOOL_LABEL_CHARS = 8
-SHINGLE_RIDGE_CLEAR = 3
 TOOL_KINDS = ('spade', 'rake', 'fork', 'trowel', 'hoe', 'shears')
 TOOL_HANDLE = '#c0925a'
 TOOL_METAL = '#8d969c'
@@ -152,6 +151,11 @@ GATE_WIDTH = 56
 
 SOIL_COLOR = '#6b4a33'
 FRAME_WOOD = '#a57a4c'
+WEATHERED_WOOD = '#8f8a7e'
+WOOD_WEATHER_MAX = 0.45
+WOOD_TONE_RANGE = 0.12
+MARKER_W = 6.0
+MARKER_H = 8.0
 SOIL_DORMANT = '#7a6b5a'
 FENCE_COLOR = '#8b6f47'
 FENCE_POST_COLOR = '#5a3d1a'
@@ -161,7 +165,13 @@ GRASS_COLOR = '#5a8f4a'
 GRASS_DORMANT = '#8a7a5a'
 
 SHED_BODY = '#7a4230'
-SHED_ROOF = '#5a6670'
+SHED_ROOF = '#8a5a3a'
+SHED_MOSS = '#6f8a3a'
+SHINGLE_COURSE = 9.0
+SHINGLE_MIN_W = 3.5
+SHINGLE_MAX_W = 7.0
+SHINGLE_TONE = 0.1
+SHED_MOSS_TUFTS = 7
 SUNDIAL_STONE = '#d4c9a8'
 SUNDIAL_GNOMON = '#3a3a3a'
 BARREL_WOOD = '#8b6914'
@@ -195,8 +205,10 @@ DARK_TOOLTIP_TEXT = '#d4d4c8'
 PLANT_MIN_SPACING = 19.0
 PLANT_MAX_SPACING = 34.0
 PLANT_OVERLAP = 0.85
+# One size for every bed: a quiet bed spaces its plants out rather than
+# growing them bigger, or a tiny bed's two plants dwarf everything.
+PLANT_BASE_SIZE = PLANT_MIN_SPACING * PLANT_OVERLAP
 PATCH_GAP = 10.0
-PLANT_MAX_SIZE = 30.0
 PLANT_FILL_MIN = 0.2
 PLANT_JITTER_FRACTION = 0.06
 PLANT_SIZE_JITTER = 0.08
@@ -255,6 +267,20 @@ class PlantSpec(NamedTuple):
     replies: int
     label: str = ''
     species: str = 'sprout'
+
+
+class RowMarker(NamedTuple):
+    x: float
+    y: float
+    species: str
+    label: str
+
+
+class Stone(NamedTuple):
+    x: float
+    y: float
+    r: float
+    repos: tuple[str, str]
 
 
 class ToolPlacement(NamedTuple):
@@ -789,7 +815,7 @@ def _plant_layout(
     spacing = planting.spacing
     rng = random.Random(f'plot-plants-{bed.repo}')
     jitter = spacing * PLANT_JITTER_FRACTION
-    base = min(spacing * PLANT_OVERLAP, PLANT_MAX_SIZE)
+    base = PLANT_BASE_SIZE
     plants: list[PlantPlacement] = []
     for group, strip in zip(planting.groups, planting.strips, strict=True):
         grid = _hex_grid(strip, spacing)
@@ -828,7 +854,7 @@ def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
 
 
 FURROW_LINES_SATURATION = 5000
-FURROW_WIDTH = 0.45
+FURROW_WIDTH = 0.5
 FURROW_MIN_OPACITY = 0.08
 FURROW_MAX_OPACITY = 0.26
 
@@ -869,7 +895,7 @@ def _bed_furrows(
             else:
                 x1, x2 = max(x1 - half, sx), min(x2 + half, sx + sw)
             furrows.append(
-                Furrow(x1, y1, x2, y2, planting.spacing * FURROW_WIDTH)
+                Furrow(x1, y1, x2, y2, PLANT_BASE_SIZE * FURROW_WIDTH)
             )
     return furrows
 
@@ -903,6 +929,15 @@ def _shade(color: str, amount: float) -> str:
     return _lerp_hex(color, target, abs(amount))
 
 
+def _bed_wood(bed: BedRect) -> str:
+    """Each bed's own boards: some new cedar, some silvered by weather."""
+    rng = random.Random(f'bed-wood-{bed.repo}')
+    weathered = _lerp_hex(
+        FRAME_WOOD, WEATHERED_WOOD, rng.uniform(0, WOOD_WEATHER_MAX)
+    )
+    return _shade(weathered, rng.uniform(-WOOD_TONE_RANGE, WOOD_TONE_RANGE))
+
+
 def _frame_planks(
     bed: BedRect,
 ) -> list[tuple[str, tuple[float, float, float, float], str]]:
@@ -912,18 +947,19 @@ def _frame_planks(
     the corners, the way a real frame's end boards cover the sides.
     """
     fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
+    wood = _bed_wood(bed)
     return [
-        ('left', (bed.x, bed.y, fw, bed.h), _shade(FRAME_WOOD, 0.08)),
+        ('left', (bed.x, bed.y, fw, bed.h), _shade(wood, 0.08)),
         (
             'right',
             (bed.x + bed.w - fw, bed.y, fw, bed.h),
-            _shade(FRAME_WOOD, -0.28),
+            _shade(wood, -0.28),
         ),
-        ('top', (bed.x, bed.y, bed.w, fw), _shade(FRAME_WOOD, 0.2)),
+        ('top', (bed.x, bed.y, bed.w, fw), _shade(wood, 0.2)),
         (
             'bottom',
             (bed.x, bed.y + bed.h - fw, bed.w, fw),
-            _shade(FRAME_WOOD, -0.2),
+            _shade(wood, -0.2),
         ),
     ]
 
@@ -992,7 +1028,7 @@ def _render_bed_body(
         _rect(rect, f'fill="{color}"') for _, rect, color in _frame_planks(bed)
     )
     fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
-    post = _shade(FRAME_WOOD, -0.4)
+    post = _shade(_bed_wood(bed), -0.4)
     parts.extend(
         _rect((px, py, fw, fw), f'fill="{post}"')
         for px in (bed.x, bed.x + bed.w - fw)
@@ -1024,6 +1060,64 @@ def _render_bed_plants(
         )
         for plant in _plant_layout(bed, max_sessions, species)
     )
+
+
+def _row_markers(
+    bed: BedRect,
+    max_sessions: int,
+    species: dict[str, str] | None = None,
+) -> list[RowMarker]:
+    """A seed-packet stake at the head of each single-species block.
+
+    The stake is pushed into the frame where the block's rows start --
+    the left board for rows across the bed, the top board for rows down
+    it -- and moves to the right board when a turned name tag already
+    holds the left one.
+    """
+    planting = _bed_planting(bed, max_sessions, species)
+    if planting is None:
+        return []
+    fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
+    left = bed.x + fw / 2
+    if _label_vertical(bed):
+        left = bed.x + bed.w - fw / 2
+    markers = []
+    for group, (sx, sy, sw, sh) in zip(
+        planting.groups, planting.strips, strict=True
+    ):
+        spec = group[0][0]
+        if len(group) != 1 or not spec.label:
+            continue
+        if sh > sw:
+            x, y = sx + sw / 2, bed.y + fw / 2
+        else:
+            x, y = left, sy + sh / 2
+        markers.append(RowMarker(x, y, spec.species, spec.label))
+    return markers
+
+
+def _render_row_markers(
+    bed: BedRect,
+    max_sessions: int,
+    species: dict[str, str] | None = None,
+) -> str:
+    parts = []
+    for m in _row_markers(bed, max_sessions, species):
+        art = SPECIES.get(m.species, SPECIES['sprout'])
+        x, y = m.x - MARKER_W / 2, m.y - MARKER_H / 2
+        parts.append(
+            f'<g class="row-marker">'
+            f'{_title(f"{art.name} · {combo_name(m.label)}")}'
+            f'<rect x="{x + 1:.1f}" y="{y + 1.4:.1f}" width="{MARKER_W}"'
+            f' height="{MARKER_H}" rx="1" fill="#000" opacity="0.3"/>'
+            f'<rect x="{x:.1f}" y="{y:.1f}" width="{MARKER_W}"'
+            f' height="{MARKER_H}" rx="1" fill="{TAG_FILL}"'
+            f' stroke="{TAG_EDGE}" stroke-width="0.6"/>'
+            f'<circle cx="{m.x:.1f}" cy="{m.y - 0.8:.1f}" r="2.1"'
+            f' fill="{art.color}"/>'
+            f'</g>'
+        )
+    return ''.join(parts)
 
 
 def _render_bed_label(bed: BedRect) -> str:
@@ -1105,6 +1199,7 @@ def _render_beds(
             )
             + _render_bed_plants(bed, max_sessions, vitality, species)
             + _render_bed_weeds(bed, vitality)
+            + _render_row_markers(bed, max_sessions, species)
             + _render_bed_label(bed)
             + '</g>'
         )
@@ -1114,37 +1209,124 @@ def _render_beds(
 # ── Paths (gravel between beds) ────────────────────────────────
 
 
-STONE_RADIUS_MIN = 4
-STONE_RADIUS_MAX = 7
-STONE_COUNT = 30
+STONE_RADIUS_MIN = 4.2
+STONE_RADIUS_MAX = 5.4
+STONE_STEP = 15.0
+STONE_GUTTER_MAX = BED_GUTTER * 1.5
+STONE_SIDES = 7
 
 
-def _render_paths(beds: list[BedRect]) -> str:
+def _gutters(
+    beds: list[BedRect],
+) -> list[tuple[tuple[float, float, float, float], tuple[str, str]]]:
+    """Centre lines of the paths between facing beds, and the two beds."""
+    lines = []
+    for a in beds:
+        for b in beds:
+            gap_x = b.x - (a.x + a.w)
+            lo_y, hi_y = max(a.y, b.y), min(a.y + a.h, b.y + b.h)
+            if 0 < gap_x <= STONE_GUTTER_MAX and hi_y > lo_y:
+                mid = a.x + a.w + gap_x / 2
+                lines.append(((mid, lo_y, mid, hi_y), (a.repo, b.repo)))
+            gap_y = b.y - (a.y + a.h)
+            lo_x, hi_x = max(a.x, b.x), min(a.x + a.w, b.x + b.w)
+            if 0 < gap_y <= STONE_GUTTER_MAX and hi_x > lo_x:
+                mid = a.y + a.h + gap_y / 2
+                lines.append(((lo_x, mid, hi_x, mid), (a.repo, b.repo)))
+    return lines
+
+
+def _stepping_stones(beds: list[BedRect]) -> list[Stone]:
+    """Flagstones set down the middle of every path, one pace apart.
+
+    Where two paths cross, a stone already laid wins, so junctions
+    don't pile up into a heap.
+    """
+    rng = random.Random('stepping-stones')
+    stones: list[Stone] = []
+    for (x1, y1, x2, y2), repos in _gutters(beds):
+        length = math.hypot(x2 - x1, y2 - y1)
+        n = int(length / STONE_STEP)
+        if n < 1:
+            continue
+        lead = (length - (n - 1) * STONE_STEP) / 2
+        for i in range(n):
+            t = (lead + i * STONE_STEP) / length
+            x = x1 + (x2 - x1) * t
+            y = y1 + (y2 - y1) * t
+            r = rng.uniform(STONE_RADIUS_MIN, STONE_RADIUS_MAX)
+            if _point_in_any_bed(x, y, beds, margin=r * 0.5):
+                continue
+            if any(
+                math.dist((x, y), (other.x, other.y)) < STONE_STEP * 0.6
+                for other in stones
+            ):
+                continue
+            stones.append(Stone(x, y, r, repos))
+    return stones
+
+
+def _flagstone_points(x: float, y: float, r: float, seed: str) -> str:
+    rng = random.Random(seed)
+    turn = rng.uniform(0, math.tau)
+    return ' '.join(
+        f'{x + rr * math.cos(a):.1f},{y + rr * math.sin(a):.1f}'
+        for a, rr in (
+            (
+                turn + i * math.tau / STONE_SIDES,
+                r * rng.uniform(0.78, 1.05),
+            )
+            for i in range(STONE_SIDES)
+        )
+    )
+
+
+def _render_stone(stone: Stone) -> str:
+    seed = f'stone-{stone.x:.0f}-{stone.y:.0f}'
+    points = _flagstone_points(stone.x, stone.y, stone.r, seed)
+    shadow = _flagstone_points(
+        stone.x + LIGHT_DX / 3, stone.y + LIGHT_DY / 3, stone.r, seed
+    )
+    return (
+        f'<polygon points="{shadow}" fill="#000" opacity="0.25"/>'
+        f'<polygon class="stone" points="{points}"'
+        f' fill="url(#stoneShade)" stroke="#000" stroke-opacity="0.15"'
+        f' stroke-width="0.5" stroke-linejoin="round"/>'
+    )
+
+
+def _render_paths(
+    beds: list[BedRect],
+    first_days: dict[str, int] | None = None,
+    key_times: list[float] | None = None,
+    dur: float = 0.0,
+) -> str:
+    """Gravel, and stepping stones down the middle of every path.
+
+    In the timeline a path is laid on the day the first of the two beds
+    it runs between is dug, so no path leads between beds not yet there.
+    """
     gravel = (
         f'<rect x="{BED_ZONE_X}" y="{BED_ZONE_Y}"'
         f' width="{BED_ZONE_W}" height="{BED_ZONE_H}"'
         f' fill="url(#gravel)" rx="2"/>'
     )
-    rng = random.Random('stepping-stones')
-    stones: list[str] = []
-    for _ in range(STONE_COUNT):
-        sx = rng.uniform(BED_ZONE_X + 4, BED_ZONE_X + BED_ZONE_W - 4)
-        sy = rng.uniform(BED_ZONE_Y + 4, BED_ZONE_Y + BED_ZONE_H - 4)
-        r = rng.uniform(STONE_RADIUS_MIN, STONE_RADIUS_MAX)
-        rot = rng.uniform(0, 360)
-        if _point_in_any_bed(sx, sy, beds, margin=r):
-            continue
-        stones.append(
-            f'<g transform="rotate({rot:.0f} {sx:.1f} {sy:.1f})">'
-            f'<ellipse cx="{sx + LIGHT_DX / 2:.1f}"'
-            f' cy="{sy + LIGHT_DY / 2:.1f}"'
-            f' rx="{r:.1f}" ry="{r * 0.7:.1f}"'
-            f' fill="#000" opacity="0.2"/>'
-            f'<ellipse cx="{sx:.1f}" cy="{sy:.1f}"'
-            f' rx="{r:.1f}" ry="{r * 0.7:.1f}"'
-            f' fill="url(#stoneShade)"/></g>'
+    stones = _stepping_stones(beds)
+    if first_days is None or key_times is None:
+        return gravel + ''.join(_render_stone(s) for s in stones)
+    by_day: dict[int, list[Stone]] = {}
+    for stone in stones:
+        day = min(first_days.get(repo, 0) for repo in stone.repos)
+        by_day.setdefault(day, []).append(stone)
+    parts = [gravel]
+    for day, laid in sorted(by_day.items()):
+        values = ['0' if i < day else '1' for i in range(len(key_times))]
+        parts.append(
+            f'<g class="path-stones" opacity="0">'
+            f'{_animate_tag("opacity", values, key_times, dur)}'
+            f'{"".join(_render_stone(s) for s in laid)}</g>'
         )
-    return gravel + ''.join(stones)
+    return ''.join(parts)
 
 
 def _point_in_any_bed(
@@ -1273,44 +1455,129 @@ def _drop_shadow(shape: str) -> str:
     )
 
 
+def _shed_shingles(
+    slope: tuple[float, float, float, float], lit: float
+) -> str:
+    """Cedar shakes on one slope, each board its own weathered tone.
+
+    Courses are laid from the eave up, so every course's exposed lower
+    edge -- the dark line -- faces the eave it drains to.
+    """
+    x, y, w, h = slope
+    rng = random.Random(f'shed-{y:.0f}')
+    top_slope = lit > 0
+    parts = []
+    courses = max(1, round(h / SHINGLE_COURSE))
+    course_h = h / courses
+    for c in range(courses):
+        cy = y + c * course_h
+        cx = x - rng.uniform(0, SHINGLE_MAX_W)
+        while cx < x + w:
+            sw = rng.uniform(SHINGLE_MIN_W, SHINGLE_MAX_W)
+            left, right = max(cx, x), min(cx + sw, x + w)
+            if right - left > 1:
+                tone = lit + rng.uniform(-SHINGLE_TONE, SHINGLE_TONE)
+                parts.append(
+                    f'<rect class="shingle" fill="{_shade(SHED_ROOF, tone)}"'
+                    f' x="{left:.1f}" y="{cy:.1f}" width="{right - left:.1f}"'
+                    f' height="{course_h:.1f}" stroke="#000"'
+                    f' stroke-opacity="0.22" stroke-width="0.5"/>'
+                )
+            cx += sw
+        edge = cy if top_slope else cy + course_h
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{edge:.1f}" x2="{x + w:.1f}"'
+            f' y2="{edge:.1f}" stroke="#000" stroke-opacity="0.4"'
+            f' stroke-width="1.1"/>'
+        )
+    return ''.join(parts)
+
+
+def _shed_moss(slope: tuple[float, float, float, float]) -> str:
+    """Moss creeping up from the shaded eave, where the roof stays damp."""
+    x, y, w, h = slope
+    rng = random.Random('shed-moss')
+    dots = []
+    for _ in range(SHED_MOSS_TUFTS):
+        cx = rng.uniform(x + 6, x + w - 6)
+        cy = y + h - rng.uniform(3, h * 0.4)
+        for _ in range(rng.randint(4, 8)):
+            r = rng.uniform(0.9, 2.2)
+            tone = rng.uniform(-0.15, 0.25)
+            dots.append(
+                f'<circle cx="{cx + rng.uniform(-4, 4):.1f}"'
+                f' cy="{cy + rng.uniform(-2.5, 2.5):.1f}" r="{r:.1f}"'
+                f' fill="{_shade(SHED_MOSS, tone)}"/>'
+            )
+    return f'<g class="moss" opacity="0.8">{"".join(dots)}</g>'
+
+
 def _render_shed(tools: list[ToolBush]) -> str:
-    """The shed from above: a slate gable roof, ridge running east-west."""
+    """The shed from above: a cedar-shake gable, ridge running east-west."""
     x, y, w, h = SHED_BOX
     ridge = y + h / 2
-    lit = _shade(SHED_ROOF, 0.18)
-    dim = _shade(SHED_ROOF, -0.25)
-    shingles = []
-    for i, row_y in enumerate(range(int(y) + 7, int(y + h), 7)):
-        if abs(row_y - ridge) < SHINGLE_RIDGE_CLEAR:
-            continue
-        shingles.append(
-            f'<line x1="{x + 2}" y1="{row_y}" x2="{x + w - 2}" y2="{row_y}"/>'
-        )
-        stagger = 6 if i % 2 else 0
-        shingles.extend(
-            f'<line x1="{tx}" y1="{row_y - 7}" x2="{tx}" y2="{row_y}"/>'
-            for tx in range(int(x) + 6 + stagger, int(x + w) - 2, 12)
-        )
+    frame = _shade(SHED_ROOF, -0.55)
+    glass_x, glass_y = x + w * 0.6, y + 9
+    pipe_x, pipe_y = x + w * 0.22, y + h * 0.3
     calls = sum(t.count for t in tools)
     return (
         f'<g class="shed">'
         f'{_title(f"Tool shed: {calls:,} tool calls, {len(tools)} tools")}'
         + _drop_shadow(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>')
-        + f'<rect x="{x}" y="{y}" width="{w}" height="{h / 2}" fill="{lit}"/>'
+        + _shed_shingles((x, y, w, h / 2), 0.06)
+        + _shed_shingles((x, ridge, w, h / 2), -0.22)
+        + f'<linearGradient id="shedSlopeLit" x1="0" y1="1" x2="0" y2="0">'
+        f'<stop offset="0" stop-color="#fff" stop-opacity="0.12"/>'
+        f'<stop offset="1" stop-color="#000" stop-opacity="0.08"/>'
+        f'</linearGradient>'
+        f'<linearGradient id="shedSlopeDim" x1="0" y1="0" x2="0" y2="1">'
+        f'<stop offset="0" stop-color="#000" stop-opacity="0"/>'
+        f'<stop offset="1" stop-color="#000" stop-opacity="0.22"/>'
+        f'</linearGradient>'
+        f'<rect x="{x}" y="{y}" width="{w}" height="{h / 2}"'
+        f' fill="url(#shedSlopeLit)"/>'
         f'<rect x="{x}" y="{ridge}" width="{w}" height="{h / 2}"'
-        f' fill="{dim}"/>'
-        f'<g stroke="#000" stroke-opacity="0.18" stroke-width="0.7">'
-        f'{"".join(shingles)}</g>'
-        f'<rect x="{x + w * 0.62}" y="{y + 10}" width="22" height="16"'
-        f' fill="#a9c6d8" stroke="{_shade(SHED_ROOF, -0.4)}"'
-        f' stroke-width="1.5"/>'
-        f'<line x1="{x + w * 0.62 + 11}" y1="{y + 10}"'
-        f' x2="{x + w * 0.62 + 11}" y2="{y + 26}"'
-        f' stroke="{_shade(SHED_ROOF, -0.4)}" stroke-width="1"/>'
-        f'<rect x="{x - 2}" y="{ridge - 2.5}" width="{w + 4}" height="5"'
-        f' rx="1" fill="{_shade(SHED_ROOF, -0.45)}"/>'
+        f' fill="url(#shedSlopeDim)"/>'
+        + _shed_moss((x, ridge, w, h / 2))
+        + f'<g class="skylight">'
+        f'<linearGradient id="shedGlass" x1="0" y1="0" x2="1" y2="1">'
+        f'<stop offset="0" stop-color="#dcebf2"/>'
+        f'<stop offset="0.45" stop-color="#9fbfd0"/>'
+        f'<stop offset="1" stop-color="#6d8fa3"/></linearGradient>'
+        f'<rect x="{glass_x:.1f}" y="{glass_y + 1.5:.1f}" width="24"'
+        f' height="17" fill="#000" opacity="0.3"/>'
+        f'<rect x="{glass_x:.1f}" y="{glass_y:.1f}" width="24" height="17"'
+        f' fill="url(#shedGlass)" stroke="{frame}" stroke-width="1.6"/>'
+        f'<line x1="{glass_x + 12:.1f}" y1="{glass_y:.1f}"'
+        f' x2="{glass_x + 12:.1f}" y2="{glass_y + 17:.1f}"'
+        f' stroke="{frame}" stroke-width="1"/>'
+        f'<line x1="{glass_x + 3:.1f}" y1="{glass_y + 12:.1f}"'
+        f' x2="{glass_x + 9:.1f}" y2="{glass_y + 4:.1f}"'
+        f' stroke="#fff" stroke-opacity="0.6" stroke-width="1.2"/>'
+        f'</g>'
+        f'<g class="stovepipe">'
+        f'<circle cx="{pipe_x + 2.5:.1f}" cy="{pipe_y + 3:.1f}" r="5"'
+        f' fill="#000" opacity="0.3"/>'
+        f'<circle cx="{pipe_x:.1f}" cy="{pipe_y:.1f}" r="5" fill="#4a4a4a"/>'
+        f'<circle cx="{pipe_x:.1f}" cy="{pipe_y:.1f}" r="3.2"'
+        f' fill="#2a2a2a"/>'
+        f'<circle cx="{pipe_x - 1.4:.1f}" cy="{pipe_y - 1.4:.1f}" r="1.3"'
+        f' fill="#8a8a8a"/>'
+        f'</g>'
+        f'<g class="ridge-cap">'
+        f'<rect x="{x - 2}" y="{ridge - 3}" width="{w + 4}" height="6"'
+        f' rx="1.5" fill="{_shade(SHED_ROOF, -0.35)}"/>'
+        + ''.join(
+            f'<line x1="{cx:.1f}" y1="{ridge - 3}" x2="{cx:.1f}"'
+            f' y2="{ridge + 3}" stroke="#000" stroke-opacity="0.3"'
+            f' stroke-width="0.6"/>'
+            for cx in range(int(x) + 8, int(x + w), 10)
+        )
+        + f'<rect x="{x - 2}" y="{ridge - 3}" width="{w + 4}" height="2"'
+        f' rx="1" fill="#fff" opacity="0.12"/>'
+        f'</g>'
         f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="none"'
-        f' stroke="{_shade(SHED_ROOF, -0.5)}" stroke-width="1.5"/>'
+        f' stroke="{frame}" stroke-width="1.5"/>'
         f'<path d="M{x + w},{y + h - 6} H{BARREL_CX - 4}'
         f' V{BARREL_CY - BARREL_R * 0.5}" fill="none"'
         f' stroke="{BARREL_BAND}" stroke-width="3" stroke-linejoin="round"/>'
@@ -2522,6 +2789,7 @@ def _render_timeline_beds(
             f'{opacity_anim}'
             f'{bed_soil}'
             f'{plant_parts}'
+            f'{_render_row_markers(bed, max_sessions, species)}'
             f'{_render_bed_label(bed)}'
             f'</g>'
         )
@@ -2828,7 +3096,12 @@ def render_plot_timeline_svg(
         _render_timeline_grass(
             vitality, total_h, layout.legend_y, key_times, dur
         )
-        + _render_paths(beds)
+        + _render_paths(
+            beds,
+            {b.repo: _bed_first_day(timeline, b.repo) for b in beds},
+            key_times,
+            dur,
+        )
         + _render_fence()
         + _render_timeline_beds(beds, timeline, key_times, dur)
         + _render_shed(
