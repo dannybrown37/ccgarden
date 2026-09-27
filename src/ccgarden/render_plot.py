@@ -38,6 +38,8 @@ from ccgarden.render_utils import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from ccgarden.data import (
         GardenData,
         GardenTimeline,
@@ -151,6 +153,7 @@ FENCE_POST_SPACING = 40
 FENCE_POST_SIZE = 7
 GATE_X = FENCE_X + FENCE_W / 2
 GATE_WIDTH = 56
+SHED_GATE_X = SHED_BOX[0] + SHED_BOX[2] / 2
 
 # ── Color palette ──────────────────────────────────────────────
 
@@ -205,6 +208,9 @@ SPRINKLER_MIN_SCALE = 0.25
 # cells rather than going past SPRINKLER_MAX_HEADS.
 SPRINKLER_CELL = 80.0
 SPRINKLER_MAX_HEADS = 12
+# A head looks for bare soil on this many points across each side of
+# its cell, so it stands between plants rather than on one.
+SPRINKLER_SEARCH_STEPS = 9
 # The soil of a bed worked today, darkened as if just watered; it dries
 # back to plain soil across the sprinkler window.
 WET_SOIL = '#141a26'
@@ -765,8 +771,38 @@ class SprinklerGrid(NamedTuple):
     reach: float
 
 
-def _sprinkler_grid(bed: BedRect) -> SprinklerGrid:
-    """Heads at the centre of each cell, reaching its corners.
+def _bare_spot(
+    cell: tuple[float, float, float, float],
+    plants: Sequence[PlantPlacement],
+) -> tuple[float, float]:
+    """The spot nearest the cell's centre that is clear of foliage.
+
+    Clearance counts only up to the head's own radius, so a head takes
+    the first gap between plants instead of fleeing to the bed's edge.
+    """
+    x, y, w, h = cell
+    cx, cy = x + w / 2, y + h / 2
+    if not plants:
+        return cx, cy
+    steps = SPRINKLER_SEARCH_STEPS
+    spots = [
+        (x + w * (i + 0.5) / steps, y + h * (j + 0.5) / steps)
+        for i in range(steps)
+        for j in range(steps)
+    ]
+
+    def clearance(spot: tuple[float, float]) -> tuple[float, float]:
+        px, py = spot
+        gap = min(math.hypot(px - p.x, py - p.y) - p.size / 2 for p in plants)
+        return min(gap, SPRINKLER_HEAD_R), -math.hypot(px - cx, py - cy)
+
+    return max(spots, key=clearance)
+
+
+def _sprinkler_grid(
+    bed: BedRect, plants: Sequence[PlantPlacement] = ()
+) -> SprinklerGrid:
+    """One head per cell, stood in bare soil, reaching its cell's corners.
 
     Reaching the corners means the circles overlap enough to wet the
     whole bed; the spill past the soil is clipped off.
@@ -776,14 +812,22 @@ def _sprinkler_grid(bed: BedRect) -> SprinklerGrid:
     cols = max(1, round(sw / cell))
     rows = max(1, round(sh / cell))
     cw, ch = sw / cols, sh / rows
-    return SprinklerGrid(
-        [
-            (sx + (c + 0.5) * cw, sy + (r + 0.5) * ch)
-            for r in range(rows)
-            for c in range(cols)
-        ],
-        math.hypot(cw, ch) / 2,
-    )
+    heads: list[tuple[float, float]] = []
+    reach = 0.0
+    for r in range(rows):
+        for c in range(cols):
+            x, y = sx + c * cw, sy + r * ch
+            hx, hy = _bare_spot((x, y, cw, ch), plants)
+            heads.append((hx, hy))
+            reach = max(
+                reach,
+                *(
+                    math.hypot(hx - kx, hy - ky)
+                    for kx in (x, x + cw)
+                    for ky in (y, y + ch)
+                ),
+            )
+    return SprinklerGrid(heads, reach)
 
 
 def _sprinkler_clip(bed: BedRect) -> tuple[str, str]:
@@ -850,6 +894,7 @@ def _sprinkler(
 
 def _bed_sprinklers(
     bed: BedRect,
+    plants: Sequence[PlantPlacement],
     scales: list[float] | None = None,
     clock: tuple[list[float], float] | None = None,
     scale: float = 1.0,
@@ -859,7 +904,7 @@ def _bed_sprinklers(
     With a ``clock`` each head grows about itself through ``scales``;
     without one they're drawn at ``scale``.
     """
-    grid = _sprinkler_grid(bed)
+    grid = _sprinkler_grid(bed, plants)
     rng = random.Random(f'sprinkler-{bed.repo}')
     heads = []
     for cx, cy in grid.heads:
@@ -883,15 +928,18 @@ def _bed_sprinklers(
     )
 
 
-def _render_bed_sprinkler(bed: BedRect) -> str:
+def _render_bed_sprinkler(
+    bed: BedRect, plants: Sequence[PlantPlacement]
+) -> str:
     scale = _sprinkler_scale(_sprinkler_strength(bed.branch.idle_days))
     if scale <= 0:
         return ''
-    return _bed_sprinklers(bed, scale=scale)
+    return _bed_sprinklers(bed, plants, scale=scale)
 
 
 def _render_timeline_sprinkler(
     bed: BedRect,
+    plants: Sequence[PlantPlacement],
     idle_days: list[int | None] | None,
     clock: tuple[list[float], float],
 ) -> str:
@@ -901,7 +949,7 @@ def _render_timeline_sprinkler(
     ]
     if not any(scales):
         return ''
-    return _bed_sprinklers(bed, scales, clock)
+    return _bed_sprinklers(bed, plants, scales, clock)
 
 
 def _wet_opacity(strength: float) -> str:
@@ -1582,7 +1630,9 @@ def _render_beds(
             + _render_bed_wet(bed)
             + _render_bed_plants(bed, max_sessions, vitality, species)
             + _render_bed_weeds(bed, vitality)
-            + _render_bed_sprinkler(bed)
+            + _render_bed_sprinkler(
+                bed, _plant_layout(bed, max_sessions, species)
+            )
             + _render_row_markers(bed, max_sessions, species)
             + _render_bed_label(bed)
             + '</g>'
@@ -1730,20 +1780,22 @@ def _point_in_any_bed(
 # ── Fence ──────────────────────────────────────────────────────
 
 
+def _in_gate(x: float, y: float) -> bool:
+    half = GATE_WIDTH / 2
+    gate_x = SHED_GATE_X if y == FENCE_Y else GATE_X
+    return gate_x - half < x < gate_x + half
+
+
 def _fence_posts() -> list[tuple[float, float]]:
-    """Post centres around the fence, skipping the gate opening."""
+    """Post centres around the fence, skipping both gate openings."""
     posts: list[tuple[float, float]] = []
     x0, y0 = FENCE_X, FENCE_Y
     x1, y1 = FENCE_X + FENCE_W, FENCE_Y + FENCE_H
     nx = max(1, round(FENCE_W / FENCE_POST_SPACING))
     ny = max(1, round(FENCE_H / FENCE_POST_SPACING))
-    gate_lo = GATE_X - GATE_WIDTH / 2
-    gate_hi = GATE_X + GATE_WIDTH / 2
     for i in range(nx + 1):
         x = x0 + i * FENCE_W / nx
-        posts.append((x, y0))
-        if not gate_lo < x < gate_hi:
-            posts.append((x, y1))
+        posts.extend((x, y) for y in (y0, y1) if not _in_gate(x, y))
     for j in range(1, ny):
         y = y0 + j * FENCE_H / ny
         posts.extend(((x0, y), (x1, y)))
@@ -1753,14 +1805,14 @@ def _fence_posts() -> list[tuple[float, float]]:
 def _fence_rails() -> list[tuple[float, float, float, float]]:
     x0, y0 = FENCE_X, FENCE_Y
     x1, y1 = FENCE_X + FENCE_W, FENCE_Y + FENCE_H
-    gate_lo = GATE_X - GATE_WIDTH / 2
-    gate_hi = GATE_X + GATE_WIDTH / 2
+    half = GATE_WIDTH / 2
     return [
-        (x0, y0, x1, y0),
+        (x0, y0, SHED_GATE_X - half, y0),
+        (SHED_GATE_X + half, y0, x1, y0),
         (x0, y0, x0, y1),
         (x1, y0, x1, y1),
-        (x0, y1, gate_lo, y1),
-        (gate_hi, y1, x1, y1),
+        (x0, y1, GATE_X - half, y1),
+        (GATE_X + half, y1, x1, y1),
     ]
 
 
@@ -3344,7 +3396,12 @@ def _render_timeline_beds(
 
         clock = (key_times, dur)
         idle_days = timeline.branch_idle_days.get(repo)
-        sprinkler = _render_timeline_sprinkler(bed, idle_days, clock)
+        sprinkler = _render_timeline_sprinkler(
+            bed,
+            _plant_layout(bed, max_sessions, species),
+            idle_days,
+            clock,
+        )
         wet = _render_timeline_wet(bed, idle_days, clock)
         tt = _title(_bed_tooltip(bed.branch, species))
         data = _bed_tooltip_plants(bed.branch, species)

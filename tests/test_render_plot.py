@@ -30,7 +30,12 @@ from ccgarden.render_plot import (
     BED_ZONE_X,
     BED_ZONE_Y,
     FENCE_H,
+    FENCE_W,
+    FENCE_X,
     FENCE_Y,
+    GATE_WIDTH,
+    GATE_X,
+    SHED_GATE_X,
     FRAME_WOOD,
     FRAME_WIDTH,
     LEGEND_COLS,
@@ -58,6 +63,8 @@ from ccgarden.render_plot import (
     _bench_tools,
     _butterfly_keyframes,
     _feature_boxes,
+    _fence_posts,
+    _fence_rails,
     _flower_positions,
     _frame_planks,
     _bed_wood,
@@ -1557,6 +1564,40 @@ class TestRenderPlotSvg:
         svg = render_plot_svg(_garden())
         assert 'fence' in svg.lower() or 'rect' in svg
 
+
+class TestFence:
+    GATES = (
+        pytest.param(GATE_X, FENCE_Y + FENCE_H, id='bottom'),
+        pytest.param(SHED_GATE_X, FENCE_Y, id='by-the-shed'),
+    )
+
+    @pytest.mark.parametrize(('gate_x', 'side_y'), GATES)
+    def test_no_rail_crosses_the_gate(self, gate_x, side_y):
+        for ax, ay, bx, by in _fence_rails():
+            if ay == by == side_y:
+                assert not min(ax, bx) < gate_x < max(ax, bx)
+
+    @pytest.mark.parametrize(('gate_x', 'side_y'), GATES)
+    def test_no_post_stands_in_the_gate(self, gate_x, side_y):
+        half = GATE_WIDTH / 2
+        assert not any(
+            py == side_y and gate_x - half < px < gate_x + half
+            for px, py in _fence_posts()
+        )
+
+    def test_shed_gate_opens_below_the_shed(self):
+        sx, _sy, sw, _sh = SHED_BOX
+        half = GATE_WIDTH / 2
+        assert sx <= SHED_GATE_X - half
+        assert SHED_GATE_X + half <= sx + sw
+        assert SHED_GATE_X - half > FENCE_X
+
+    def test_rest_of_the_fence_is_whole(self):
+        span = sum(
+            math.hypot(bx - ax, by - ay) for ax, ay, bx, by in _fence_rails()
+        )
+        assert span == pytest.approx(2 * (FENCE_W + FENCE_H) - 2 * GATE_WIDTH)
+
     def test_contains_repo_names(self):
         garden = _garden(branches=[_branch('my-project', lines_added=1000)])
         svg = render_plot_svg(garden)
@@ -1789,6 +1830,31 @@ class TestSprinklers:
                     math.hypot(px - hx, py - hy) <= grid.reach + 1e-6
                     for hx, hy in grid.heads
                 ), (px, py)
+
+    def test_spray_still_covers_the_soil_when_dodging_plants(self):
+        bed = _bed(w=300.0, h=220.0, sessions=50, model_effort_counts=MIXED)
+        sx, sy, sw, sh = _soil_rect(bed)
+        grid = _sprinkler_grid(bed, _plant_layout(bed, 50))
+        steps = 12
+        for i in range(steps + 1):
+            for j in range(steps + 1):
+                px, py = sx + sw * i / steps, sy + sh * j / steps
+                assert any(
+                    math.hypot(px - hx, py - hy) <= grid.reach + 1e-6
+                    for hx, hy in grid.heads
+                ), (px, py)
+
+    @pytest.mark.parametrize(
+        ('w', 'h', 'sessions'),
+        [(300.0, 220.0, 50), (200.0, 160.0, 10), (120.0, 400.0, 30)],
+    )
+    def test_heads_stand_between_plants(self, w, h, sessions):
+        bed = _bed(w=w, h=h, sessions=sessions, model_effort_counts=MIXED)
+        plants = _plant_layout(bed, 50)
+        assert plants
+        for hx, hy in _sprinkler_grid(bed, plants).heads:
+            for p in plants:
+                assert math.hypot(hx - p.x, hy - p.y) > p.size * 0.35
 
     @pytest.mark.parametrize(
         ('w', 'h'),

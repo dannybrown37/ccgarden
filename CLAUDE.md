@@ -227,7 +227,9 @@ made the tree replay crawl in the browser.
   `bed-wet` overlay under the plants, darkest the day you work the
   bed and drying out across the window. `_sprinkler_grid` puts one
   head per cell (capped at `SPRINKLER_MAX_HEADS` by widening cells),
-  each reaching its cell's corners so the whole bed is covered, and
+  stood in the bare soil nearest the cell's centre (`_bare_spot`, off
+  the bed's `_plant_layout`), each reaching its cell's corners so the
+  whole bed is covered, and
   the spray is clipped to the soil. The replay grows each head via
   `_grow_about` (zero only when off); the jet's turn is CSS
   (`ccp-spin`, `fill-box` pinned to the head by an invisible
