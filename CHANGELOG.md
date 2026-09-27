@@ -1,3 +1,19 @@
+## v0.6.0 (2026-09-27)
+
+### Feat
+
+- continue wip, organize plants in a saner way
+- continue wip on beatiful --plot option
+- wip on plot
+- phase 1 of render plot
+
+### Fix
+
+- don't hard-code species<->model/effort, just set a favorites order within category
+- pricing in ccstats, tooltip appearance in legend
+- show plant percentage in legend, hover in legend highlights only that plant, show start date in sessions counter
+- more visual improvements to plot
+
 ## v0.5.2 (2026-09-17)
 
 ### Fix
