@@ -193,6 +193,10 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   shared strip for species with under a row of plants), a
   `PATCH_GAP` of bare soil between strips. `PLANT_OVERLAP` < 1 on
   purpose — soil must show between plants, or it reads as wallpaper.
+- Plant rows run along each strip's long side (`_hex_rows`), and
+  `_bed_furrows` lays one drill under every row from the same
+  `_bed_planting`, so a plant always sits in a furrow. `lines_added`
+  sets how *deep* the furrows read (`_furrow_depth`), not how many.
 - Static and timeline share every drawing function
   (`_render_bed_body`, `_plant_layout`, `_render_flower`,
   `_signboard`) and lay out from final totals, so the replay ends on

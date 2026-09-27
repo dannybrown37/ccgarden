@@ -31,6 +31,7 @@ from ccgarden.render_plot import (
     FENCE_H,
     FENCE_Y,
     PATCH_GAP,
+    PLANT_MAX_SPACING,
     PLOT_VIEWBOX_WIDTH,
     _bed_area_metric,
     _bed_tooltip,
@@ -39,7 +40,8 @@ from ccgarden.render_plot import (
     _feature_boxes,
     _flower_positions,
     _frame_planks,
-    _furrow_count,
+    _bed_furrows,
+    _furrow_depth,
     _layout_beds,
     _plant_layout,
     _plant_specs,
@@ -752,18 +754,78 @@ class TestBedTooltip:
 # ── Furrows ───────────────────────────────────────────────────
 
 
-class TestFurrowCount:
+class TestFurrowDepth:
     @pytest.mark.parametrize(
         ('lines', 'expected_range'),
         [
-            (0, (0, 0)),
-            (100, (1, 3)),
-            (5000, (7, 8)),
+            (0, (0.0, 0.0)),
+            (100, (0.1, 0.3)),
+            (5000, (1.0, 1.0)),
+            (500_000, (1.0, 1.0)),
         ],
     )
-    def test_furrow_scaling(self, lines, expected_range):
+    def test_furrow_depth_scaling(self, lines, expected_range):
         lo, hi = expected_range
-        assert lo <= _furrow_count(lines) <= hi
+        assert lo <= _furrow_depth(lines) <= hi
+
+
+def _furrow_bed(w=200.0, h=160.0, lines_added=3000) -> BedRect:
+    return _bed(
+        w=w,
+        h=h,
+        sessions=50,
+        lines_added=lines_added,
+        model_effort_counts=MIXED,
+    )
+
+
+def _dist_to_segment(px, py, f) -> float:
+    dx, dy = f.x2 - f.x1, f.y2 - f.y1
+    length_sq = dx * dx + dy * dy
+    t = 0.0
+    if length_sq:
+        t = ((px - f.x1) * dx + (py - f.y1) * dy) / length_sq
+    t = min(max(t, 0.0), 1.0)
+    return math.dist((px, py), (f.x1 + t * dx, f.y1 + t * dy))
+
+
+class TestFurrowsFollowRows:
+    @pytest.mark.parametrize(
+        ('w', 'h'), [(200.0, 160.0), (400.0, 90.0), (90.0, 400.0)]
+    )
+    def test_every_plant_sits_in_a_furrow(self, w, h):
+        bed = _furrow_bed(w, h)
+        furrows = _bed_furrows(bed, 50)
+        assert furrows
+        for p in _plant_layout(bed, 50):
+            nearest = min(_dist_to_segment(p.x, p.y, f) for f in furrows)
+            assert nearest <= 0.1 * PLANT_MAX_SPACING
+
+    @pytest.mark.parametrize(
+        ('w', 'h', 'vertical'),
+        [(400.0, 70.0, False), (120.0, 400.0, True)],
+    )
+    def test_furrows_run_along_the_strip(self, w, h, vertical):
+        for f in _bed_furrows(_furrow_bed(w, h), 50):
+            if vertical:
+                assert f.x1 == pytest.approx(f.x2)
+            else:
+                assert f.y1 == pytest.approx(f.y2)
+
+    def test_furrows_stay_in_the_soil(self):
+        bed = _furrow_bed()
+        sx, sy, sw, sh = _soil_rect(bed)
+        for f in _bed_furrows(bed, 50):
+            for x, y in ((f.x1, f.y1), (f.x2, f.y2)):
+                assert sx <= x <= sx + sw
+                assert sy <= y <= sy + sh
+
+    def test_untilled_bed_has_no_furrows(self):
+        assert _bed_furrows(_furrow_bed(lines_added=0), 50) == []
+
+    def test_static_render_draws_furrows(self):
+        svg = render_plot_svg(_garden())
+        assert 'class="furrow"' in svg
 
 
 # ── Weeds (dormancy) ─────────────────────────────────────────

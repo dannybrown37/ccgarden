@@ -640,32 +640,41 @@ def _plant_area(bed: BedRect) -> tuple[float, float, float, float]:
     return (sx + pad, sy + pad, sw - 2 * pad, sh - 2 * pad - reserve)
 
 
-def _hex_grid(
+def _hex_rows(
     area: tuple[float, float, float, float],
     spacing: float,
-) -> list[tuple[float, float]]:
-    """Staggered rows centred in ``area``, row-major.
+) -> list[list[tuple[float, float]]]:
+    """Staggered rows centred in ``area``, running along its long side.
 
     Points sit at cell centres rather than on the area's edges, so a
     plant's foliage stays inside the area instead of spilling half its
     width over a patch boundary.
     """
     ax, ay, aw, ah = area
+    if ah > aw:
+        return [
+            [(x, y) for y, x in row]
+            for row in _hex_rows((ay, ax, ah, aw), spacing)
+        ]
     row_step = spacing * HEX_ROW_RATIO
-    rows = max(1, int(ah / row_step))
+    n_rows = max(1, int(ah / row_step))
     cols = max(1, int(aw / spacing))
-    used_h = (rows - 1) * row_step
-    y0 = ay + (ah - used_h) / 2
-    points: list[tuple[float, float]] = []
-    for row in range(rows):
-        stagger = spacing / 2 if row % 2 and cols > 1 else 0.0
-        n = cols - 1 if stagger else cols
-        used_w = (n - 1) * spacing
-        x0 = ax + (aw - used_w) / 2
-        points.extend(
-            (x0 + col * spacing, y0 + row * row_step) for col in range(n)
+    y0 = ay + (ah - (n_rows - 1) * row_step) / 2
+    rows: list[list[tuple[float, float]]] = []
+    for row in range(n_rows):
+        n = cols - 1 if row % 2 and cols > 1 else cols
+        x0 = ax + (aw - (n - 1) * spacing) / 2
+        rows.append(
+            [(x0 + col * spacing, y0 + row * row_step) for col in range(n)]
         )
-    return points
+    return rows
+
+
+def _hex_grid(
+    area: tuple[float, float, float, float],
+    spacing: float,
+) -> list[tuple[float, float]]:
+    return [p for row in _hex_rows(area, spacing) for p in row]
 
 
 def _patch_sizes(specs: list[PlantSpec], total: int) -> list[int]:
@@ -722,12 +731,18 @@ def _patch_groups(
     return [*major, minor] if minor else major
 
 
-def _plant_layout(
+class BedPlanting(NamedTuple):
+    spacing: float
+    groups: list[list[tuple[PlantSpec, int]]]
+    strips: list[tuple[float, float, float, float]]
+
+
+def _bed_planting(
     bed: BedRect,
     max_sessions: int,
     species: dict[str, str] | None = None,
-) -> list[PlantPlacement]:
-    """Where every plant in a bed goes, how big, and which species.
+) -> BedPlanting | None:
+    """How a bed is planted: plant spacing and each block's strip.
 
     Density follows the repo's sessions relative to the busiest repo,
     so a busy bed is fuller and a quiet one is spread thin -- but
@@ -736,9 +751,9 @@ def _plant_layout(
     share one, so a bed's model mix reads at a glance.
     """
     area = _plant_area(bed)
-    _, _, aw, ah = area
+    ax, ay, aw, ah = area
     if aw <= 0 or ah <= 0:
-        return []
+        return None
     specs = _plant_specs(bed.branch, species) or [
         PlantSpec('unknown', None, 1)
     ]
@@ -754,18 +769,29 @@ def _plant_layout(
         for spec, n in zip(specs, _patch_sizes(specs, target), strict=True)
         if n > 0
     ]
-    ax, ay = area[0], area[1]
     row_area = (ax, ay, aw, spacing) if aw > ah else (ax, ay, spacing, ah)
     groups = _patch_groups(planting, len(_hex_grid(row_area, spacing)))
     strips = _strip_split(
         area, [sum(n for _, n in g) for g in groups], spacing
     )
+    return BedPlanting(spacing, groups, strips)
 
+
+def _plant_layout(
+    bed: BedRect,
+    max_sessions: int,
+    species: dict[str, str] | None = None,
+) -> list[PlantPlacement]:
+    """Where every plant in a bed goes, how big, and which species."""
+    planting = _bed_planting(bed, max_sessions, species)
+    if planting is None:
+        return []
+    spacing = planting.spacing
     rng = random.Random(f'plot-plants-{bed.repo}')
     jitter = spacing * PLANT_JITTER_FRACTION
     base = min(spacing * PLANT_OVERLAP, PLANT_MAX_SIZE)
     plants: list[PlantPlacement] = []
-    for group, strip in zip(groups, strips, strict=True):
+    for group, strip in zip(planting.groups, planting.strips, strict=True):
         grid = _hex_grid(strip, spacing)
         sown = [spec for spec, n in group for _ in range(n)]
         count = min(len(sown), len(grid))
@@ -801,21 +827,74 @@ def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
     return f'{open_tag}>{inner}</use>' if inner else f'{open_tag}/>'
 
 
-FURROW_MAX = 8
 FURROW_LINES_SATURATION = 5000
-FURROW_MIN_BED_HEIGHT = 20
+FURROW_WIDTH = 0.45
+FURROW_MIN_OPACITY = 0.08
+FURROW_MAX_OPACITY = 0.26
 
 
-def _furrow_count(lines_added: int) -> int:
+class Furrow(NamedTuple):
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    width: float
+
+
+def _furrow_depth(lines_added: int) -> float:
+    """How deeply a bed is tilled, 0..1, from the code written in it."""
     if lines_added <= 0:
-        return 0
-    raw = (
-        math.sqrt(
-            min(lines_added, FURROW_LINES_SATURATION) / FURROW_LINES_SATURATION
-        )
-        * FURROW_MAX
+        return 0.0
+    return math.sqrt(
+        min(lines_added, FURROW_LINES_SATURATION) / FURROW_LINES_SATURATION
     )
-    return max(1, int(raw))
+
+
+def _bed_furrows(
+    bed: BedRect,
+    max_sessions: int,
+    species: dict[str, str] | None = None,
+) -> list[Furrow]:
+    """One drill under each row of plants, running the row's length."""
+    planting = _bed_planting(bed, max_sessions, species)
+    if planting is None or _furrow_depth(bed.branch.lines_added) <= 0:
+        return []
+    half = planting.spacing / 2
+    furrows = []
+    for sx, sy, sw, sh in planting.strips:
+        for row in _hex_rows((sx, sy, sw, sh), planting.spacing):
+            (x1, y1), (x2, y2) = row[0], row[-1]
+            if sh > sw:
+                y1, y2 = max(y1 - half, sy), min(y2 + half, sy + sh)
+            else:
+                x1, x2 = max(x1 - half, sx), min(x2 + half, sx + sw)
+            furrows.append(
+                Furrow(x1, y1, x2, y2, planting.spacing * FURROW_WIDTH)
+            )
+    return furrows
+
+
+def _render_furrows(furrows: list[Furrow], lines_added: int) -> str:
+    """Grooves whose far wall catches the top-left light."""
+    depth = _furrow_depth(lines_added)
+    opacity = (
+        FURROW_MIN_OPACITY + (FURROW_MAX_OPACITY - FURROW_MIN_OPACITY) * depth
+    )
+    parts = []
+    for f in furrows:
+        lit = f.width * 0.35
+        dx, dy = (lit, 0.0) if f.x1 == f.x2 else (0.0, lit)
+        parts.append(
+            f'<line class="furrow" x1="{f.x1:.1f}" y1="{f.y1:.1f}"'
+            f' x2="{f.x2:.1f}" y2="{f.y2:.1f}" stroke="#000"'
+            f' stroke-width="{f.width:.1f}" stroke-linecap="round"'
+            f' opacity="{opacity:.2f}"/>'
+            f'<line x1="{f.x1 + dx:.1f}" y1="{f.y1 + dy:.1f}"'
+            f' x2="{f.x2 + dx:.1f}" y2="{f.y2 + dy:.1f}" stroke="#fff"'
+            f' stroke-width="{f.width * 0.25:.1f}" stroke-linecap="round"'
+            f' opacity="{opacity * 0.5:.2f}"/>'
+        )
+    return ''.join(parts)
 
 
 def _shade(color: str, amount: float) -> str:
@@ -875,24 +954,14 @@ def _render_bed_shadow(bed: BedRect) -> str:
     )
 
 
-def _render_furrows(bed: BedRect) -> str:
-    n = _furrow_count(bed.branch.lines_added)
-    if n <= 0 or bed.h <= FURROW_MIN_BED_HEIGHT:
-        return ''
-    sx, sy, sw, sh = _soil_rect(bed)
-    pad = 4
-    parts = []
-    for i in range(1, n + 1):
-        fy = sy + i * sh / (n + 1)
-        parts.append(
-            f'<line x1="{sx + pad:.1f}" y1="{fy:.1f}"'
-            f' x2="{sx + sw - pad:.1f}" y2="{fy:.1f}"'
-            f' stroke="#000" stroke-width="1.2" opacity="0.12"/>'
-            f'<line x1="{sx + pad:.1f}" y1="{fy - 1.2:.1f}"'
-            f' x2="{sx + sw - pad:.1f}" y2="{fy - 1.2:.1f}"'
-            f' stroke="#fff" stroke-width="0.8" opacity="0.08"/>'
-        )
-    return ''.join(parts)
+def _bed_furrow_marks(
+    bed: BedRect,
+    max_sessions: int,
+    species: dict[str, str],
+) -> str:
+    return _render_furrows(
+        _bed_furrows(bed, max_sessions, species), bed.branch.lines_added
+    )
 
 
 def _render_bed_body(
@@ -901,6 +970,7 @@ def _render_bed_body(
     soil_anim: str = '',
     *,
     shadow: bool = True,
+    furrows: str = '',
 ) -> str:
     """Shadow, soil and frame of one raised bed.
 
@@ -914,7 +984,7 @@ def _render_bed_body(
         _render_bed_shadow(bed) if shadow else '',
         _rect(soil, f'fill="{soil_color}"', soil_anim),
         _rect(soil, 'fill="url(#soilTexture)"'),
-        _render_furrows(bed),
+        furrows,
         _rect((sx, sy, sw, edge), 'fill="url(#shadeDown)"'),
         _rect((sx, sy, edge, sh), 'fill="url(#shadeRight)"'),
     ]
@@ -934,9 +1004,10 @@ def _render_bed_body(
 def _render_bed_soil(
     bed: BedRect,
     vitality: float,
+    furrows: str = '',
 ) -> str:
     return _render_bed_body(
-        bed, _blend_hex(SOIL_DORMANT, SOIL_COLOR, vitality)
+        bed, _blend_hex(SOIL_DORMANT, SOIL_COLOR, vitality), furrows=furrows
     )
 
 
@@ -1029,7 +1100,9 @@ def _render_beds(
         tt = _title(_bed_tooltip(bed.branch, species))
         parts.append(
             f'<g class="bed">{tt}'
-            + _render_bed_soil(bed, vitality)
+            + _render_bed_soil(
+                bed, vitality, _bed_furrow_marks(bed, max_sessions, species)
+            )
             + _render_bed_plants(bed, max_sessions, vitality, species)
             + _render_bed_weeds(bed, vitality)
             + _render_bed_label(bed)
@@ -2426,7 +2499,12 @@ def _render_timeline_beds(
             smooth=True,
         )
 
-        bed_soil = _render_bed_body(bed, soil_vals[-1], soil_anim)
+        bed_soil = _render_bed_body(
+            bed,
+            soil_vals[-1],
+            soil_anim,
+            furrows=_bed_furrow_marks(bed, max_sessions, species),
+        )
 
         plant_parts = _render_timeline_bed_plants(
             bed,
