@@ -20,6 +20,7 @@ from ccgarden.data import (
     ToolBush,
     ToolUsageDay,
 )
+from ccgarden.data import DORMANCY_HALF_LIFE_DAYS, DORMANCY_MIN_GAP_DAYS
 from ccgarden.plot_species import FAMILY_POOLS, SPECIES, model_family
 from ccgarden.render_plot import (
     BedRect,
@@ -32,6 +33,8 @@ from ccgarden.render_plot import (
     FENCE_Y,
     FRAME_WOOD,
     FRAME_WIDTH,
+    LEGEND_COLS,
+    LEGEND_ENTRIES,
     PATCH_GAP,
     STONE_STEP,
     PLANT_MAX_SPACING,
@@ -43,6 +46,9 @@ from ccgarden.render_plot import (
     SOIL_DORMANT,
     WEED_COLOR,
     WEED_FLOWER,
+    WEED_FULL_DAYS,
+    WEED_MAX,
+    WEED_ONSET_DAYS,
     _bed_area_metric,
     _bed_planting,
     _bed_tag,
@@ -1000,7 +1006,6 @@ class TestLegend:
             'Bed',
             'Flower',
             'Tools',
-            'Rain barrel',
             'Sundial',
             'Butterflies',
             'Fireflies',
@@ -1010,6 +1015,12 @@ class TestLegend:
     )
     def test_entry_present(self, label):
         assert f'>{label}<' in _legend(render_plot_svg(_garden()))
+
+    def test_barrel_left_to_its_tooltip(self):
+        assert 'Rain barrel' not in _legend(render_plot_svg(_garden()))
+
+    def test_entries_fill_every_row(self):
+        assert len(LEGEND_ENTRIES) % LEGEND_COLS == 0
 
     def test_icons_carry_no_tooltip(self):
         assert '<title>' not in _legend(render_plot_svg(_garden()))
@@ -1310,20 +1321,33 @@ class TestFurrowsFollowRows:
 # ── Weeds (dormancy) ─────────────────────────────────────────
 
 
+def _vitality_after(days: float) -> float:
+    return 0.5 ** (days / DORMANCY_HALF_LIFE_DAYS)
+
+
 class TestWeedCount:
     @pytest.mark.parametrize(
-        ('vitality', 'expected_range'),
+        ('days', 'expected'),
         [
-            (1.0, (0, 0)),
-            (0.9, (0, 0)),
-            (0.6, (1, 3)),
-            (0.3, (3, 6)),
-            (0.0, (5, 8)),
+            (0, 0),
+            (WEED_ONSET_DAYS - 0.5, 0),
+            (WEED_ONSET_DAYS, 1),
+            (WEED_FULL_DAYS, WEED_MAX),
+            (90, WEED_MAX),
         ],
     )
-    def test_weed_scaling(self, vitality, expected_range):
-        lo, hi = expected_range
-        assert lo <= _weed_count(vitality) <= hi
+    def test_weeds_keyed_to_days_away(self, days, expected):
+        assert _weed_count(_vitality_after(days)) == expected
+
+    def test_grows_with_days_away(self):
+        counts = [
+            _weed_count(_vitality_after(d)) for d in range(WEED_FULL_DAYS + 1)
+        ]
+        assert counts == sorted(counts)
+
+    def test_the_shortest_real_lapse_grows_weeds(self):
+        longest_away = DORMANCY_MIN_GAP_DAYS - 1
+        assert _weed_count(_vitality_after(longest_away)) >= 1
 
 
 class TestWeedsInSvg:

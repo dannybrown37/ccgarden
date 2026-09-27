@@ -21,10 +21,12 @@ from ccgarden.plot_species import (
     model_family,
 )
 from ccgarden.render_utils import (
+    EPSILON,
     _animate_tag,
     _animate_transform_tag,
     _blend_hex,
     _escape_xml,
+    _exact_days_away,
     _frame_weights,
     _format_day,
     _lerp_hex,
@@ -190,7 +192,10 @@ WEED_LEAF = (
     'M0 0 L-1.9 -1.6 L-0.9 -2.4 L-2.8 -3.5 L-1.2 -4.3 L-2.4 -5.6 L0 -7.6'
     ' L2.4 -5.6 L1.2 -4.3 L2.8 -3.5 L0.9 -2.4 L1.9 -1.6 Z'
 )
-WEED_VITALITY_THRESHOLD = 0.75
+# In days away, like rain: the first weed has to come up inside the
+# shortest lapse the timeline inserts, or a working rhythm never shows one.
+WEED_ONSET_DAYS = 2
+WEED_FULL_DAYS = 10
 WEED_MAX = 8
 # Days after you last worked a bed until its sprinkler is off; the
 # spray shrinks steadily across the window rather than cutting out.
@@ -673,11 +678,11 @@ def _plant_scale(spec: PlantSpec) -> float:
 
 
 def _weed_count(vitality: float) -> int:
-    if vitality >= WEED_VITALITY_THRESHOLD:
+    days = _exact_days_away(vitality)
+    if days < WEED_ONSET_DAYS - EPSILON:
         return 0
-    frac = (WEED_VITALITY_THRESHOLD - vitality) / WEED_VITALITY_THRESHOLD
-    raw = math.sqrt(frac) * WEED_MAX
-    return max(1, min(WEED_MAX, int(raw)))
+    ramp = (days - WEED_ONSET_DAYS) / (WEED_FULL_DAYS - WEED_ONSET_DAYS)
+    return 1 + round(min(1.0, ramp) * (WEED_MAX - 1))
 
 
 class Weed(NamedTuple):
@@ -2823,15 +2828,6 @@ def _legend_tool(x: float, y: float) -> str:
     )
 
 
-def _legend_barrel(x: float, y: float) -> str:
-    return (
-        f'<circle cx="{x}" cy="{y}" r="9" fill="{BARREL_WOOD}"'
-        f' stroke="{BARREL_BAND}" stroke-width="1.5"/>'
-        f'<circle cx="{x + 0.8}" cy="{y + 1}" r="5.5"'
-        f' fill="url(#waterFill)"/>'
-    )
-
-
 def _legend_sundial(x: float, y: float) -> str:
     return (
         f'<circle cx="{x}" cy="{y}" r="9.5" fill="url(#dialStone)"'
@@ -2895,7 +2891,6 @@ def _legend_icon(kind: str, x: float, y: float) -> str:
         'bed': _legend_bed,
         'flower': _legend_flower,
         'tool': _legend_tool,
-        'barrel': _legend_barrel,
         'sundial': _legend_sundial,
         'butterfly': _legend_butterfly,
         'firefly': _legend_firefly,
@@ -2909,7 +2904,6 @@ LEGEND_ENTRIES = (
     ('bed', 'Bed', 'a repo; area = lines + sessions'),
     ('flower', 'Flower', 'a skill; bigger = more calls'),
     ('tool', 'Tools', 'busiest tools; longer = more'),
-    ('barrel', 'Rain barrel', 'all tokens; fuller = more'),
     ('sundial', 'Sundial', 'prompts by hour; blue = night'),
     ('butterfly', 'Butterflies', 'a dry, working streak'),
     ('firefly', 'Fireflies', 'late-night prompting'),
