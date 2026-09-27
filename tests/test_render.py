@@ -74,7 +74,8 @@ from ccgarden.render import (
     _leaf_opacity,
     LEAF_OPACITY_DORMANT,
     LEAF_OPACITY_LIVING,
-    LEAF_PAINT_ID,
+    LEAF_SHAPE_ID,
+    LEAF_VEIN_D,
     LEAVES_PER_SESSION,
     LEGEND_BAND_BOTTOM,
     LEGEND_GRID_ROWS,
@@ -551,6 +552,95 @@ def test_render_timeline_svg_sunflowers_fade_in() -> None:
 
     assert 'class="sunflowers"' in svg
     assert '10 AM' in svg
+
+
+def growing_limb_timeline(final_sessions: int) -> GardenTimeline:
+    days = ['2026-07-20', '2026-07-21', '2026-07-22']
+    sessions = [1, final_sessions // 2, final_sessions]
+    return GardenTimeline(
+        days=days,
+        daily_sessions=[1, 1, 1],
+        cumulative_sessions=sessions,
+        branch_order=['ccgarden'],
+        branch_days={
+            'ccgarden': [
+                RepoBranchDay(
+                    day=d,
+                    sessions=s,
+                    lines_added=400 * (i + 1),
+                    lines_removed=1,
+                    output_tokens=1000 * (i + 1),
+                    input_tokens=10,
+                    cost=0.1,
+                    prompts=5 * s,
+                )
+                for i, (d, s) in enumerate(zip(days, sessions, strict=True))
+            ],
+        },
+    )
+
+
+def test_timeline_leaves_carry_no_animation_of_their_own() -> None:
+    svg = render_timeline_svg(growing_limb_timeline(40))
+
+    leaves = re.findall(r'<use class="leaf"[^>]*?(/>|>.*?</use>)', svg)
+    assert len(leaves) == 40 * LEAVES_PER_SESSION
+    assert leaves == ['/>'] * len(leaves)
+
+
+def test_timeline_animation_count_does_not_scale_with_leaf_count() -> None:
+    svg = render_timeline_svg(growing_limb_timeline(400))
+
+    leaf_count = svg.count('class="leaf"')
+    assert leaf_count == 400 * LEAVES_PER_SESSION
+    assert svg.count('<animateTransform') < leaf_count / 20
+
+
+def test_timeline_foliage_rides_the_growing_limb() -> None:
+    svg = render_timeline_svg(growing_limb_timeline(40))
+
+    anchors = re.findall(
+        r'<g class="foliage-anchor"[^>]*>(<animateTransform[^>]*/>)', svg
+    )
+    assert anchors
+    for anchor in anchors:
+        values = _animate_values(anchor, 'transform')
+        first_x, first_y = map(float, values[0].split(','))
+        final_x, final_y = map(float, values[-1].split(','))
+        assert math.hypot(final_x - first_x, final_y - first_y) > 5
+    spreads = re.findall(
+        r'<g class="foliage-spread"[^>]*>(<animateTransform[^>]*/>)', svg
+    )
+    assert len(spreads) == len(anchors)
+    for spread in spreads:
+        values = [float(v) for v in _animate_values(spread, 'transform')]
+        assert values[0] < values[-1] == 1.0
+
+
+@pytest.mark.parametrize(
+    'svg',
+    [
+        pytest.param(
+            render_svg(
+                GardenData(
+                    rings=[], branches=[branch('dotfiles', sessions=40)]
+                )
+            ),
+            id='static',
+        ),
+        pytest.param(
+            render_timeline_svg(growing_limb_timeline(40)), id='timeline'
+        ),
+    ],
+)
+def test_leaves_reuse_one_drawing_per_colour(svg: str) -> None:
+    uses = re.findall(r'<use class="leaf" href="#([^"]+)"', svg)
+    assert len(uses) == 40 * LEAVES_PER_SESSION
+    shape_ids = {f'{LEAF_SHAPE_ID}{i}' for i in range(len(LEAF_COLORS))}
+    assert set(uses) <= shape_ids
+    for shape_id in shape_ids:
+        assert svg.count(f'id="{shape_id}"') == 1
+    assert svg.count(LEAF_VEIN_D) == len(LEAF_COLORS)
 
 
 def _flower_blocks(svg: str) -> list[str]:
@@ -1452,7 +1542,7 @@ def test_every_leaf_shares_a_paint_so_the_canopy_turns_at_once() -> None:
 
     svg = render_timeline_svg(timeline)
 
-    assert svg.count(f'url(#{LEAF_PAINT_ID}') > len(LEAF_COLORS)
+    assert svg.count(f'href="#{LEAF_SHAPE_ID}') > len(LEAF_COLORS)
     assert svg.count('attributeName="stop-color"') == (
         len(LEAF_COLORS) + len(LIVING_GROUND_STOPS) + len(LIVING_CANOPY_STOPS)
     )

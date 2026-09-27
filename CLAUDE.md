@@ -90,6 +90,12 @@ Seasonal colour is applied through **shared paints**, not per-element
 fills: leaves reference `url(#leafPaint{n})` and the canopy uses
 `canopyGradient`, so ten `stop-color` animations in `<defs>` recolour a
 canopy of thousands of leaves. Never give a leaf its own colour animation.
+Motion follows the same rule: in the timeline, leaves hang off one
+`foliage-anchor` per canopy blob (translate along the growing limb) with a
+`foliage-spread` scale inside it (the canopy radius), so a leaf is static
+markup: a `<use>` of one of the `leafShape{n}` drawings in `<defs>`, one
+per colour. A per-leaf `animateTransform` was 6k+ SMIL timelines and
+made the tree replay crawl in the browser.
 
 ## Rendering conventions
 

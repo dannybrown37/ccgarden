@@ -626,6 +626,7 @@ def _half_width_at(y: float, base_half_width: float) -> float:
 # per leaf colour means the whole canopy turns with five <animate> tags
 # instead of one per leaf, which matters when a big garden has thousands.
 LEAF_PAINT_ID = 'leafPaint'
+LEAF_SHAPE_ID = 'leafShape'
 AUTUMN_COLORS = ('#8a4b1e', '#a35c1f', '#b8792a', '#c98f36', '#d8a441')
 DORMANT_GROUND_STOPS = ('#8d8a5a', '#6b6942')
 LIVING_GROUND_STOPS = ('#74b25e', '#3f7a3f')
@@ -715,6 +716,19 @@ def _render_leaf_paints(
     return ''.join(paints)
 
 
+def _render_leaf_shapes() -> str:
+    """One leaf drawing per colour, so each leaf is a `<use>` of it."""
+    return ''.join(
+        f'<g id="{LEAF_SHAPE_ID}{index}">'
+        f'<path d="{LEAF_SHAPE_D}" fill="url(#{LEAF_PAINT_ID}{index})" '
+        f'opacity="{LEAF_OPACITY_LIVING}" />'
+        f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
+        f'opacity="0.5" />'
+        f'</g>'
+        for index in range(len(LEAF_COLORS))
+    )
+
+
 def _render_defs(
     leaf_animations: list[str] | None = None,
     ground_animations: list[str] | None = None,
@@ -738,6 +752,7 @@ def _render_defs(
     return (
         '<defs>'
         + _render_leaf_paints(leaf_animations, vitality)
+        + _render_leaf_shapes()
         + '<linearGradient id="skyGradient" x1="0%" y1="0%" x2="0%" y2="100%">'
         '<stop offset="0%" stop-color="#1c3d5a" />'
         '<stop offset="55%" stop-color="#2f5c82" />'
@@ -3104,14 +3119,9 @@ def _render_leaves(
         angle = rng.uniform(0, 360)
         color_index = rng.randrange(len(LEAF_COLORS))
         elements.append(
-            f'<g class="leaf" transform="translate({leaf_x:.1f},{leaf_y:.1f}) '
-            f'rotate({angle:.1f}) scale({radius:.2f})">'
-            f'<path d="{LEAF_SHAPE_D}" '
-            f'fill="url(#{LEAF_PAINT_ID}{color_index})" '
-            f'opacity="{LEAF_OPACITY_LIVING}" />'
-            f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
-            f'opacity="0.5" />'
-            f'</g>'
+            f'<use class="leaf" href="#{LEAF_SHAPE_ID}{color_index}" '
+            f'transform="translate({leaf_x:.1f},{leaf_y:.1f}) '
+            f'rotate({angle:.1f}) scale({radius:.2f})" />'
         )
     return ''.join(elements)
 
@@ -4574,49 +4584,40 @@ def _render_timeline_leaves(  # noqa: PLR0915
                 f'{main_animate}</path>'
             )
 
+    # Leaves hang off shared anchors -- one per foliage blob -- that carry
+    # the day-by-day motion, so a limb costs a handful of animations rather
+    # than one per leaf. A leaf sits at `anchor + canopy_radius * offset`,
+    # which is exactly a translate of the anchor plus a scale about it; the
+    # scale also sizes the leaves with their canopy, a price paid for the
+    # thousands of per-leaf timelines it replaces.
+    final_canopy_radius = day_canopy_radius[-1]
+    spread_values = [
+        f'{radius / final_canopy_radius:.3f}' if final_canopy_radius else '1'
+        for radius in day_canopy_radius
+    ]
     rng = random.Random(f'{seed}:leaves')
-    opacity_groups: dict[tuple[str, ...], list[str]] = {}
+    anchors: dict[float, dict[tuple[str, ...], list[str]]] = {}
     for leaf_index in range(leaf_count):
         if has_canopy:
             t, relative_radius, r_frac, blob_angle = _leaf_placement(
                 rng, blob_relative_radii
             )
+            perp_offset, along_offset = _leaf_offset(
+                relative_radius, r_frac, blob_angle, final_canopy_radius
+            )
         else:
             t = rng.uniform(FOLIAGE_START_FRACTION, FOLIAGE_TIP_OVERHANG)
             blob_angle = rng.uniform(0.0, 2 * math.pi)
+            scatter_r = LEAF_SCATTER_RADIUS * 0.4
+            perp_offset = scatter_r * math.cos(blob_angle)
+            along_offset = scatter_r * math.sin(blob_angle)
         radius = (
             max(LEAF_RADIUS + rng.uniform(-1.5, 2.5), 2.5) * size_multiplier
         )
         angle = rng.uniform(0, 360)
         color_index = rng.randrange(len(LEAF_COLORS))
-
-        positions = []
-        for day_index, (dx, dy) in enumerate(day_vectors):
-            cx = origin_x + t * dx
-            cy = origin_y + t * dy
-            if has_canopy:
-                perp_offset, along_offset = _leaf_offset(
-                    relative_radius,
-                    r_frac,
-                    blob_angle,
-                    day_canopy_radius[day_index],
-                )
-            else:
-                scatter_r = LEAF_SCATTER_RADIUS * 0.4
-                perp_offset = scatter_r * math.cos(blob_angle)
-                along_offset = scatter_r * math.sin(blob_angle)
-            positions.append(
-                (
-                    cx + px * perp_offset + ux * along_offset,
-                    cy + py * perp_offset + uy * along_offset,
-                )
-            )
-
-        final_x, final_y = positions[-1]
-        translate_values = [f'{x:.1f},{y:.1f}' for x, y in positions]
-        translate_animate = _animate_transform_tag(
-            'translate', translate_values, key_times, duration
-        )
+        local_x = px * perp_offset + ux * along_offset
+        local_y = py * perp_offset + uy * along_offset
 
         birth_index = next(
             (
@@ -4633,30 +4634,40 @@ def _render_timeline_leaves(  # noqa: PLR0915
             for i in range(day_count)
         )
         leaf_svg = (
-            f'<g class="leaf" '
-            f'transform="translate({final_x:.1f},{final_y:.1f})">'
-            f'{translate_animate}'
-            f'<g transform="rotate({angle:.1f}) scale({radius:.2f})">'
-            f'<path d="{LEAF_SHAPE_D}" '
-            f'fill="url(#{LEAF_PAINT_ID}{color_index})" '
-            f'opacity="{LEAF_OPACITY_LIVING}" />'
-            f'<path d="{LEAF_VEIN_D}" stroke="#2f5f2f" stroke-width="0.12" '
-            f'opacity="0.5" />'
-            f'</g>'
-            f'</g>'
+            f'<use class="leaf" href="#{LEAF_SHAPE_ID}{color_index}" '
+            f'transform="translate({local_x:.1f},{local_y:.1f}) '
+            f'rotate({angle:.1f}) scale({radius:.2f})" />'
         )
-        opacity_groups.setdefault(opacity_key, []).append(leaf_svg)
+        anchors.setdefault(t, {}).setdefault(opacity_key, []).append(leaf_svg)
 
-    for opacity_key, group_leaves in opacity_groups.items():
-        opacity_animate = _animate_tag(
-            'opacity', list(opacity_key), key_times, duration
-        )
+    for t, opacity_groups in anchors.items():
+        anchor_values = [
+            f'{origin_x + t * dx:.1f},{origin_y + t * dy:.1f}'
+            for dx, dy in day_vectors
+        ]
         elements.append(
-            f'<g opacity="{opacity_key[-1]}">'
-            f'{opacity_animate}'
-            f'{"".join(group_leaves)}'
-            f'</g>'
+            f'<g class="foliage-anchor" '
+            f'transform="translate({anchor_values[-1]})">'
+            + _animate_transform_tag(
+                'translate', anchor_values, key_times, duration
+            )
+            + f'<g class="foliage-spread" '
+            f'transform="scale({spread_values[-1]})">'
+            + _animate_transform_tag(
+                'scale', spread_values, key_times, duration
+            )
         )
+        for opacity_key, group_leaves in opacity_groups.items():
+            opacity_animate = _animate_tag(
+                'opacity', list(opacity_key), key_times, duration
+            )
+            elements.append(
+                f'<g opacity="{opacity_key[-1]}">'
+                f'{opacity_animate}'
+                f'{"".join(group_leaves)}'
+                f'</g>'
+            )
+        elements.append('</g></g>')
     return ''.join(elements)
 
 
