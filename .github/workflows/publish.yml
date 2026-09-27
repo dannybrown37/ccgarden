@@ -1,9 +1,11 @@
 name: Publish to PyPI
 
-# Bump, tag and publish all live in one run: a tag pushed with GITHUB_TOKEN
-# does not start another workflow, so `on: push: tags` would never fire for
-# a bump CI made itself. The filename is also the PyPI trusted publisher's
-# identity -- renaming this file breaks publishing.
+# Bump, tag and publish all live in one run, so nothing hangs off
+# `on: push: tags`. The bump is pushed with the DEPLOY_KEY deploy key, the
+# one actor the `protect-main` ruleset lets past its PR rule -- GITHUB_TOKEN
+# can't be exempted on a personal repo. A deploy-key push does start
+# workflows, hence the `bump:` skip below. The filename is also the PyPI
+# trusted publisher's identity -- renaming this file breaks publishing.
 on:
   push:
     branches: [main]
@@ -14,15 +16,15 @@ permissions:
 
 jobs:
   bump:
+    if: ${{ !startsWith(github.event.head_commit.message, 'bump:') }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
       version: ${{ steps.cz.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
