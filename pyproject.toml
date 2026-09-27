@@ -40,8 +40,9 @@ major_version_zero = true
 update_changelog_on_bump = true
 annotated_tag = true
 # `version` above is the single source of truth -- publish.yml builds from the
-# tag `cz bump` writes, so nothing else may carry a copy of the number.
-version_provider = "pep621"
+# tag `cz bump` writes. `uv` (not `pep621`) so the bump also rewrites the
+# uv.lock copy; CI's `uv sync --locked` fails on a stale one.
+version_provider = "uv"
 
 [tool.ruff]
 line-length = 79
