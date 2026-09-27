@@ -20,6 +20,7 @@ from ccgarden.data import (
     ToolBush,
     ToolUsageDay,
 )
+from ccgarden.plot_species import FAMILY_POOLS, model_family
 from ccgarden.render_plot import (
     BedRect,
     BED_MIN_DIM,
@@ -29,7 +30,6 @@ from ccgarden.render_plot import (
     BED_ZONE_Y,
     FENCE_H,
     FENCE_Y,
-    LEGEND_BAND_HEIGHT,
     PLOT_VIEWBOX_WIDTH,
     _bed_area_metric,
     _bed_tooltip,
@@ -40,7 +40,6 @@ from ccgarden.render_plot import (
     _frame_planks,
     _furrow_count,
     _layout_beds,
-    _model_family,
     _plant_layout,
     _plant_specs,
     _render_bed_label,
@@ -327,10 +326,16 @@ class TestPlantLayout:
 
 
 class TestPlantSymbols:
-    @pytest.mark.parametrize('family', ['haiku', 'sonnet', 'opus', 'unknown'])
-    def test_symbol_has_shine_and_shadow(self, family):
-        svg = render_plot_svg(_garden())
-        start = svg.index(f'id="plant-{family}"')
+    @pytest.mark.parametrize('species', ['cabbage', 'lettuce', 'sprout'])
+    def test_symbol_has_shine_and_shadow(self, species):
+        branch = _branch(
+            model_effort_counts={
+                'claude-opus-4-6 (low)': 5,
+                'claude-sonnet-5 (low)': 5,
+            }
+        )
+        svg = render_plot_svg(_garden(branches=[branch]))
+        start = svg.index(f'id="plant-{species}"')
         symbol = svg[start : svg.index('</symbol>', start)]
         assert 'url(#plantShine)' in symbol
         assert 'class="plant-shadow"' in symbol
@@ -356,10 +361,14 @@ class TestTimelinePlants:
         tl = _timeline()
         svg = render_plot_timeline_svg(
             tl,
-            repo_model_efforts={'test-repo': {'claude-opus-5 (max)': 9}},
+            repo_model_efforts={'test-repo': {'claude-opus-5 (low)': 9}},
         )
-        assert 'href="#plant-opus"' in svg
-        assert 'href="#plant-sonnet"' not in svg
+        assert 'href="#plant-squash' in svg
+        garden_part = svg[: svg.index('<g class="legend"')]
+        used = set(
+            re.findall(r'href="#plant-([a-z-]+?)(?:-[bc])?"', garden_part)
+        )
+        assert used <= set(FAMILY_POOLS['opus'])
 
 
 # ── Garden features ──────────────────────────────────────────
@@ -543,9 +552,6 @@ class TestLegend:
         'label',
         [
             'Bed',
-            'Herb',
-            'Lettuce',
-            'Cabbage',
             'Flower',
             'Tools',
             'Rain barrel',
@@ -558,19 +564,35 @@ class TestLegend:
     def test_entry_present(self, label):
         assert f'>{label}<' in _legend(render_plot_svg(_garden()))
 
-    @pytest.mark.parametrize('family', ['haiku', 'sonnet', 'opus', 'unknown'])
-    def test_plant_icons_are_the_real_symbols_held_still(self, family):
-        legend = _legend(render_plot_svg(_garden()))
-        assert f'href="#plant-{family}-still"' in legend
+    def test_plant_key_lists_every_combo_used(self):
+        garden = _garden(branches=[_branch(model_effort_counts=MIXED)])
+        legend = _legend(render_plot_svg(garden))
+        assert '>Sonnet 5 · high<' in legend
+        assert '>Opus 5 · max<' in legend
+
+    def test_plant_icons_are_the_real_symbols_held_still(self):
+        branch = _branch(model_effort_counts={'claude-opus-4-6 (low)': 3})
+        legend = _legend(render_plot_svg(_garden(branches=[branch])))
+        assert 'href="#plant-cabbage-still"' in legend
+        assert '>Cabbage<' in legend
+
+    def test_legend_grows_with_combos(self):
+        few = _plot_layout(0, 2).total_h
+        many = _plot_layout(0, 15).total_h
+        assert many > few
 
     def test_still_symbols_have_no_wind(self):
-        svg = render_plot_svg(_garden())
-        start = svg.index('id="plant-opus-still"')
+        branch = _branch(model_effort_counts={'claude-opus-4-6 (low)': 3})
+        svg = render_plot_svg(_garden(branches=[branch]))
+        start = svg.index('id="plant-cabbage-still"')
         symbol = svg[start : svg.index('</symbol>', start)]
         assert 'ccp-' not in symbol
 
     def test_timeline_has_same_legend(self):
-        svg = render_plot_timeline_svg(_timeline())
+        svg = render_plot_timeline_svg(
+            _timeline(),
+            repo_model_efforts={'test-repo': {'claude-opus-4-6 (low)': 9}},
+        )
         assert '>Cabbage<' in _legend(svg)
 
 
@@ -592,8 +614,11 @@ class TestPlotScrubber:
         tl = _timeline()
         svg = render_plot_timeline_svg(tl)
         legend_y = _plot_layout(len(tl.skill_order)).legend_y
+        legend_bottom = legend_y + float(
+            re.search(r'class="legend-bg"[^>]*height="([\d.]+)"', svg)[1]
+        )
         y = float(re.search(r'id="plot-scrubber"[^>]*y="([\d.]+)"', svg)[1])
-        assert y >= legend_y + LEGEND_BAND_HEIGHT
+        assert y >= legend_bottom
 
     def test_autoplay_reveals_scrubber_after_replay(self):
         svg = render_plot_timeline_svg(_timeline())
@@ -624,7 +649,7 @@ class TestModelFamily:
         ],
     )
     def test_family_detection(self, label, expected):
-        assert _model_family(label) == expected
+        assert model_family(label) == expected
 
 
 class TestPlantSpecs:
@@ -680,7 +705,8 @@ class TestBedTooltip:
             }
         )
         tt = _bed_tooltip(branch)
-        assert 'sonnet-5' in tt
+        assert 'Sonnet 5 · high' in tt
+        assert 'Rainbow chard' in tt
         assert '80%' in tt
 
 

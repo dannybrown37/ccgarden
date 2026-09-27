@@ -12,6 +12,12 @@ import math
 import random
 from typing import TYPE_CHECKING, NamedTuple
 
+from ccgarden.plot_species import (
+    SPECIES,
+    assign_species,
+    combo_name,
+    model_family,
+)
 from ccgarden.render_utils import (
     _animate_tag,
     _blend_hex,
@@ -67,7 +73,11 @@ FLOWERS_PER_ROW = int((FLOWER_BORDER_X1 - FLOWER_BORDER_X0) // FLOWER_SPACING)
 
 LEGEND_GAP = 16
 PLOT_SCRUBBER_H = 44
-LEGEND_BAND_HEIGHT = 130
+LEGEND_COLS = 4
+LEGEND_ROW_H = 36
+LEGEND_TOP_PAD = 12
+LEGEND_BOTTOM_PAD = 8
+LEGEND_KEY_HEADER = 26
 
 # ── Features above the fence ─────────────────────────────────
 
@@ -158,12 +168,6 @@ BARREL_WOOD = '#8b6914'
 BARREL_BAND = '#4a4a4a'
 BARREL_WATER = '#4a90c4'
 
-PLANT_COLORS = {
-    'haiku': '#a9d153',
-    'sonnet': '#3fae5f',
-    'opus': '#7f60b5',
-    'unknown': '#5fa8a0',
-}
 PLANT_DORMANT = '#b8a88a'
 WEED_COLOR = '#8a7a55'
 WEED_VITALITY_THRESHOLD = 0.75
@@ -188,12 +192,13 @@ DARK_TOOLTIP_TEXT = '#d4d4c8'
 
 # ── Plant grid constants ───────────────────────────────────────
 
-PLANT_MIN_SPACING = 17.0
-PLANT_MAX_SPACING = 32.0
-PLANT_OVERLAP = 1.2
+PLANT_MIN_SPACING = 19.0
+PLANT_MAX_SPACING = 34.0
+PLANT_OVERLAP = 0.85
+PATCH_GAP = 10.0
 PLANT_MAX_SIZE = 30.0
 PLANT_FILL_MIN = 0.2
-PLANT_JITTER_FRACTION = 0.12
+PLANT_JITTER_FRACTION = 0.06
 PLANT_SIZE_JITTER = 0.08
 PLANT_EDGE_PAD = 4.0
 HEX_ROW_RATIO = math.sqrt(3) / 2
@@ -216,13 +221,6 @@ EFFORT_SCALE = {
     'high': 1.2,
     'xhigh': 1.3,
     'max': 1.4,
-}
-EFFORT_DARKNESS = {
-    'low': -0.15,
-    'medium': 0.0,
-    'high': 0.15,
-    'xhigh': 0.25,
-    'max': 0.35,
 }
 
 # ── Token saturation for barrel ────────────────────────────────
@@ -255,6 +253,8 @@ class PlantSpec(NamedTuple):
     model_family: str
     effort: str | None
     replies: int
+    label: str = ''
+    species: str = 'sprout'
 
 
 class ToolPlacement(NamedTuple):
@@ -416,13 +416,22 @@ def _flower_rows(n_skills: int) -> int:
     return math.ceil(n_skills / FLOWERS_PER_ROW)
 
 
-def _plot_layout(n_skills: int) -> PlotLayout:
+def _legend_height(n_combos: int) -> float:
+    rows = math.ceil(len(LEGEND_ENTRIES) / LEGEND_COLS)
+    plant_rows = math.ceil(n_combos / LEGEND_COLS)
+    key = LEGEND_KEY_HEADER + plant_rows * LEGEND_ROW_H if plant_rows else 0
+    return LEGEND_TOP_PAD + rows * LEGEND_ROW_H + key + LEGEND_BOTTOM_PAD
+
+
+def _plot_layout(n_skills: int, n_combos: int = 0) -> PlotLayout:
     rows = _flower_rows(n_skills)
     border_h = rows * FLOWER_ROW_HEIGHT + (
         2 * FLOWER_BORDER_PAD if rows else 0
     )
     legend_y = FLOWER_BORDER_TOP + border_h + LEGEND_GAP
-    return PlotLayout(rows, legend_y, math.ceil(legend_y + LEGEND_BAND_HEIGHT))
+    return PlotLayout(
+        rows, legend_y, math.ceil(legend_y + _legend_height(n_combos))
+    )
 
 
 def _flower_positions(n_skills: int) -> list[tuple[float, float]]:
@@ -445,14 +454,6 @@ def _flower_positions(n_skills: int) -> list[tuple[float, float]]:
 # ── Model family detection ─────────────────────────────────────
 
 
-def _model_family(label: str) -> str:
-    lower = label.lower()
-    for family in ('haiku', 'sonnet', 'opus'):
-        if family in lower:
-            return family
-    return 'unknown'
-
-
 def _effort_from_label(label: str) -> str | None:
     """Extract effort level from a 'model (effort)' label."""
     if '(' in label and ')' in label:
@@ -461,48 +462,52 @@ def _effort_from_label(label: str) -> str | None:
     return None
 
 
-def _plant_specs(branch: RepoBranch) -> list[PlantSpec]:
-    specs = []
-    for label, count in branch.model_effort_counts.items():
-        if count <= 0:
-            continue
-        specs.append(
-            PlantSpec(
-                model_family=_model_family(label),
-                effort=_effort_from_label(label),
-                replies=count,
-            )
+def _plant_specs(
+    branch: RepoBranch,
+    species: dict[str, str] | None = None,
+) -> list[PlantSpec]:
+    """A bed's combos, busiest first, each with its garden-wide plant.
+
+    ``species`` is assigned once per garden (``_garden_species``) so the
+    same combo is the same plant in every bed; without it the bed
+    assigns its own, which only a lone bed should rely on.
+    """
+    labels = [lbl for lbl, n in branch.model_effort_counts.items() if n > 0]
+    plants = species or assign_species(labels)
+    specs = [
+        PlantSpec(
+            model_family=model_family(label),
+            effort=_effort_from_label(label),
+            replies=branch.model_effort_counts[label],
+            label=label,
+            species=plants.get(label) or assign_species([label])[label],
         )
+        for label in labels
+    ]
     return sorted(specs, key=lambda s: s.replies, reverse=True)
 
 
+def _garden_species(branches: list[RepoBranch]) -> dict[str, str]:
+    return assign_species(
+        sorted({lbl for b in branches for lbl in b.model_effort_counts})
+    )
+
+
+def _garden_combos(branches: list[RepoBranch]) -> list[tuple[str, str]]:
+    """(label, species) for the legend, most-used combo first."""
+    totals: dict[str, int] = {}
+    for branch in branches:
+        for label, n in branch.model_effort_counts.items():
+            totals[label] = totals.get(label, 0) + n
+    species = _garden_species(branches)
+    return [
+        (label, species[label])
+        for label in sorted(totals, key=lambda k: (-totals[k], k))
+        if totals[label] > 0
+    ]
+
+
 # ── Plant shapes (SVG symbols) ─────────────────────────────────
-
-
-def _leaf_ring(
-    count: int,
-    offset: float,
-    rx: float,
-    ry: float,
-    *,
-    phase: float = 0.0,
-    fill: str = 'currentColor',
-    extra: str = '',
-) -> str:
-    return ''.join(
-        f'<ellipse cx="0" cy="{-offset:.1f}" rx="{rx:.1f}" ry="{ry:.1f}"'
-        f' transform="rotate({phase + i * 360 / count:.1f})"'
-        f' fill="{fill}"{extra}/>'
-        for i in range(count)
-    )
-
-
-def _midribs(count: int, inner: float, outer: float, phase: float) -> str:
-    return ''.join(
-        f'<line x1="0" y1="{-inner:.1f}" x2="0" y2="{-outer:.1f}"'
-        f' transform="rotate({phase + i * 360 / count:.1f})"/>'
-        for i in range(count)
-    )
 
 
 def _plant_symbol(family: str, shadow_r: float, body: str) -> str:
@@ -530,64 +535,17 @@ def _plant_symbol(family: str, shadow_r: float, body: str) -> str:
     return ''.join(symbols)
 
 
-def _render_plant_defs() -> str:
-    """<defs> block with <symbol> for each plant family.
+def _render_plant_defs(species: set[str] | None = None) -> str:
+    """Symbols for the plants this garden actually grows, plus weeds.
 
-    The four families differ in silhouette as well as colour -- herb,
-    rosette, cabbage, sprout -- so the plot still reads in greyscale.
+    Only the species in use are emitted -- each costs four symbols
+    (three wind phases and a still copy for the legend).
     """
-    vein = '<g stroke="#000" stroke-opacity="0.3" stroke-width="0.45">'
-    haiku = _plant_symbol(
-        'haiku',
-        7.5,
-        _leaf_ring(5, 4.2, 2.4, 4.0)
-        + vein
-        + _midribs(5, 1.0, 7.4, 0)
-        + '</g><circle r="1.4" fill="currentColor"/>',
+    wanted = sorted(species) if species else ['sprout']
+    plants = ''.join(
+        _plant_symbol(name, SPECIES[name].shadow_r, SPECIES[name].body)
+        for name in wanted
     )
-    sonnet = _plant_symbol(
-        'sonnet',
-        8.5,
-        _leaf_ring(9, 4.6, 3.4, 4.6)
-        + _leaf_ring(6, 2.6, 2.6, 3.4, phase=30)
-        + _leaf_ring(
-            6,
-            2.6,
-            2.6,
-            3.4,
-            phase=30,
-            fill='#fff',
-            extra=' fill-opacity="0.22"',
-        )
-        + '<circle r="1.8" fill="currentColor"/>'
-        + '<circle r="1.8" fill="#fff" fill-opacity="0.35"/>',
-    )
-    opus = _plant_symbol(
-        'opus',
-        9.0,
-        ''.join(
-            f'<circle cx="{7 * math.cos(a):.1f}" cy="{7 * math.sin(a):.1f}"'
-            f' r="2.8" fill="currentColor"/>'
-            for a in (i * math.tau / 8 for i in range(8))
-        )
-        + '<circle r="7.2" fill="currentColor"/>'
-        + vein
-        + _midribs(8, 3.0, 8.6, 22.5)
-        + '</g><g fill="none" stroke="#000" stroke-opacity="0.25"'
-        ' stroke-width="0.5">'
-        '<circle r="5.2"/><circle r="3.3"/><circle r="1.6"/></g>'
-        '<circle r="3.3" fill="#fff" fill-opacity="0.12"/>',
-    )
-    unknown = _plant_symbol(
-        'unknown',
-        5.0,
-        '<ellipse cx="-2.6" cy="0" rx="3" ry="1.8" transform="rotate(-20)"'
-        ' fill="currentColor"/>'
-        '<ellipse cx="2.6" cy="0" rx="3" ry="1.8" transform="rotate(-20)"'
-        ' fill="currentColor"/>'
-        '<circle r="0.9" fill="currentColor"/>',
-    )
-
     weed = (
         '<symbol id="plant-weed" viewBox="-8 -8 16 16">'
         '<line x1="0" y1="3" x2="0" y2="-5"'
@@ -610,26 +568,12 @@ def _render_plant_defs() -> str:
         '<stop offset="0.55" stop-color="#fff" stop-opacity="0"/>'
         '</radialGradient>'
     )
+    return shine + plants + weed
 
-    return shine + haiku + sonnet + opus + unknown + weed
 
-
-def _plant_color(
-    family: str,
-    effort: str | None,
-    vitality: float,
-) -> str:
-    base = PLANT_COLORS.get(family, PLANT_COLORS['unknown'])
-    color = _blend_hex(PLANT_DORMANT, base, vitality)
-    darkness = EFFORT_DARKNESS.get(effort or 'medium', 0.0)
-    if abs(darkness) < OPACITY_EPSILON:
-        return color
-    channels = []
-    for start in (1, 3, 5):
-        val = int(color[start : start + 2], 16)
-        val = max(0, min(255, int(val * (1.0 - darkness))))
-        channels.append(val)
-    return '#{:02x}{:02x}{:02x}'.format(*channels)
+def _plant_color(species: str, vitality: float) -> str:
+    base = SPECIES.get(species, SPECIES['sprout']).color
+    return _blend_hex(PLANT_DORMANT, base, vitality)
 
 
 def _plant_scale(effort: str | None) -> float:
@@ -700,11 +644,16 @@ def _hex_grid(
     area: tuple[float, float, float, float],
     spacing: float,
 ) -> list[tuple[float, float]]:
-    """Staggered rows centred in ``area``, row-major."""
+    """Staggered rows centred in ``area``, row-major.
+
+    Points sit at cell centres rather than on the area's edges, so a
+    plant's foliage stays inside the area instead of spilling half its
+    width over a patch boundary.
+    """
     ax, ay, aw, ah = area
     row_step = spacing * HEX_ROW_RATIO
-    rows = max(1, int(ah / row_step) + 1)
-    cols = max(1, int(aw / spacing) + 1)
+    rows = max(1, int(ah / row_step))
+    cols = max(1, int(aw / spacing))
     used_h = (rows - 1) * row_step
     y0 = ay + (ah - used_h) / 2
     points: list[tuple[float, float]] = []
@@ -732,61 +681,119 @@ def _patch_sizes(specs: list[PlantSpec], total: int) -> list[int]:
     return sizes
 
 
+def _strip_split(
+    area: tuple[float, float, float, float],
+    weights: list[int],
+    floor: float,
+) -> list[tuple[float, float, float, float]]:
+    """Cut ``area`` along its long side into strips sized by weight.
+
+    A bare path of ``PATCH_GAP`` runs between strips, the way a
+    kitchen bed is planted in blocks rather than sown as one carpet.
+    """
+    ax, ay, aw, ah = area
+    along_x = aw > ah
+    length = aw if along_x else ah
+    n = len(weights)
+    gap = min(PATCH_GAP, length / (4 * n)) if n > 1 else 0.0
+    usable = length - gap * (n - 1)
+    floor = min(floor, usable / n)
+    total = sum(weights)
+    strips = []
+    pos = ax if along_x else ay
+    for weight in weights:
+        span = floor + (usable - n * floor) * weight / total
+        strips.append((pos, ay, span, ah) if along_x else (ax, pos, aw, span))
+        pos += span + gap
+    return strips
+
+
+def _patch_groups(
+    planting: list[tuple[PlantSpec, int]],
+    row_capacity: int,
+) -> list[list[tuple[PlantSpec, int]]]:
+    """Species big enough for a block each; the rest share one block.
+
+    A species with less than a row of plants would otherwise get a
+    whole strip to itself and dot two plants across it.
+    """
+    major = [[p] for p in planting if p[1] >= row_capacity]
+    minor = [p for p in planting if p[1] < row_capacity]
+    return [*major, minor] if minor else major
+
+
 def _plant_layout(
     bed: BedRect,
     max_sessions: int,
+    species: dict[str, str] | None = None,
 ) -> list[PlantPlacement]:
     """Where every plant in a bed goes, how big, and which species.
 
     Density follows the repo's sessions relative to the busiest repo,
-    so a busy bed is packed with overlapping foliage and a quiet one is
-    spread thin -- but always across the whole bed, never bunched at
-    the top. Species go in contiguous patches, the way a kitchen garden
-    is planted, so a bed's model mix reads at a glance.
+    so a busy bed is fuller and a quiet one is spread thin -- but
+    always across the whole bed, and never so full the soil vanishes.
+    Each busy species gets its own block of the bed and the stragglers
+    share one, so a bed's model mix reads at a glance.
     """
     area = _plant_area(bed)
     _, _, aw, ah = area
     if aw <= 0 or ah <= 0:
         return []
-    specs = _plant_specs(bed.branch) or [PlantSpec('unknown', None, 1)]
+    specs = _plant_specs(bed.branch, species) or [
+        PlantSpec('unknown', None, 1)
+    ]
     capacity = len(_hex_grid(area, PLANT_MIN_SPACING))
     share = bed.branch.sessions / max_sessions if max_sessions > 0 else 1.0
     fill = PLANT_FILL_MIN + (1 - PLANT_FILL_MIN) * math.sqrt(min(share, 1.0))
     target = max(1, round(capacity * fill))
     spacing = math.sqrt(aw * ah / (target * HEX_ROW_RATIO))
     spacing = max(PLANT_MIN_SPACING, min(PLANT_MAX_SPACING, spacing))
-    grid = _hex_grid(area, spacing)
-    count = min(target, len(grid))
-    points = [grid[i * len(grid) // count] for i in range(count)]
+
+    planting = [
+        (spec, n)
+        for spec, n in zip(specs, _patch_sizes(specs, target), strict=True)
+        if n > 0
+    ]
+    ax, ay = area[0], area[1]
+    row_area = (ax, ay, aw, spacing) if aw > ah else (ax, ay, spacing, ah)
+    groups = _patch_groups(planting, len(_hex_grid(row_area, spacing)))
+    strips = _strip_split(
+        area, [sum(n for _, n in g) for g in groups], spacing
+    )
 
     rng = random.Random(f'plot-plants-{bed.repo}')
     jitter = spacing * PLANT_JITTER_FRACTION
     base = min(spacing * PLANT_OVERLAP, PLANT_MAX_SIZE)
-    species = [
-        spec
-        for spec, n in zip(specs, _patch_sizes(specs, count), strict=True)
-        for _ in range(n)
-    ]
-    ax, ay = area[0], area[1]
-    return [
-        PlantPlacement(
-            x=min(max(px + rng.uniform(-jitter, jitter), ax), ax + aw),
-            y=min(max(py + rng.uniform(-jitter, jitter), ay), ay + ah),
-            size=base
-            * _plant_scale(spec.effort)
-            * rng.uniform(1 - PLANT_SIZE_JITTER, 1 + PLANT_SIZE_JITTER),
-            spec=spec,
-            variant=rng.randrange(len(SWAY_VARIANTS)),
-        )
-        for (px, py), spec in zip(points, species, strict=True)
-    ]
+    plants: list[PlantPlacement] = []
+    for group, strip in zip(groups, strips, strict=True):
+        grid = _hex_grid(strip, spacing)
+        sown = [spec for spec, n in group for _ in range(n)]
+        count = min(len(sown), len(grid))
+        sx, sy, sw, sh = strip
+        for i in range(count):
+            px, py = grid[i * len(grid) // count]
+            spec = sown[i * len(sown) // count]
+            plants.append(
+                PlantPlacement(
+                    x=min(max(px + rng.uniform(-jitter, jitter), sx), sx + sw),
+                    y=min(max(py + rng.uniform(-jitter, jitter), sy), sy + sh),
+                    size=base
+                    * _plant_scale(spec.effort)
+                    * rng.uniform(
+                        1 - PLANT_SIZE_JITTER, 1 + PLANT_SIZE_JITTER
+                    ),
+                    spec=spec,
+                    variant=rng.randrange(len(SWAY_VARIANTS)),
+                )
+            )
+    return plants
 
 
 def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
     half = plant.size / 2
     suffix = SWAY_VARIANTS[plant.variant][0]
     open_tag = (
-        f'<use href="#plant-{plant.spec.model_family}{suffix}"'
+        f'<use href="#plant-{plant.spec.species}{suffix}"'
         f' x="{plant.x - half:.1f}" y="{plant.y - half:.1f}"'
         f' width="{plant.size:.1f}" height="{plant.size:.1f}"'
         f' color="{color}"'
@@ -937,13 +944,14 @@ def _render_bed_plants(
     bed: BedRect,
     max_sessions: int,
     vitality: float,
+    species: dict[str, str] | None = None,
 ) -> str:
     return ''.join(
         _plant_use(
             plant,
-            _plant_color(plant.spec.model_family, plant.spec.effort, vitality),
+            _plant_color(plant.spec.species, vitality),
         )
-        for plant in _plant_layout(bed, max_sessions)
+        for plant in _plant_layout(bed, max_sessions, species)
     )
 
 
@@ -982,7 +990,10 @@ def _render_bed_label(bed: BedRect) -> str:
     )
 
 
-def _bed_tooltip(branch: RepoBranch) -> str:
+def _bed_tooltip(
+    branch: RepoBranch,
+    species: dict[str, str] | None = None,
+) -> str:
     parts = [f'{branch.repo}']
     parts.append(
         f'{branch.sessions} sessions, +{branch.lines_added}'
@@ -993,14 +1004,16 @@ def _bed_tooltip(branch: RepoBranch) -> str:
         parts.append(f'{tok_k:.0f}k tokens')
     if branch.cost > 0:
         parts.append(f'${branch.cost:.2f}')
-    if branch.model_effort_counts:
-        top = sorted(
-            branch.model_effort_counts.items(),
-            key=lambda kv: -kv[1],
-        )[:3]
-        total = sum(branch.model_effort_counts.values())
-        breakdown = ', '.join(f'{k}: {v * 100 // total}%' for k, v in top)
-        parts.append(breakdown)
+    specs = _plant_specs(branch, species)
+    if specs:
+        total = sum(s.replies for s in specs)
+        parts.append(
+            ', '.join(
+                f'{SPECIES[s.species].name} = {combo_name(s.label)}'
+                f' {s.replies * 100 // total}%'
+                for s in specs[:3]
+            )
+        )
     return ' | '.join(parts)
 
 
@@ -1010,13 +1023,14 @@ def _render_beds(
     vitality: float,
 ) -> str:
     max_sessions = max(b.sessions for b in branches) if branches else 1
+    species = _garden_species(branches)
     parts: list[str] = []
     for bed in beds:
-        tt = _title(_bed_tooltip(bed.branch))
+        tt = _title(_bed_tooltip(bed.branch, species))
         parts.append(
             f'<g class="bed">{tt}'
             + _render_bed_soil(bed, vitality)
-            + _render_bed_plants(bed, max_sessions, vitality)
+            + _render_bed_plants(bed, max_sessions, vitality, species)
             + _render_bed_weeds(bed, vitality)
             + _render_bed_label(bed)
             + '</g>'
@@ -1977,17 +1991,23 @@ def _render_paint_defs(sun_anim: str = '') -> str:
     )
 
 
-def _render_plot_defs(sun_anim: str = '') -> str:
-    return f'<defs>{_render_paint_defs(sun_anim)}{_render_plant_defs()}</defs>'
+def _render_plot_defs(
+    sun_anim: str = '',
+    species: set[str] | None = None,
+) -> str:
+    return (
+        f'<defs>{_render_paint_defs(sun_anim)}'
+        f'{_render_plant_defs(species)}</defs>'
+    )
 
 
 # ── Legend ─────────────────────────────────────────────────────
 
 
-def _legend_plant(family: str, x: float, y: float) -> str:
-    color = _plant_color(family, None, 1.0)
+def _legend_plant(species: str, x: float, y: float) -> str:
+    color = _plant_color(species, 1.0)
     return (
-        f'<use href="#plant-{family}-still" x="{x - 10:.1f}"'
+        f'<use href="#plant-{species}-still" x="{x - 10:.1f}"'
         f' y="{y - 10:.1f}" width="20" height="20" color="{color}"/>'
     )
 
@@ -2089,9 +2109,6 @@ def _legend_icon(kind: str, x: float, y: float) -> str:
 
 LEGEND_ENTRIES = (
     ('bed', 'Bed', 'a repo; area = lines + sessions'),
-    ('plant-haiku', 'Herb', 'Haiku sessions'),
-    ('plant-sonnet', 'Lettuce', 'Sonnet sessions'),
-    ('plant-opus', 'Cabbage', 'Opus; bigger = more effort'),
     ('flower', 'Flower', 'a skill; bigger = more calls'),
     ('tool', 'Tools', 'busiest tools; longer = more'),
     ('barrel', 'Rain barrel', 'all tokens; fuller = more'),
@@ -2099,15 +2116,35 @@ LEGEND_ENTRIES = (
     ('butterfly', 'Butterflies', 'a dry, working streak'),
     ('firefly', 'Fireflies', 'late-night prompting'),
     ('rain', 'Rain, weeds', 'days away from the garden'),
-    ('plant-unknown', 'Sprout', 'other or unknown model'),
 )
-LEGEND_COLS = 4
-LEGEND_ROW_H = 36
 
 
-def _render_plot_legend(ly: float) -> str:
-    """The key, in a `.legend` group so every icon holds still."""
-    lh = LEGEND_BAND_HEIGHT
+def _legend_entry(
+    icon: str, ix: float, iy: float, label: str, desc: str
+) -> str:
+    return (
+        f'{icon}'
+        f'<text class="legend-label" x="{ix + 20:.1f}" y="{iy - 2:.1f}"'
+        f' font-family="Georgia, serif" font-size="10"'
+        f' font-weight="bold" fill="#333">'
+        f'{_escape_xml(label)}</text>'
+        f'<text class="legend-desc" x="{ix + 20:.1f}" y="{iy + 10:.1f}"'
+        f' font-family="Georgia, serif" font-size="8"'
+        f' fill="#666">{_escape_xml(desc)}</text>'
+    )
+
+
+def _render_plot_legend(
+    ly: float,
+    combos: list[tuple[str, str]] | None = None,
+) -> str:
+    """The key, in a `.legend` group so every icon holds still.
+
+    Below the fixed entries sits the plant key: one row per model and
+    effort combo the garden grows, most-used first.
+    """
+    combos = combos or []
+    lh = _legend_height(len(combos))
     lpad = 16
     parts = [
         '<g class="legend">',
@@ -2124,21 +2161,40 @@ def _render_plot_legend(ly: float) -> str:
         ),
     ]
     col_w = (PLOT_VIEWBOX_WIDTH - 2 * lpad) / LEGEND_COLS
+    top = ly + LEGEND_TOP_PAD + 11
     for i, (kind, label, desc) in enumerate(LEGEND_ENTRIES):
-        col = i % LEGEND_COLS
-        row = i // LEGEND_COLS
-        ix = lpad + 22 + col * col_w
-        iy = ly + 29 + row * LEGEND_ROW_H
-        parts.append(_legend_icon(kind, ix, iy))
+        ix = lpad + 22 + (i % LEGEND_COLS) * col_w
+        iy = top + (i // LEGEND_COLS) * LEGEND_ROW_H
         parts.append(
-            f'<text class="legend-label" x="{ix + 20:.1f}" y="{iy - 2:.1f}"'
-            f' font-family="Georgia, serif" font-size="10"'
-            f' font-weight="bold" fill="#333">'
-            f'{_escape_xml(label)}</text>'
-            f'<text class="legend-desc" x="{ix + 20:.1f}" y="{iy + 10:.1f}"'
-            f' font-family="Georgia, serif" font-size="8"'
-            f' fill="#666">{_escape_xml(desc)}</text>'
+            _legend_entry(_legend_icon(kind, ix, iy), ix, iy, label, desc)
         )
+    if combos:
+        rows = math.ceil(len(LEGEND_ENTRIES) / LEGEND_COLS)
+        header_y = ly + LEGEND_TOP_PAD + rows * LEGEND_ROW_H + 8
+        parts.append(
+            f'<line x1="{lpad + 12}" y1="{header_y - 10:.1f}"'
+            f' x2="{PLOT_VIEWBOX_WIDTH - lpad - 12}" y2="{header_y - 10:.1f}"'
+            f' stroke="#000" stroke-opacity="0.12"/>'
+            f'<text class="legend-label" x="{lpad + 12}" y="{header_y:.1f}"'
+            f' font-family="Georgia, serif" font-size="10" font-weight="bold"'
+            f' fill="#333">Plants'
+            f'<tspan class="legend-desc" font-weight="normal" font-size="8"'
+            f' fill="#666"> — one per model and effort; bigger = more'
+            f' effort, more plants = more sessions</tspan></text>'
+        )
+        key_top = header_y + LEGEND_KEY_HEADER - 4
+        for i, (label, species) in enumerate(combos):
+            ix = lpad + 22 + (i % LEGEND_COLS) * col_w
+            iy = key_top + (i // LEGEND_COLS) * LEGEND_ROW_H
+            parts.append(
+                _legend_entry(
+                    _legend_plant(species, ix, iy),
+                    ix,
+                    iy,
+                    SPECIES[species].name,
+                    combo_name(label),
+                )
+            )
     parts.append('</g><!--/legend-->')
     return ''.join(parts)
 
@@ -2239,7 +2295,8 @@ def _render_plot_tap_tooltip(total_h: int) -> str:
 
 def render_plot_svg(garden: GardenData) -> str:
     beds = _layout_beds(garden.branches)
-    layout = _plot_layout(len(garden.skills))
+    combos = _garden_combos(garden.branches)
+    layout = _plot_layout(len(garden.skills), len(combos))
     total_h = layout.total_h
     body = (
         _render_background(garden.vitality, total_h, layout.legend_y)
@@ -2258,16 +2315,17 @@ def render_plot_svg(garden: GardenData) -> str:
         )
         + _render_plot_rain(garden.vitality, layout.legend_y)
         + _render_plot_night(garden.nightness, layout.legend_y)
-        + _render_plot_legend(layout.legend_y)
+        + _render_plot_legend(layout.legend_y, combos)
         + _render_plot_tap_tooltip(total_h)
     )
 
+    species = {s for _, s in combos} | {'sprout'}
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg"'
         f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'
         f' width="{PLOT_VIEWBOX_WIDTH}" height="{total_h}">'
         f'{_render_plot_style(len(garden.skills), layout.legend_y)}'
-        f'{_render_plot_defs()}'
+        f'{_render_plot_defs(species=species)}'
         f'{body}'
         f'</svg>'
     )
@@ -2338,6 +2396,7 @@ def _render_timeline_beds(
 ) -> str:
     n = len(timeline.days)
     max_sessions = max((b.branch.sessions for b in beds), default=1)
+    species = _garden_species([b.branch for b in beds])
     parts: list[str] = []
 
     for bed in beds:
@@ -2374,11 +2433,12 @@ def _render_timeline_beds(
             days,
             vit_vals,
             max_sessions=max_sessions,
+            species=species,
             key_times=key_times,
             dur=dur,
         )
 
-        tt = _title(_bed_tooltip(bed.branch))
+        tt = _title(_bed_tooltip(bed.branch, species))
         parts.append(
             f'<g class="bed" opacity="0">{tt}'
             f'{opacity_anim}'
@@ -2396,6 +2456,7 @@ def _render_timeline_bed_plants(
     vitality: list[float],
     *,
     max_sessions: int,
+    species: dict[str, str],
     key_times: list[float],
     dur: float,
 ) -> str:
@@ -2406,7 +2467,7 @@ def _render_timeline_bed_plants(
     the repo's cumulative sessions pass each one's share.
     """
     final_sessions = days[-1].sessions
-    plants = _plant_layout(bed, max_sessions)
+    plants = _plant_layout(bed, max_sessions, species)
     if final_sessions <= 0 or not plants:
         return ''
     parts: list[str] = []
@@ -2416,9 +2477,7 @@ def _render_timeline_bed_plants(
             '1' if d.sessions / final_sessions > threshold else '0'
             for d in days
         ]
-        color = _plant_color(
-            plant.spec.model_family, plant.spec.effort, vitality[-1]
-        )
+        color = _plant_color(plant.spec.species, vitality[-1])
         parts.append(
             _plant_use(
                 plant,
@@ -2683,8 +2742,9 @@ def render_plot_timeline_svg(
 
     branches = _final_branches(timeline, repo_model_efforts)
     beds = _layout_beds(branches)
+    combos = _garden_combos(branches)
 
-    layout = _plot_layout(len(timeline.skill_order))
+    layout = _plot_layout(len(timeline.skill_order), len(combos))
     total_h = layout.total_h + PLOT_SCRUBBER_H
     body = (
         _render_timeline_grass(
@@ -2703,7 +2763,7 @@ def render_plot_timeline_svg(
         + _render_timeline_rain(vitality, layout.legend_y, key_times, dur)
         + _render_timeline_night(nightness, layout.legend_y, key_times, dur)
         + _render_date_label(timeline, key_times, dur)
-        + _render_plot_legend(layout.legend_y)
+        + _render_plot_legend(layout.legend_y, combos)
         + _render_plot_scrubber(
             timeline,
             key_times,
@@ -2714,12 +2774,13 @@ def render_plot_timeline_svg(
         + _render_plot_tap_tooltip(total_h)
     )
 
+    species = {s for _, s in combos} | {'sprout'}
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg"'
         f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'
         f' width="{PLOT_VIEWBOX_WIDTH}" height="{total_h}">'
         f'{_render_plot_style(len(timeline.skill_order), layout.legend_y)}'
-        f'{_render_plot_defs(_sun_sweep(key_times, dur))}'
+        f'{_render_plot_defs(_sun_sweep(key_times, dur), species)}'
         f'{body}'
         f'</svg>'
     )

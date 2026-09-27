@@ -18,6 +18,9 @@ Three modules, each a stage; keep them in that order of dependency
 - `src/ccgarden/render.py` — turns those dataclasses into SVG strings.
   `render_svg` for a static garden, `render_timeline_svg` for the animated
   timelapse (what the CLI actually ships).
+- `src/ccgarden/plot_species.py` — the plot's plant catalog (one
+  top-down drawing per species) and `assign_species`, which maps each
+  model/effort combo to a plant from its family's pool.
 - `src/ccgarden/render_plot.py` — the `--plot` renderer: a top-down
   kitchen garden from the same dataclasses. `render_plot_svg` (static)
   and `render_plot_timeline_svg` (replay + scrubber, `--poster`).
@@ -193,6 +196,12 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   moves every `<use>` at once; three copies on different clocks
   (`SWAY_VARIANTS`) stop a bed moving in step, and `-still` copies
   serve the legend (a `.legend` selector can't reach into a `<use>`).
+- One plant species per model/effort combo, from a per-family pool
+  (`FAMILY_POOLS`). Known combos are pinned in `PINNED` so a garden
+  never reshuffles; add a new combo there rather than letting it fall
+  through to the hashed probe once it's a regular. Assignment is
+  garden-wide (`_garden_species`), so a combo is the same plant in
+  every bed and the legend. Only species in use get symbols.
 - Tests parse the output as XML and check every `url(#…)` /
   `href="#…"` resolves — keep both passing when adding defs.
 
