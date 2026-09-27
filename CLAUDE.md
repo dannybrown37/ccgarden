@@ -212,6 +212,20 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   bed, the static render draws the first `_weed_count(vitality)`, and
   the replay grows weed *k* on days that count passes *k* and pulls
   it when you're back.
+- Sprinklers are the weeds' opposite: per bed, not garden-wide, and
+  they mark *recent* work. `RepoBranch.idle_days` (static, days to
+  today) and `GardenTimeline.branch_idle_days` (per frame, on the
+  calendar -- a sampled lapse still counts every day) feed
+  `_sprinkler_strength`, which fades linearly to off at
+  `SPRINKLER_DAYS`. Recency reads mainly through the soil: a
+  `bed-wet` overlay under the plants, darkest the day you work the
+  bed and drying out across the window. `_sprinkler_grid` puts one
+  head per cell (capped at `SPRINKLER_MAX_HEADS` by widening cells),
+  each reaching its cell's corners so the whole bed is covered, and
+  the spray is clipped to the soil. The replay grows each head via
+  `_grow_about` (zero only when off); the jet's turn is CSS
+  (`ccp-spin`, `fill-box` pinned to the head by an invisible
+  full-reach circle), so it keeps turning when the replay is paused.
 - Plant rows run along each strip's long side (`_hex_rows`), and
   `_bed_furrows` lays one drill under every row from the same
   `_bed_planting`, so a plant always sits in a furrow. `lines_added`

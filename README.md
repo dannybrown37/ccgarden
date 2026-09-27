@@ -100,7 +100,9 @@ replies — hover one to find it in the beds. Skills bloom in
 the flower border. The potting bench holds your busiest tools, the rain
 barrel fills with tokens, and the sundial shows the hours you prompt
 (blue petals = night). Butterflies come out on working days, fireflies
-at night, and rain and weeds when you stay away. In the timelapse each
+at night, and rain and weeds when you stay away. A bed you've worked in
+the last 14 days has its sprinklers running and dark, wet soil; the soil
+dries and the spray shrinks the longer it's left. In the timelapse each
 plant sprouts and grows as its repo's sessions add up, and each flower
 swells with its skill's calls; it has a Replay button and a day slider.
 

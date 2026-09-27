@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import math
 import random
+import zlib
+from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from ccgarden.plot_species import (
@@ -190,6 +192,23 @@ WEED_LEAF = (
 )
 WEED_VITALITY_THRESHOLD = 0.75
 WEED_MAX = 8
+# Days after you last worked a bed until its sprinkler is off; the
+# spray shrinks steadily across the window rather than cutting out.
+SPRINKLER_DAYS = 14
+SPRINKLER_MIN_SCALE = 0.25
+# Heads sit on a grid of cells about this wide; a huge bed widens the
+# cells rather than going past SPRINKLER_MAX_HEADS.
+SPRINKLER_CELL = 80.0
+SPRINKLER_MAX_HEADS = 12
+# The soil of a bed worked today, darkened as if just watered; it dries
+# back to plain soil across the sprinkler window.
+WET_SOIL = '#141a26'
+WET_SOIL_MAX_OPACITY = 0.55
+SPRINKLER_SPIN_SECS = 3.6
+SPRINKLER_JET_DEGREES = 26
+SPRINKLER_JET_DROPS = 5
+SPRINKLER_HEAD_R = 3.0
+SPRINKLER_SPRAY = '#e4f3fc'
 
 FLOWER_COLORS = ('#f4c95d', '#f27ab0', '#fdfdf6', '#c98bdb', '#f2896d')
 FLOWER_CENTER = '#5a3d1a'
@@ -717,6 +736,202 @@ def _render_timeline_weeds(
             _weed_use(weed),
         )
         for k, weed in enumerate(_bed_weeds(bed)[: max(counts, default=0)])
+    )
+
+
+# ── Sprinklers ─────────────────────────────────────────────────
+
+
+def _sprinkler_strength(idle_days: int | None) -> float:
+    if idle_days is None:
+        return 0.0
+    return max(0.0, 1.0 - idle_days / SPRINKLER_DAYS)
+
+
+def _sprinkler_scale(strength: float) -> float:
+    """Zero only when off, so an idle bed's last day still shows spray."""
+    if strength <= 0:
+        return 0.0
+    return SPRINKLER_MIN_SCALE + (1 - SPRINKLER_MIN_SCALE) * strength
+
+
+class SprinklerGrid(NamedTuple):
+    heads: list[tuple[float, float]]
+    reach: float
+
+
+def _sprinkler_grid(bed: BedRect) -> SprinklerGrid:
+    """Heads at the centre of each cell, reaching its corners.
+
+    Reaching the corners means the circles overlap enough to wet the
+    whole bed; the spill past the soil is clipped off.
+    """
+    sx, sy, sw, sh = _soil_rect(bed)
+    cell = max(SPRINKLER_CELL, math.sqrt(sw * sh / SPRINKLER_MAX_HEADS))
+    cols = max(1, round(sw / cell))
+    rows = max(1, round(sh / cell))
+    cw, ch = sw / cols, sh / rows
+    return SprinklerGrid(
+        [
+            (sx + (c + 0.5) * cw, sy + (r + 0.5) * ch)
+            for r in range(rows)
+            for c in range(cols)
+        ],
+        math.hypot(cw, ch) / 2,
+    )
+
+
+def _sprinkler_clip(bed: BedRect) -> tuple[str, str]:
+    """A clipPath to the soil, and the attribute that uses it."""
+    clip_id = f'sprinkler-soil-{zlib.crc32(bed.repo.encode()):08x}'
+    soil = _rect(_soil_rect(bed), '')
+    return (
+        f'<clipPath id="{clip_id}">{soil}</clipPath>',
+        f'clip-path="url(#{clip_id})"',
+    )
+
+
+def _sprinkler_jet(cx: float, cy: float, reach: float) -> str:
+    half = math.radians(SPRINKLER_JET_DEGREES / 2)
+    x0, y0 = cx + reach * math.cos(-half), cy + reach * math.sin(-half)
+    x1, y1 = cx + reach * math.cos(half), cy + reach * math.sin(half)
+    drops = ''.join(
+        f'<circle cx="{cx + reach * t:.1f}" cy="{cy:.1f}"'
+        f' r="{1.5 - 0.7 * t:.2f}"/>'
+        for t in (
+            (k + 1) / SPRINKLER_JET_DROPS for k in range(SPRINKLER_JET_DROPS)
+        )
+    )
+    return (
+        f'<path d="M{cx:.1f},{cy:.1f} L{x0:.1f},{y0:.1f}'
+        f' A{reach:.1f},{reach:.1f} 0 0 1 {x1:.1f},{y1:.1f}z"'
+        f' fill="{SPRINKLER_SPRAY}" fill-opacity="0.4"/>'
+        f'<g fill="{SPRINKLER_SPRAY}">{drops}</g>'
+    )
+
+
+def _sprinkler(
+    cx: float, cy: float, reach: float, *, delay: float | None = None
+) -> str:
+    """A riser with its jet sweeping a circle of ``reach``.
+
+    The invisible full circle pins the spinning group's box to the
+    head, so ``fill-box`` turns it about the riser. ``delay=None`` is
+    the legend's still copy.
+    """
+    jet = (
+        f'<circle class="sprinkler-reach" cx="{cx:.1f}" cy="{cy:.1f}"'
+        f' r="{reach:.1f}" fill="none"/>' + _sprinkler_jet(cx, cy, reach)
+    )
+    if delay is not None:
+        jet = (
+            f'<g class="ccp-spin" style="animation-delay:-{delay:.2f}s">'
+            f'{jet}</g>'
+        )
+    head = (
+        f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{SPRINKLER_HEAD_R}"'
+        f' fill="{TOOL_METAL}" stroke="#4d5357" stroke-width="0.8"/>'
+        f'<circle cx="{cx - 0.8:.1f}" cy="{cy - 0.8:.1f}" r="1"'
+        f' fill="#d7dde0"/>'
+    )
+    return (
+        jet
+        + _drop_shadow(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{SPRINKLER_HEAD_R}"/>'
+        )
+        + head
+    )
+
+
+def _bed_sprinklers(
+    bed: BedRect,
+    scales: list[float] | None = None,
+    clock: tuple[list[float], float] | None = None,
+    scale: float = 1.0,
+) -> str:
+    """Every head in the bed, clipped to the soil.
+
+    With a ``clock`` each head grows about itself through ``scales``;
+    without one they're drawn at ``scale``.
+    """
+    grid = _sprinkler_grid(bed)
+    rng = random.Random(f'sprinkler-{bed.repo}')
+    heads = []
+    for cx, cy in grid.heads:
+        delay = rng.uniform(0, SPRINKLER_SPIN_SECS)
+        if clock is None or scales is None:
+            heads.append(_sprinkler(cx, cy, grid.reach * scale, delay=delay))
+        else:
+            heads.append(
+                _grow_about(
+                    'sprinkler-grow',
+                    (cx, cy),
+                    scales,
+                    clock,
+                    _sprinkler(cx, cy, grid.reach, delay=delay),
+                )
+            )
+    clip, clip_attr = _sprinkler_clip(bed)
+    return (
+        f'{clip}<g class="sprinkler" pointer-events="none" {clip_attr}>'
+        f'{"".join(heads)}</g>'
+    )
+
+
+def _render_bed_sprinkler(bed: BedRect) -> str:
+    scale = _sprinkler_scale(_sprinkler_strength(bed.branch.idle_days))
+    if scale <= 0:
+        return ''
+    return _bed_sprinklers(bed, scale=scale)
+
+
+def _render_timeline_sprinkler(
+    bed: BedRect,
+    idle_days: list[int | None] | None,
+    clock: tuple[list[float], float],
+) -> str:
+    """Comes on the day you work the bed and winds down after."""
+    scales = [
+        _sprinkler_scale(_sprinkler_strength(d)) for d in idle_days or []
+    ]
+    if not any(scales):
+        return ''
+    return _bed_sprinklers(bed, scales, clock)
+
+
+def _wet_opacity(strength: float) -> str:
+    return f'{WET_SOIL_MAX_OPACITY * strength:.3f}'
+
+
+def _wet_rect(bed: BedRect, opacity: str, anim: str = '') -> str:
+    return _rect(
+        _soil_rect(bed),
+        f'class="bed-wet" fill="{WET_SOIL}" opacity="{opacity}"'
+        ' pointer-events="none"',
+        anim,
+    )
+
+
+def _render_bed_wet(bed: BedRect) -> str:
+    strength = _sprinkler_strength(bed.branch.idle_days)
+    if strength <= 0:
+        return ''
+    return _wet_rect(bed, _wet_opacity(strength))
+
+
+def _render_timeline_wet(
+    bed: BedRect,
+    idle_days: list[int | None] | None,
+    clock: tuple[list[float], float],
+) -> str:
+    """Soaked the day you work the bed, drying out day by day after."""
+    strengths = [_sprinkler_strength(d) for d in idle_days or []]
+    if not any(strengths):
+        return ''
+    values = [_wet_opacity(v) for v in strengths]
+    key_times, dur = clock
+    return _wet_rect(
+        bed, values[0], _animate_tag('opacity', values, key_times, dur)
     )
 
 
@@ -1292,6 +1507,14 @@ def _tooltip_specs(
     return _plant_specs(branch, species)[:TOOLTIP_MAX_PLANTS]
 
 
+def _last_worked(idle_days: int) -> str:
+    if idle_days == 0:
+        return 'worked today'
+    if idle_days == 1:
+        return 'last worked yesterday'
+    return f'last worked {idle_days} days ago'
+
+
 def _bed_tooltip(
     branch: RepoBranch,
     species: dict[str, str] | None = None,
@@ -1309,6 +1532,8 @@ def _bed_tooltip(
     tok_k = (branch.input_tokens + branch.output_tokens) / 1000
     if tok_k > 0:
         lines.append(f'{tok_k:,.0f}k tokens')
+    if branch.idle_days is not None:
+        lines.append(_last_worked(branch.idle_days))
     specs = _tooltip_specs(branch, species)
     total = sum(s.replies for s in _plant_specs(branch, species))
     lines.extend(
@@ -1349,8 +1574,10 @@ def _render_beds(
             + _render_bed_soil(
                 bed, vitality, _bed_furrow_marks(bed, max_sessions, species)
             )
+            + _render_bed_wet(bed)
             + _render_bed_plants(bed, max_sessions, vitality, species)
             + _render_bed_weeds(bed, vitality)
+            + _render_bed_sprinkler(bed)
             + _render_row_markers(bed, max_sessions, species)
             + _render_bed_label(bed)
             + '</g>'
@@ -2412,6 +2639,10 @@ def _render_motion_style(n_skills: int, garden_h: float) -> str:
         '@keyframes ccp-wander{0%,100%{transform:translate(0,0)}'
         '33%{transform:translate(9px,-6px)}66%{transform:translate(-7px,5px)}}'
         '.ccp-wander{animation:ccp-wander 11s ease-in-out infinite}'
+        '@keyframes ccp-spin{to{transform:rotate(360deg)}}'
+        f'.ccp-spin{{animation:ccp-spin {SPRINKLER_SPIN_SECS}s linear'
+        ' infinite;'
+        'transform-box:fill-box;transform-origin:center}'
         + _butterfly_keyframes(n_skills, garden_h)
         + '.legend [class*="ccp-"]{animation:none}'
         '@media (prefers-reduced-motion:reduce){[class*="ccp-"]'
@@ -2649,6 +2880,13 @@ def _legend_rain(x: float, y: float) -> str:
     )
 
 
+def _legend_sprinkler(x: float, y: float) -> str:
+    return (
+        f'<circle cx="{x}" cy="{y}" r="10" fill="{WET_SOIL}"'
+        f' fill-opacity="{WET_SOIL_MAX_OPACITY}"/>' + _sprinkler(x, y, 10)
+    )
+
+
 def _legend_icon(kind: str, x: float, y: float) -> str:
     """A key icon centred on (x, y), drawn by the plot's own renderers."""
     if kind.startswith('plant-'):
@@ -2662,6 +2900,7 @@ def _legend_icon(kind: str, x: float, y: float) -> str:
         'butterfly': _legend_butterfly,
         'firefly': _legend_firefly,
         'rain': _legend_rain,
+        'sprinkler': _legend_sprinkler,
     }
     return icons[kind](x, y)
 
@@ -2675,6 +2914,7 @@ LEGEND_ENTRIES = (
     ('butterfly', 'Butterflies', 'a dry, working streak'),
     ('firefly', 'Fireflies', 'late-night prompting'),
     ('rain', 'Rain, weeds', 'days away from the garden'),
+    ('sprinkler', 'Sprinklers', 'on + wet soil = worked lately'),
 )
 
 
@@ -3010,11 +3250,14 @@ def _final_branches(
     last = len(timeline.days) - 1
     efforts = repo_model_efforts or {}
     return [
-        _branch_at_day(
-            timeline.branch_days[repo],
-            repo,
-            last,
-            model_effort_counts=efforts.get(repo),
+        replace(
+            _branch_at_day(
+                timeline.branch_days[repo],
+                repo,
+                last,
+                model_effort_counts=efforts.get(repo),
+            ),
+            idle_days=(timeline.branch_idle_days.get(repo) or [None])[-1],
         )
         for repo in timeline.branch_order
         if repo in timeline.branch_days
@@ -3087,14 +3330,20 @@ def _render_timeline_beds(
             dur=dur,
         )
 
+        clock = (key_times, dur)
+        idle_days = timeline.branch_idle_days.get(repo)
+        sprinkler = _render_timeline_sprinkler(bed, idle_days, clock)
+        wet = _render_timeline_wet(bed, idle_days, clock)
         tt = _title(_bed_tooltip(bed.branch, species))
         data = _bed_tooltip_plants(bed.branch, species)
         parts.append(
             f'<g class="bed"{data} opacity="0">{tt}'
             f'{opacity_anim}'
             f'{bed_soil}'
+            f'{wet}'
             f'{plant_parts}'
-            f'{_render_timeline_weeds(bed, vit_vals, (key_times, dur))}'
+            f'{_render_timeline_weeds(bed, vit_vals, clock)}'
+            f'{sprinkler}'
             f'{_render_row_markers(bed, max_sessions, species)}'
             f'{_render_bed_label(bed)}'
             f'</g>'

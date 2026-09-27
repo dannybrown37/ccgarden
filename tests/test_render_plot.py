@@ -74,6 +74,11 @@ from ccgarden.render_plot import (
     _point_in_any_bed,
     _squarify,
     _weed_count,
+    SPRINKLER_DAYS,
+    SPRINKLER_MAX_HEADS,
+    _sprinkler_grid,
+    _sprinkler_scale,
+    _sprinkler_strength,
     render_plot_svg,
     render_plot_timeline_svg,
 )
@@ -1000,6 +1005,7 @@ class TestLegend:
             'Butterflies',
             'Fireflies',
             'Rain, weeds',
+            'Sprinklers',
         ],
     )
     def test_entry_present(self, label):
@@ -1586,6 +1592,7 @@ def _branch(
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     model_effort_counts: dict[str, int] | None = None,
+    idle_days: int | None = None,
 ) -> RepoBranch:
     return RepoBranch(
         repo=repo,
@@ -1599,6 +1606,7 @@ def _branch(
         cache_read_tokens=cache_read_tokens,
         cache_write_tokens=cache_write_tokens,
         model_effort_counts=model_effort_counts or {},
+        idle_days=idle_days,
     )
 
 
@@ -1683,3 +1691,198 @@ def test_butterflies_roam_the_whole_fenced_garden():
     assert min(ys) >= BED_ZONE_Y
     assert max(ys) <= garden_h
     assert min(ys) < FENCE_Y + FENCE_H / 3
+
+
+# ── Sprinklers ──────────────────────────────────────────────
+
+
+def _garden_part(svg: str) -> str:
+    return svg[: svg.index('<g class="legend"')]
+
+
+class TestSprinklers:
+    @pytest.mark.parametrize(
+        ('idle', 'expected'),
+        [
+            (None, 0.0),
+            (0, 1.0),
+            (SPRINKLER_DAYS // 2, 0.5),
+            (SPRINKLER_DAYS - 1, 1 / SPRINKLER_DAYS),
+            (SPRINKLER_DAYS, 0.0),
+            (SPRINKLER_DAYS * 3, 0.0),
+        ],
+    )
+    def test_strength_fades_over_the_window(self, idle, expected):
+        assert _sprinkler_strength(idle) == pytest.approx(expected)
+
+    def test_scale_is_zero_only_when_off(self):
+        assert _sprinkler_scale(0.0) == 0
+        assert 0 < _sprinkler_scale(0.01) < _sprinkler_scale(0.5)
+        assert _sprinkler_scale(1.0) == 1
+
+    @pytest.mark.parametrize(
+        ('w', 'h'),
+        [(40.0, 40.0), (60.0, 200.0), (200.0, 160.0), (700.0, 500.0)],
+    )
+    def test_spray_reaches_every_part_of_the_soil(self, w, h):
+        bed = _bed(w=w, h=h)
+        sx, sy, sw, sh = _soil_rect(bed)
+        grid = _sprinkler_grid(bed)
+        steps = 12
+        for i in range(steps + 1):
+            for j in range(steps + 1):
+                px, py = sx + sw * i / steps, sy + sh * j / steps
+                assert any(
+                    math.hypot(px - hx, py - hy) <= grid.reach + 1e-6
+                    for hx, hy in grid.heads
+                ), (px, py)
+
+    @pytest.mark.parametrize(
+        ('w', 'h'),
+        [(40.0, 40.0), (60.0, 200.0), (200.0, 160.0), (700.0, 500.0)],
+    )
+    def test_heads_stand_in_the_soil(self, w, h):
+        bed = _bed(w=w, h=h)
+        sx, sy, sw, sh = _soil_rect(bed)
+        for hx, hy in _sprinkler_grid(bed).heads:
+            assert sx < hx < sx + sw
+            assert sy < hy < sy + sh
+
+    def test_a_big_bed_gets_several_heads_but_not_a_carpet(self):
+        assert len(_sprinkler_grid(_bed(w=40.0, h=40.0)).heads) == 1
+        big = _sprinkler_grid(_bed(w=700.0, h=500.0)).heads
+        assert 1 < len(big) <= SPRINKLER_MAX_HEADS
+
+    def test_spray_is_clipped_to_the_soil(self):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=0)]))
+        m = re.search(
+            r'<g class="sprinkler"[^>]*clip-path="url\(#([\w-]+)\)"', svg
+        )
+        assert m
+        assert f'<clipPath id="{m.group(1)}">' in svg
+
+    @pytest.mark.parametrize(
+        ('idle', 'wet'),
+        [(0, 0.55), (SPRINKLER_DAYS // 2, 0.275), (SPRINKLER_DAYS, None)],
+    )
+    def test_soil_is_wet_after_work_and_dries_out(self, idle, wet):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=idle)]))
+        m = re.search(r'class="bed-wet"[^>]*opacity="([\d.]+)"', svg)
+        if wet is None:
+            assert m is None
+        else:
+            assert m
+            assert float(m.group(1)) == pytest.approx(wet)
+
+    def test_wet_soil_sits_under_the_plants(self):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=0)]))
+        assert svg.index('class="bed-wet"') < svg.index('data-species=')
+
+    def test_replay_soil_dries_between_visits(self):
+        tl = replace(
+            _timeline(n_days=4),
+            branch_idle_days={
+                'test-repo': [None, 0, SPRINKLER_DAYS // 2, SPRINKLER_DAYS]
+            },
+        )
+        svg = render_plot_timeline_svg(tl)
+        m = re.search(
+            r'class="bed-wet"[^>]*><animate attributeName="opacity"'
+            r'[^>]*values="([^"]+)"',
+            svg,
+        )
+        assert m
+        values = [float(v) for v in m.group(1).split(';')]
+        assert values[0] == 0
+        assert values[1] == pytest.approx(0.55)
+        assert values[-1] == 0
+
+    @pytest.mark.parametrize(
+        ('idle', 'watered'),
+        [
+            (0, True),
+            (SPRINKLER_DAYS - 1, True),
+            (SPRINKLER_DAYS, False),
+            (None, False),
+        ],
+    )
+    def test_static_bed_is_watered_when_recently_worked(self, idle, watered):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=idle)]))
+        assert ('class="sprinkler"' in _garden_part(svg)) is watered
+
+    def test_spray_shrinks_as_the_work_goes_stale(self):
+        def reach(idle: int) -> float:
+            svg = render_plot_svg(_garden(branches=[_branch(idle_days=idle)]))
+            m = re.search(
+                r'class="sprinkler-reach"[^>]*\br="([\d.]+)"',
+                _garden_part(svg),
+            )
+            assert m
+            return float(m.group(1))
+
+        assert (
+            reach(0) > reach(SPRINKLER_DAYS // 2) > reach(SPRINKLER_DAYS - 1)
+        )
+
+    def test_spray_turns_on_its_own_clock(self):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=0)]))
+        assert '@keyframes ccp-spin' in svg
+        assert 'class="ccp-spin"' in _garden_part(svg)
+
+    def test_legend_sprinkler_holds_still(self):
+        legend = _legend(render_plot_svg(_garden()))
+        assert 'class="ccp-spin"' not in legend
+
+    def test_replay_turns_on_when_worked_and_off_after_the_window(self):
+        tl = replace(
+            _timeline(n_days=4),
+            branch_idle_days={
+                'test-repo': [None, 0, SPRINKLER_DAYS // 2, SPRINKLER_DAYS]
+            },
+        )
+        heads = _grow_scales(render_plot_timeline_svg(tl), 'sprinkler-grow')
+        assert heads
+        assert all(h == heads[0] for h in heads)
+        scales = heads[0]
+        assert scales[0] == 0
+        assert scales[1] == 1
+        assert 0 < scales[2] < 1
+        assert scales[3] == 0
+
+    def test_no_replay_sprinkler_without_idle_data(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'sprinkler-grow' not in svg
+        assert 'bed-wet' not in svg
+
+    def test_no_replay_sprinkler_for_a_bed_never_recently_worked(self):
+        tl = replace(
+            _timeline(n_days=3),
+            branch_idle_days={'test-repo': [None, SPRINKLER_DAYS, 40]},
+        )
+        assert 'sprinkler-grow' not in render_plot_timeline_svg(tl)
+
+    @pytest.mark.parametrize(
+        ('idle', 'line'),
+        [
+            (0, 'worked today'),
+            (1, 'last worked yesterday'),
+            (5, 'last worked 5 days ago'),
+        ],
+    )
+    def test_tooltip_says_when_the_bed_was_last_worked(self, idle, line):
+        assert line in _bed_tooltip(_branch(idle_days=idle)).split('\n')
+
+    def test_tooltip_is_silent_without_idle_data(self):
+        assert 'worked' not in _bed_tooltip(_branch())
+
+    def test_replay_tooltip_uses_the_last_frame(self):
+        tl = replace(
+            _timeline(n_days=3),
+            branch_idle_days={'test-repo': [None, 0, 2]},
+        )
+        assert 'last worked 2 days ago' in render_plot_timeline_svg(tl)
+
+    def test_references_resolve_with_sprinklers(self):
+        svg = render_plot_svg(_garden(branches=[_branch(idle_days=0)]))
+        assert _dangling_refs(svg) == set()
+        ET.fromstring(svg)  # noqa: S314 -- our own output

@@ -68,6 +68,8 @@ class RepoBranch:
     # Session counts by "model (effort)" label, e.g. "claude-opus-5 (high)".
     # Empty for repos recorded before daily_repo_model_effort_usage existed.
     model_effort_counts: dict[str, int] = field(default_factory=dict)
+    # Calendar days from `last_day` to today; None when not loaded from a db.
+    idle_days: int | None = None
 
 
 @dataclass(frozen=True)
@@ -217,6 +219,9 @@ class GardenTimeline:
     # Also non-cumulative, and the only channel that can fall: how
     # recently you worked, which drives the season.
     daily_vitality: list[float] = field(default_factory=list)
+    # Per repo, per frame: calendar days since that repo was last worked,
+    # None before its first day. Non-cumulative, like vitality.
+    branch_idle_days: dict[str, list[int | None]] = field(default_factory=dict)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -445,15 +450,26 @@ def _daily_vitality(days: list[str], active: set[str]) -> list[float]:
     brings them back. Unlike the cumulative channels this one can fall:
     that's the whole point of it.
     """
-    vitality = []
+    return [
+        0.5 ** ((gap or 0) / DORMANCY_HALF_LIFE_DAYS)
+        for gap in _days_since_active(days, active)
+    ]
+
+
+def _days_since_active(days: list[str], active: set[str]) -> list[int | None]:
+    """Calendar days from the last active day to each frame's day.
+
+    Frames aren't one per calendar day -- a long lapse is sampled -- so
+    the gap is measured on the calendar, not by counting frames.
+    """
+    gaps: list[int | None] = []
     last_active: date | None = None
     for day in days:
         current = date.fromisoformat(day)
         if day in active:
             last_active = current
-        gap = (current - last_active).days if last_active else 0
-        vitality.append(0.5 ** (gap / DORMANCY_HALF_LIFE_DAYS))
-    return vitality
+        gaps.append((current - last_active).days if last_active else None)
+    return gaps
 
 
 def _with_seed_day(
@@ -513,7 +529,7 @@ def _load_timeline(
         cumulative_cache_write.append(running_cache_write)
         cumulative_total_tokens.append(running_total_tokens)
 
-    branch_order, branch_days = _load_branch_days(
+    branch_order, branch_days, branch_active = _load_branch_days(
         conn, days, day_index, days_range
     )
     model_order, model_days = _load_model_days(
@@ -540,6 +556,10 @@ def _load_timeline(
         daily_nightness=daily_nightness,
         hour_counts=hour_counts,
         daily_vitality=_daily_vitality(days, active_days),
+        branch_idle_days={
+            repo: _days_since_active(days, branch_active[repo])
+            for repo in branch_order
+        },
         days=days,
         daily_sessions=daily_sessions,
         cumulative_sessions=cumulative_sessions,
@@ -568,7 +588,7 @@ def _load_branch_days(
     days: list[str],
     day_index: dict[str, int],
     days_range: DayRange = ALL_DAYS,
-) -> tuple[list[str], dict[str, list[RepoBranchDay]]]:
+) -> tuple[list[str], dict[str, list[RepoBranchDay]], dict[str, set[str]]]:
     cursor = conn.execute(
         'SELECT day, repo, sessions, lines_added, lines_removed, '
         'output_tokens, input_tokens, cost, prompts, '
@@ -613,7 +633,15 @@ def _load_branch_days(
         repo: _cumulative_branch_days(days, deltas[repo])
         for repo in branch_order
     }
-    return branch_order, branch_days
+    branch_active = {
+        repo: {
+            day
+            for day, delta in zip(days, deltas[repo], strict=True)
+            if delta is not None
+        }
+        for repo in branch_order
+    }
+    return branch_order, branch_days, branch_active
 
 
 def _cumulative_branch_days(
@@ -1165,9 +1193,16 @@ def _load_branches(
             first_day=row[10] or '',
             last_day=row[11] or '',
             model_effort_counts=model_effort_counts.get(row[0], {}),
+            idle_days=_idle_days(row[11]),
         )
         for row in cursor.fetchall()
     ]
+
+
+def _idle_days(last_day: str | None) -> int | None:
+    if not last_day:
+        return None
+    return max((date.today() - date.fromisoformat(last_day)).days, 0)
 
 
 def exclude_repos_from_data(garden: GardenData, repos: set[str]) -> GardenData:
@@ -1188,6 +1223,11 @@ def exclude_repos_from_timeline(
         branch_days={
             r: days
             for r, days in timeline.branch_days.items()
+            if r not in repos
+        },
+        branch_idle_days={
+            r: gaps
+            for r, gaps in timeline.branch_idle_days.items()
             if r not in repos
         },
     )

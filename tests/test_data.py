@@ -19,6 +19,7 @@ from ccgarden.data import (
     load_garden_data,
     load_garden_timeline,
     _daily_vitality,
+    _days_since_active,
     _nightness,
 )
 
@@ -449,6 +450,7 @@ def test_load_branches_aggregates_same_repo_across_days(
             cost=4.0,
             first_day='2026-07-26',
             last_day='2026-07-27',
+            idle_days=(date.today() - date(2026, 7, 27)).days,
         )
     ]
 
@@ -1209,6 +1211,80 @@ def test_vitality_decays_with_days_since_the_last_active_day() -> None:
     assert vitality[2] == pytest.approx(0.25, abs=0.01)
 
 
+@pytest.mark.parametrize('ago', [0, 1, 13, 40])
+def test_load_garden_data_counts_days_since_each_repo_was_worked(
+    tmp_path: Path, ago: int
+) -> None:
+    today = date.today()
+    last = (today - timedelta(days=ago)).isoformat()
+    earlier = (today - timedelta(days=ago + 2)).isoformat()
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row(earlier, 1, 0, 0),
+            totals_row(last, 1, 0, 0),
+        ],
+        repo_rows=[
+            repo_row(earlier, 'r', sessions=1, lines_added=1, lines_removed=0),
+            repo_row(last, 'r', sessions=1, lines_added=1, lines_removed=0),
+        ],
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [b.idle_days for b in garden.branches] == [ago]
+
+
+def test_hand_built_branch_has_no_idle_opinion() -> None:
+    assert RepoBranch('r', 1, 0, 0, 0, 0, 0.0).idle_days is None
+
+
+@pytest.mark.parametrize(
+    ('active', 'expected'),
+    [
+        (set(), [None, None, None, None]),
+        ({'2026-01-01'}, [None, 0, 1, 3]),
+        ({'2026-01-01', '2026-01-04'}, [None, 0, 1, 0]),
+        ({'2026-01-02'}, [None, None, 0, 2]),
+    ],
+)
+def test_days_since_active_counts_calendar_days_not_frames(
+    active: set[str], expected: list[int | None]
+) -> None:
+    days = ['2025-12-31', '2026-01-01', '2026-01-02', '2026-01-04']
+
+    assert _days_since_active(days, active) == expected
+
+
+def test_timeline_tracks_idle_days_per_repo(tmp_path: Path) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 2, 0, 0),
+            totals_row('2026-01-03', 1, 0, 0),
+        ],
+        repo_rows=[
+            repo_row(
+                '2026-01-01', 'a', sessions=1, lines_added=5, lines_removed=0
+            ),
+            repo_row(
+                '2026-01-01', 'b', sessions=1, lines_added=1, lines_removed=0
+            ),
+            repo_row(
+                '2026-01-03', 'a', sessions=1, lines_added=5, lines_removed=0
+            ),
+        ],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert timeline.days == ['2025-12-31', '2026-01-01', '2026-01-03']
+    assert timeline.branch_idle_days == {
+        'a': [None, 0, 0],
+        'b': [None, 0, 2],
+    }
+
+
 def test_exclude_repos_from_data_strips_named_repos() -> None:
     from ccgarden.data import GardenData, RepoBranch, exclude_repos_from_data
 
@@ -1241,9 +1317,11 @@ def test_exclude_repos_from_timeline_strips_named_repos() -> None:
             'keep': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
             'drop': [RepoBranchDay('2026-01-01', 1, 0, 0, 0, 0, 0.0)],
         },
+        branch_idle_days={'keep': [0], 'drop': [0]},
     )
 
     result = exclude_repos_from_timeline(timeline, {'drop'})
 
     assert result.branch_order == ['keep']
     assert 'drop' not in result.branch_days
+    assert 'drop' not in result.branch_idle_days
