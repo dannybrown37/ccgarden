@@ -868,6 +868,20 @@ class TestSignboard:
         assert label == 'Jan 2, 2026 to Jan 6, 2026'
         assert '>18 sessions</text>' in svg
 
+    def test_replay_sign_counts_from_the_first_day(self):
+        tl = _timeline(n_days=4)
+        seeded = replace(
+            tl, cumulative_sessions=[0, *tl.cumulative_sessions[1:]]
+        )
+        svg = render_plot_timeline_svg(seeded)
+        days = re.findall(r'"([^"]*)"', re.search(r'var ds=\[(.*?)\]', svg)[1])
+        assert days == [
+            'Jan 1, 2026',
+            'Jan 2, 2026',
+            'Jan 2, 2026 to Jan 3, 2026',
+            'Jan 2, 2026 to Jan 4, 2026',
+        ]
+
 
 # ── Life and motion ─────────────────────────────────────────
 
@@ -981,6 +995,36 @@ class TestLegend:
         assert 'href="#plant-cabbage-still"' in legend
         assert '>Cabbage<' in legend
 
+    def test_plant_key_shows_each_combos_share(self):
+        branches = [
+            _branch('a', model_effort_counts={'claude-opus-4-6 (low)': 3}),
+            _branch('b', model_effort_counts={'claude-sonnet-5 (high)': 1}),
+        ]
+        legend = _legend(render_plot_svg(_garden(branches=branches)))
+        assert re.search(r'>Cabbage<tspan[^>]*> 75%</tspan>', legend)
+        assert re.search(r'> 25%</tspan>', legend)
+
+    def test_hovering_a_plant_key_dims_the_other_plants(self):
+        branch = _branch(model_effort_counts=MIXED)
+        svg = render_plot_svg(_garden(branches=[branch]))
+        species = re.findall(r'class="legend-plant" data-species="(\w+)"', svg)
+        assert len(species) == len(MIXED)
+        for sp in species:
+            assert (
+                f'svg:has(.legend-plant[data-species="{sp}"]:hover)'
+                f' .bed use[data-species]:not([data-species="{sp}"])'
+            ) in svg
+        garden_part = svg[: svg.index('<g class="legend"')]
+        assert all(f'data-species="{sp}"' in garden_part for sp in species)
+
+    def test_timeline_plants_carry_their_species(self):
+        svg = render_plot_timeline_svg(
+            _timeline(),
+            repo_model_efforts={'test-repo': {'claude-opus-4-6 (low)': 9}},
+        )
+        assert 'data-species="cabbage"' in svg
+        assert 'class="legend-plant" data-species="cabbage"' in svg
+
     def test_legend_grows_with_combos(self):
         few = _plot_layout(0, 2).total_h
         many = _plot_layout(0, 15).total_h
@@ -1092,7 +1136,7 @@ class TestBedTooltip:
         assert '42 sessions' in tt
         assert '+500/-30' in tt
 
-    def test_tokens_and_cost(self):
+    def test_tokens_without_cost(self):
         branch = _branch(
             input_tokens=50000,
             output_tokens=10000,
@@ -1100,7 +1144,33 @@ class TestBedTooltip:
         )
         tt = _bed_tooltip(branch)
         assert '60k tokens' in tt
-        assert '$3.50' in tt
+        assert '$' not in tt
+
+    def test_one_line_per_item(self):
+        branch = _branch(
+            'my-repo',
+            sessions=42,
+            input_tokens=50000,
+            model_effort_counts=MIXED,
+        )
+        lines = _bed_tooltip(branch).split('\n')
+        assert lines[0] == 'my-repo'
+        assert lines[1] == '42 sessions'
+        assert len(lines) == 4 + len(MIXED)
+
+    def test_plant_lines_are_listed_for_their_icons(self):
+        branch = _branch(model_effort_counts=MIXED)
+        svg = render_plot_svg(_garden(branches=[branch]))
+        plants = re.search(r'class="bed" data-plants="([^"]*)"', svg)[1]
+        species = [p.split(' ')[0] for p in plants.split(',')]
+        assert len(species) == len(MIXED)
+        assert all(f'id="plant-{s}-still"' in svg for s in species)
+
+    def test_tooltip_draws_plant_icons(self):
+        svg = render_plot_svg(_garden())
+        script = svg[svg.index('id="plot-tooltip"') :]
+        assert 'data-plants' in script
+        assert '-still' in script
 
     def test_model_breakdown(self):
         branch = _branch(

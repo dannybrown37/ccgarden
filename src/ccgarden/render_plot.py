@@ -549,18 +549,30 @@ def _garden_species(branches: list[RepoBranch]) -> dict[str, str]:
     )
 
 
-def _garden_combos(branches: list[RepoBranch]) -> list[tuple[str, str]]:
-    """(label, species) for the legend, most-used combo first."""
+class Combo(NamedTuple):
+    label: str
+    species: str
+    share: float
+
+
+def _garden_combos(branches: list[RepoBranch]) -> list[Combo]:
+    """Every combo the garden grows, most-used first, with its share."""
     totals: dict[str, int] = {}
     for branch in branches:
         for label, n in branch.model_effort_counts.items():
             totals[label] = totals.get(label, 0) + n
     species = _garden_species(branches)
+    grand = sum(n for n in totals.values() if n > 0)
     return [
-        (label, species[label])
+        Combo(label, species[label], totals[label] / grand)
         for label in sorted(totals, key=lambda k: (-totals[k], k))
         if totals[label] > 0
     ]
+
+
+def _percent(share: float) -> str:
+    text = f'{share:.0%}'
+    return '<1%' if share > 0 and text == '0%' else text
 
 
 # ── Plant shapes (SVG symbols) ─────────────────────────────────
@@ -975,7 +987,7 @@ def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
         f'<use href="#plant-{plant.spec.species}{suffix}"'
         f' x="{plant.x - half:.1f}" y="{plant.y - half:.1f}"'
         f' width="{plant.size:.1f}" height="{plant.size:.1f}"'
-        f' color="{color}"'
+        f' color="{color}" data-species="{plant.spec.species}"'
     )
     return f'{open_tag}>{inner}</use>' if inner else f'{open_tag}/>'
 
@@ -1271,31 +1283,52 @@ def _render_bed_label(bed: BedRect) -> str:
     )
 
 
+def _tooltip_specs(
+    branch: RepoBranch,
+    species: dict[str, str] | None,
+) -> list[PlantSpec]:
+    return _plant_specs(branch, species)[:TOOLTIP_MAX_PLANTS]
+
+
 def _bed_tooltip(
     branch: RepoBranch,
     species: dict[str, str] | None = None,
 ) -> str:
-    parts = [f'{branch.repo}']
-    parts.append(
-        f'{branch.sessions} sessions, +{branch.lines_added}'
-        f'/-{branch.lines_removed} lines'
-    )
+    """One item per line; the plant lines come last, one per combo.
+
+    The tap tooltip draws an icon beside each plant line, matched up
+    by order with the bed's ``data-plants`` (``_bed_tooltip_plants``).
+    """
+    lines = [
+        branch.repo,
+        f'{branch.sessions:,} sessions',
+        f'+{branch.lines_added:,}/-{branch.lines_removed:,} lines',
+    ]
     tok_k = (branch.input_tokens + branch.output_tokens) / 1000
     if tok_k > 0:
-        parts.append(f'{tok_k:.0f}k tokens')
-    if branch.cost > 0:
-        parts.append(f'${branch.cost:.2f}')
-    specs = _plant_specs(branch, species)
-    if specs:
-        total = sum(s.replies for s in specs)
-        parts.append(
-            ', '.join(
-                f'{SPECIES[s.species].name} = {combo_name(s.label)}'
-                f' {s.replies * 100 // total}%'
-                for s in specs[:3]
-            )
-        )
-    return ' | '.join(parts)
+        lines.append(f'{tok_k:,.0f}k tokens')
+    specs = _tooltip_specs(branch, species)
+    total = sum(s.replies for s in _plant_specs(branch, species))
+    lines.extend(
+        f'{_percent(s.replies / total)} {SPECIES[s.species].name}'
+        f' ({combo_name(s.label)})'
+        for s in specs
+    )
+    return '\n'.join(lines)
+
+
+def _bed_tooltip_plants(
+    branch: RepoBranch,
+    species: dict[str, str] | None = None,
+) -> str:
+    """``data-plants``: species and tint for each tooltip plant line."""
+    specs = _tooltip_specs(branch, species)
+    if not specs:
+        return ''
+    plants = ','.join(
+        f'{s.species} {_plant_color(s.species, 1.0)}' for s in specs
+    )
+    return f' data-plants="{plants}"'
 
 
 def _render_beds(
@@ -1308,8 +1341,9 @@ def _render_beds(
     parts: list[str] = []
     for bed in beds:
         tt = _title(_bed_tooltip(bed.branch, species))
+        data = _bed_tooltip_plants(bed.branch, species)
         parts.append(
-            f'<g class="bed">{tt}'
+            f'<g class="bed"{data}>{tt}'
             + _render_bed_soil(
                 bed, vitality, _bed_furrow_marks(bed, max_sessions, species)
             )
@@ -2641,28 +2675,78 @@ LEGEND_ENTRIES = (
 
 
 def _legend_entry(
-    icon: str, ix: float, iy: float, label: str, desc: str
+    icon: str,
+    ix: float,
+    iy: float,
+    label: str,
+    desc: str,
+    *,
+    note: str = '',
 ) -> str:
+    note_span = (
+        f'<tspan class="legend-desc" font-weight="normal" fill="#666">'
+        f' {_escape_xml(note)}</tspan>'
+        if note
+        else ''
+    )
     return (
         f'{icon}'
         f'<text class="legend-label" x="{ix + 20:.1f}" y="{iy - 2:.1f}"'
         f' font-family="Georgia, serif" font-size="10"'
         f' font-weight="bold" fill="#333">'
-        f'{_escape_xml(label)}</text>'
+        f'{_escape_xml(label)}{note_span}</text>'
         f'<text class="legend-desc" x="{ix + 20:.1f}" y="{iy + 10:.1f}"'
         f' font-family="Georgia, serif" font-size="8"'
         f' fill="#666">{_escape_xml(desc)}</text>'
     )
 
 
+def _plant_highlight_style(combos: list[Combo]) -> str:
+    """Hovering a plant's key dims every other plant on the plot.
+
+    CSS only (``:has``), so it costs no script; a rule per species
+    because a selector can't compare two elements' attributes.
+    """
+    rules = ''.join(
+        f'svg:has(.legend-plant[data-species="{c.species}"]:hover)'
+        f' .bed use[data-species]:not([data-species="{c.species}"])'
+        f'{{opacity:0.15}}'
+        for c in combos
+    )
+    return (
+        '<style>.bed use[data-species]{transition:opacity 0.2s}'
+        f'{rules}</style>'
+    )
+
+
+def _legend_plant_entry(
+    combo: Combo, ix: float, iy: float, col_w: float
+) -> str:
+    return (
+        f'<g class="legend-plant" data-species="{combo.species}">'
+        f'<rect x="{ix - 14:.1f}" y="{iy - 16:.1f}" width="{col_w - 8:.1f}"'
+        f' height="{LEGEND_ROW_H - 4}" rx="4" fill="#000" fill-opacity="0"/>'
+        + _legend_entry(
+            _legend_plant(combo.species, ix, iy),
+            ix,
+            iy,
+            SPECIES[combo.species].name,
+            combo_name(combo.label),
+            note=_percent(combo.share),
+        )
+        + '</g>'
+    )
+
+
 def _render_plot_legend(
     ly: float,
-    combos: list[tuple[str, str]] | None = None,
+    combos: list[Combo] | None = None,
 ) -> str:
     """The key, in a `.legend` group so every icon holds still.
 
     Below the fixed entries sits the plant key: one row per model and
-    effort combo the garden grows, most-used first.
+    effort combo the garden grows, most-used first, with its share of
+    replies. Hovering one picks its plants out on the plot.
     """
     combos = combos or []
     lh = _legend_height(len(combos))
@@ -2700,22 +2784,16 @@ def _render_plot_legend(
             f' font-family="Georgia, serif" font-size="10" font-weight="bold"'
             f' fill="#333">Plants'
             f'<tspan class="legend-desc" font-weight="normal" font-size="8"'
-            f' fill="#666"> — one per model and effort; bigger = more'
-            f' effort, more plants = more sessions</tspan></text>'
+            f' fill="#666"> — one per model and effort, % of replies;'
+            f' bigger = more effort, more plants = more sessions;'
+            f' hover to find</tspan></text>'
         )
         key_top = header_y + LEGEND_KEY_HEADER - 4
-        for i, (label, species) in enumerate(combos):
+        for i, combo in enumerate(combos):
             ix = lpad + 22 + (i % LEGEND_COLS) * col_w
             iy = key_top + (i // LEGEND_COLS) * LEGEND_ROW_H
-            parts.append(
-                _legend_entry(
-                    _legend_plant(species, ix, iy),
-                    ix,
-                    iy,
-                    SPECIES[species].name,
-                    combo_name(label),
-                )
-            )
+            parts.append(_legend_plant_entry(combo, ix, iy, col_w))
+        parts.append(_plant_highlight_style(combos))
     parts.append('</g><!--/legend-->')
     return ''.join(parts)
 
@@ -2724,23 +2802,27 @@ def _render_plot_legend(
 
 TOOLTIP_PAD = 8.0
 TOOLTIP_FONT_SIZE = 11.0
-TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
+TOOLTIP_LINE_H = 16.0
+TOOLTIP_ICON = 14.0
+TOOLTIP_MAX_PLANTS = 5
 
 
 def _render_plot_tap_tooltip(total_h: int) -> str:
+    """A tooltip that reads each shape's ``<title>``, one line per line.
+
+    A shape carrying ``data-plants`` gets that plant's icon beside each
+    of its last lines, so a bed's breakdown shows what each plant looks
+    like instead of just its name.
+    """
     box = (
-        f'<rect id="plot-tooltip-box" x="0" y="0" width="10"'
-        f' height="{TOOLTIP_HEIGHT:.1f}" rx="5"'
-        f' fill="#fbfbf3" stroke="#3a2412"'
-        f' stroke-width="1" opacity="0.95"/>'
+        '<rect id="plot-tooltip-box" x="0" y="0" width="10" height="10"'
+        ' rx="5" fill="#fbfbf3" stroke="#3a2412"'
+        ' stroke-width="1" opacity="0.95"/>'
     )
     text = (
-        f'<text id="plot-tooltip-text"'
-        f' x="{TOOLTIP_PAD:.1f}"'
-        f' y="{TOOLTIP_PAD + TOOLTIP_FONT_SIZE * 0.8:.1f}"'
-        f' font-family="Georgia, serif"'
-        f' font-size="{TOOLTIP_FONT_SIZE:.1f}"'
-        f' fill="#2f3b23"></text>'
+        f'<g id="plot-tooltip-icons"/>'
+        f'<text id="plot-tooltip-text" font-family="Georgia, serif"'
+        f' font-size="{TOOLTIP_FONT_SIZE:.1f}" fill="#2f3b23"></text>'
     )
     group = (
         f'<g id="plot-tooltip" opacity="0"'
@@ -2749,21 +2831,27 @@ def _render_plot_tap_tooltip(total_h: int) -> str:
     script = (
         '<script><![CDATA[\n'
         '(function(){\n'
+        '  var NS="http://www.w3.org/2000/svg";\n'
         '  var svg=document.documentElement;\n'
         '  var g=document.getElementById("plot-tooltip");\n'
         '  var bx=document.getElementById("plot-tooltip-box");\n'
         '  var tx=document.getElementById("plot-tooltip-text");\n'
+        '  var ic=document.getElementById("plot-tooltip-icons");\n'
         f'  var pad={TOOLTIP_PAD:.1f};\n'
-        f'  var bh={TOOLTIP_HEIGHT:.1f};\n'
+        f'  var lh={TOOLTIP_LINE_H:.1f};\n'
+        f'  var isz={TOOLTIP_ICON:.1f};\n'
         f'  var vw={PLOT_VIEWBOX_WIDTH};\n'
         f'  var vh={total_h};\n'
+        '  function titleOf(n){\n'
+        '    var c=n.childNodes||[];\n'
+        '    for(var i=0;i<c.length;i++){\n'
+        '      if(c[i].nodeName==="title")return c[i].textContent;\n'
+        '    }\n'
+        '    return null;\n'
+        '  }\n'
         '  function findTooltip(n){\n'
         '    while(n&&n!==svg){\n'
-        '      var c=n.childNodes||[];\n'
-        '      for(var i=0;i<c.length;i++){\n'
-        '        if(c[i].nodeName==="title")\n'
-        '          return c[i].textContent;\n'
-        '      }\n'
+        '      if(titleOf(n)!==null)return n;\n'
         '      n=n.parentNode;\n'
         '    }\n'
         '    return null;\n'
@@ -2775,31 +2863,62 @@ def _render_plot_tap_tooltip(total_h: int) -> str:
         '    p.x=e.clientX;p.y=e.clientY;\n'
         '    return p.matrixTransform(m.inverse());\n'
         '  }\n'
+        '  function clear(n){\n'
+        '    while(n.firstChild)n.removeChild(n.firstChild);\n'
+        '  }\n'
         '  function hide(){g.setAttribute("opacity","0");}\n'
-        '  function show(l,at){\n'
-        '    tx.textContent=l;\n'
-        '    var w=tx.getComputedTextLength()+pad*2;\n'
+        '  function show(n,at){\n'
+        '    var lines=titleOf(n).split("\\n");\n'
+        '    var plants=(n.getAttribute("data-plants")||"")'
+        '.split(",").filter(Boolean);\n'
+        '    var first=lines.length-plants.length;\n'
+        '    clear(tx);clear(ic);\n'
+        '    var w=0;\n'
+        '    for(var i=0;i<lines.length;i++){\n'
+        '      var x=pad,y=pad+lh*i;\n'
+        '      if(i>=first){\n'
+        '        var p=plants[i-first].split(" ");\n'
+        '        var u=document.createElementNS(NS,"use");\n'
+        '        u.setAttribute("href","#plant-"+p[0]+"-still");\n'
+        '        u.setAttribute("x",x);\n'
+        '        u.setAttribute("y",y+(lh-isz)/2);\n'
+        '        u.setAttribute("width",isz);\n'
+        '        u.setAttribute("height",isz);\n'
+        '        u.setAttribute("color",p[1]);\n'
+        '        ic.appendChild(u);\n'
+        '        x+=isz+4;\n'
+        '      }\n'
+        '      var ts=document.createElementNS(NS,"tspan");\n'
+        '      ts.setAttribute("x",x);\n'
+        '      ts.setAttribute("y",y+lh*0.72);\n'
+        '      if(i===0)ts.setAttribute("font-weight","bold");\n'
+        '      ts.textContent=lines[i];\n'
+        '      tx.appendChild(ts);\n'
+        '      w=Math.max(w,x+ts.getComputedTextLength());\n'
+        '    }\n'
+        '    w+=pad;\n'
+        '    var bh=lines.length*lh+pad*2;\n'
         '    bx.setAttribute("width",w.toFixed(1));\n'
-        '    var x=at.x-w/2,y=at.y-bh-10;\n'
-        '    if(x<4)x=4;\n'
-        '    if(x+w>vw-4)x=vw-4-w;\n'
-        '    if(y<4)y=at.y+14;\n'
-        '    if(y+bh>vh-4)y=vh-4-bh;\n'
+        '    bx.setAttribute("height",bh.toFixed(1));\n'
+        '    var x0=at.x-w/2,y0=at.y-bh-10;\n'
+        '    if(x0<4)x0=4;\n'
+        '    if(x0+w>vw-4)x0=vw-4-w;\n'
+        '    if(y0<4)y0=at.y+14;\n'
+        '    if(y0+bh>vh-4)y0=vh-4-bh;\n'
         '    g.setAttribute("transform",'
-        '"translate("+x.toFixed(1)+","+y.toFixed(1)+")");\n'
+        '"translate("+x0.toFixed(1)+","+y0.toFixed(1)+")");\n'
         '    g.setAttribute("opacity","1");\n'
         '  }\n'
+        '  function onPointer(e){\n'
+        '    var n=findTooltip(e.target);\n'
+        '    var a=n?pt(e):null;\n'
+        '    if(a)show(n,a);else hide();\n'
+        '  }\n'
         '  svg.addEventListener("pointerdown",function(e){\n'
-        '    if(e.pointerType==="mouse")return;\n'
-        '    var l=findTooltip(e.target);\n'
-        '    var a=l?pt(e):null;\n'
-        '    if(a)show(l,a);else hide();\n'
+        '    if(e.pointerType!=="mouse")onPointer(e);\n'
         '  });\n'
         '  svg.addEventListener("pointermove",function(e){\n'
-        '    if(e.pointerType!=="mouse")return;\n'
-        '    var l=findTooltip(e.target);\n'
-        '    var a=l?pt(e):null;\n'
-        '    if(a)show(l,a);else hide();\n'
+        '    if(e.pointerType==="mouse")onPointer(e);\n'
         '  });\n'
         '  svg.addEventListener("pointerleave",function(e){\n'
         '    if(e.pointerType!=="mouse")return;\n'
@@ -2840,7 +2959,7 @@ def render_plot_svg(garden: GardenData) -> str:
         + _render_plot_tap_tooltip(total_h)
     )
 
-    species = {s for _, s in combos} | {'sprout'}
+    species = {c.species for c in combos} | {'sprout'}
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg"'
         f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'
@@ -2965,8 +3084,9 @@ def _render_timeline_beds(
         )
 
         tt = _title(_bed_tooltip(bed.branch, species))
+        data = _bed_tooltip_plants(bed.branch, species)
         parts.append(
-            f'<g class="bed" opacity="0">{tt}'
+            f'<g class="bed"{data} opacity="0">{tt}'
             f'{opacity_anim}'
             f'{bed_soil}'
             f'{plant_parts}'
@@ -3093,7 +3213,12 @@ def _render_date_label(
     """
     days = [_format_day(d) for d in timeline.days]
     counts = timeline.cumulative_sessions or [0] * len(days)
-    days_json = ','.join(f'"{_escape_xml(d)}"' for d in days)
+    first = next((i for i, c in enumerate(counts) if c), 0)
+    spans = [
+        day if i <= first else f'{days[first]} to {day}'
+        for i, day in enumerate(days)
+    ]
+    days_json = ','.join(f'"{_escape_xml(d)}"' for d in spans)
     counts_json = ','.join(f'"{c:,} sessions"' for c in counts)
     kt_json = ','.join(f'{t:.4f}' for t in key_times)
     script = (
@@ -3121,11 +3246,7 @@ def _render_date_label(
         '})();\n'
         ']]></script>'
     )
-    first = next((i for i, c in enumerate(counts) if c), 0)
-    span = days[-1]
-    if first < len(days) - 1:
-        span = f'{days[first]} to {days[-1]}'
-    return _signboard(counts[-1], span, live=True) + script
+    return _signboard(counts[-1], spans[-1], live=True) + script
 
 
 def _render_plot_scrubber(
@@ -3327,7 +3448,7 @@ def render_plot_timeline_svg(
         + _render_plot_tap_tooltip(total_h)
     )
 
-    species = {s for _, s in combos} | {'sprout'}
+    species = {c.species for c in combos} | {'sprout'}
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg"'
         f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'

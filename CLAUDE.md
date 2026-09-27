@@ -236,6 +236,12 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   through to the hashed probe once it's a regular. Assignment is
   garden-wide (`_garden_species`), so a combo is the same plant in
   every bed and the legend. Only species in use get symbols.
+- Tooltips are `<title>` text, one item per line (`\n`); the tap
+  tooltip script splits them. A bed's `data-plants` lists species +
+  tint for its last lines, so the tooltip draws each plant's `-still`
+  icon. Every plant `<use>` carries `data-species`: hovering a
+  `.legend-plant` dims the rest via CSS `:has` (no script). No `$`
+  anywhere — cost is notional.
 - Tests parse the output as XML and check every `url(#…)` /
   `href="#…"` resolves — keep both passing when adding defs.
 

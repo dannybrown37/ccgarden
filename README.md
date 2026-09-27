@@ -95,7 +95,8 @@ A bird's-eye kitchen garden from the same data. Each repo is a raised
 bed (area = lines added + sessions). Every model and effort combo is its
 own plant: Opus grows brassicas and fruiting plants, Sonnet leafy
 greens, Haiku herbs. More plants mean more sessions, bigger plants mean
-more effort, and the legend lists which plant is which. Skills bloom in
+more effort, and the legend lists which plant is which and its share of
+replies — hover one to find it in the beds. Skills bloom in
 the flower border. The potting bench holds your busiest tools, the rain
 barrel fills with tokens, and the sundial shows the hours you prompt
 (blue petals = night). Butterflies come out on working days, fireflies
