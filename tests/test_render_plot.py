@@ -20,7 +20,7 @@ from ccgarden.data import (
     ToolBush,
     ToolUsageDay,
 )
-from ccgarden.plot_species import FAMILY_POOLS, model_family
+from ccgarden.plot_species import FAMILY_POOLS, SPECIES, model_family
 from ccgarden.render_plot import (
     BedRect,
     BED_MIN_DIM,
@@ -77,6 +77,9 @@ from ccgarden.render_plot import (
     render_plot_svg,
     render_plot_timeline_svg,
 )
+
+TOP_OPUS = FAMILY_POOLS['opus'][0]
+TOP_SONNET = FAMILY_POOLS['sonnet'][0]
 
 
 # ── Treemap layout ──────────────────────────────────────────────
@@ -406,6 +409,22 @@ class TestPlantLayout:
             gap = math.dist((a.x, a.y), (b.x, b.y)) - (a.size + b.size) / 2
             assert gap > -0.1 * min(a.size, b.size)
 
+    @pytest.mark.parametrize('species', ['corn', 'lettuce'])
+    def test_plant_size_follows_its_species(self, species):
+        label = 'claude-opus-5 (medium)'
+        bed = _bed(sessions=20, model_effort_counts={label: 1})
+        plant = _plant_layout(bed, 20, {label: species})[0]
+        base = _plant_layout(bed, 20, {label: 'cauliflower'})[0]
+        assert plant.size / base.size == pytest.approx(SPECIES[species].scale)
+
+    def test_big_species_is_spaced_for_its_size(self):
+        combo = {'claude-opus-5 (high)': 50}
+        bed = _bed(w=300.0, h=240.0, sessions=50, model_effort_counts=combo)
+        plants = _plant_layout(bed, 50, dict.fromkeys(combo, 'corn'))
+        for a, b in combinations(plants, 2):
+            gap = math.dist((a.x, a.y), (b.x, b.y)) - (a.size + b.size) / 2
+            assert gap > -0.1 * min(a.size, b.size)
+
     @pytest.mark.parametrize(
         ('w', 'h', 'sessions'),
         [(40.0, 40.0, 50), (60.0, 90.0, 2), (400.0, 300.0, 5)],
@@ -444,7 +463,7 @@ class TestPlantLayout:
 
 
 class TestPlantSymbols:
-    @pytest.mark.parametrize('species', ['cabbage', 'lettuce', 'sprout'])
+    @pytest.mark.parametrize('species', [TOP_OPUS, TOP_SONNET, 'sprout'])
     def test_symbol_has_shine_and_shadow(self, species):
         branch = _branch(
             model_effort_counts={
@@ -544,7 +563,9 @@ class TestRowMarkers:
             w=200.0, h=300.0, sessions=50, model_effort_counts=MARKER_MIX
         )
         markers = _row_markers(bed, 50)
-        assert sorted(m.species for m in markers) == ['cabbage', 'lettuce']
+        assert sorted(m.species for m in markers) == sorted(
+            [TOP_OPUS, TOP_SONNET]
+        )
 
     @pytest.mark.parametrize(('w', 'h'), [(200.0, 300.0), (400.0, 90.0)])
     def test_markers_sit_on_the_frame(self, w, h):
@@ -652,7 +673,7 @@ class TestTimelinePlants:
             tl,
             repo_model_efforts={'test-repo': {'claude-opus-5 (low)': 9}},
         )
-        assert 'href="#plant-squash' in svg
+        assert f'href="#plant-{TOP_OPUS}' in svg
         garden_part = svg[: svg.index('<g class="legend"')]
         used = set(
             re.findall(r'href="#plant-([a-z-]+?)(?:-[bc])?"', garden_part)
@@ -996,8 +1017,21 @@ class TestLegend:
     def test_plant_icons_are_the_real_symbols_held_still(self):
         branch = _branch(model_effort_counts={'claude-opus-4-6 (low)': 3})
         legend = _legend(render_plot_svg(_garden(branches=[branch])))
-        assert 'href="#plant-cabbage-still"' in legend
-        assert '>Cabbage<' in legend
+        assert f'href="#plant-{TOP_OPUS}-still"' in legend
+        assert f'>{SPECIES[TOP_OPUS].name}<' in legend
+
+    def test_busiest_combo_gets_the_first_plant_and_heads_the_key(self):
+        branch = _branch(
+            model_effort_counts={
+                'claude-opus-5 (low)': 2,
+                'claude-opus-4-6 (low)': 9,
+            }
+        )
+        svg = render_plot_svg(_garden(branches=[branch]))
+        species = re.findall(
+            r'class="legend-plant" data-species="([\w-]+)"', svg
+        )
+        assert species == list(FAMILY_POOLS['opus'][:2])
 
     def test_plant_key_shows_each_combos_share(self):
         branches = [
@@ -1005,7 +1039,8 @@ class TestLegend:
             _branch('b', model_effort_counts={'claude-sonnet-5 (high)': 1}),
         ]
         legend = _legend(render_plot_svg(_garden(branches=branches)))
-        assert re.search(r'>Cabbage<tspan[^>]*> 75%</tspan>', legend)
+        name = re.escape(SPECIES[TOP_OPUS].name)
+        assert re.search(rf'>{name}<tspan[^>]*> 75%</tspan>', legend)
         assert re.search(r'> 25%</tspan>', legend)
 
     def test_hovering_a_plant_key_dims_the_other_plants(self):
@@ -1026,8 +1061,8 @@ class TestLegend:
             _timeline(),
             repo_model_efforts={'test-repo': {'claude-opus-4-6 (low)': 9}},
         )
-        assert 'data-species="cabbage"' in svg
-        assert 'class="legend-plant" data-species="cabbage"' in svg
+        assert f'data-species="{TOP_OPUS}"' in svg
+        assert f'class="legend-plant" data-species="{TOP_OPUS}"' in svg
 
     def test_legend_grows_with_combos(self):
         few = _plot_layout(0, 2).total_h
@@ -1037,7 +1072,7 @@ class TestLegend:
     def test_still_symbols_have_no_wind(self):
         branch = _branch(model_effort_counts={'claude-opus-4-6 (low)': 3})
         svg = render_plot_svg(_garden(branches=[branch]))
-        start = svg.index('id="plant-cabbage-still"')
+        start = svg.index(f'id="plant-{TOP_OPUS}-still"')
         symbol = svg[start : svg.index('</symbol>', start)]
         assert 'ccp-' not in symbol
 
@@ -1046,7 +1081,7 @@ class TestLegend:
             _timeline(),
             repo_model_efforts={'test-repo': {'claude-opus-4-6 (low)': 9}},
         )
-        assert '>Cabbage<' in _legend(svg)
+        assert f'>{SPECIES[TOP_OPUS].name}<' in _legend(svg)
 
 
 # ── Scrubber and poster ─────────────────────────────────────
@@ -1185,7 +1220,7 @@ class TestBedTooltip:
         )
         tt = _bed_tooltip(branch)
         assert 'Sonnet 5 · high' in tt
-        assert 'Rainbow chard' in tt
+        assert SPECIES[TOP_SONNET].name in tt
         assert '80%' in tt
 
 

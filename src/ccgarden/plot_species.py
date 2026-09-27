@@ -1,11 +1,10 @@
 """The plot's plant catalog: one species per model/effort combo.
 
-Each model family draws from its own pool -- Opus the big brassicas and
-fruiting plants, Sonnet the leafy greens, Haiku the herbs -- so a bed
-still reads by family at a glance while every combo is its own plant.
-Known combos are pinned in ``PINNED`` so a garden never reshuffles
-(and no tomatoes, ever -- the owner hates them); a
-combo seen for the first time takes the next free plant in its pool.
+Each model family draws from its own pool -- Opus the fruits and
+veggies, Sonnet the leafy greens, Haiku the herbs -- so a bed still
+reads by family at a glance while every combo is its own plant. A pool
+is listed in order of preference: the family's busiest combo gets its
+first plant (and no tomatoes, ever -- the owner hates them).
 Drawings are top-down in a -10..10 box with foliage in ``currentColor``
 so the renderer can tint for dormancy and effort.
 """
@@ -14,7 +13,6 @@ from __future__ import annotations
 
 import math
 import re
-import zlib
 from typing import NamedTuple
 
 
@@ -23,6 +21,7 @@ class SpeciesArt(NamedTuple):
     color: str
     shadow_r: float
     body: str
+    scale: float = 1.0
 
 
 def _ring(
@@ -78,26 +77,26 @@ VEIN = '<g fill="none" stroke="#000" stroke-opacity="0.25" stroke-width="0.5">'
 LIGHTEN = ' fill-opacity="0.25"'
 
 SPECIES: dict[str, SpeciesArt] = {
-    # ── Opus pool: big brassicas and fruiting plants ──
-    'cabbage': SpeciesArt(
-        'Cabbage',
-        '#7f60b5',
-        9.0,
-        _lobes(8, 7.0, 2.8)
-        + '<circle r="7.2" fill="currentColor"/>'
-        + VEIN
-        + '<circle r="5.2"/><circle r="3.3"/><circle r="1.6"/></g>'
-        + '<circle r="3.3" fill="#fff" fill-opacity="0.12"/>',
-    ),
-    'kale': SpeciesArt(
-        'Kale',
-        '#4c7d78',
-        9.5,
-        _ring(7, 5.2, 2.6, 5.4)
-        + _ring(7, 8.4, 1.4, 1.4, phase=10)
-        + _ring(7, 8.4, 1.4, 1.4, phase=-10)
-        + _spokes(7, 1.0, 8.5, '#c8dcd6')
-        + '<circle r="1.6" fill="currentColor"/>',
+    # ── Opus pool: fruits and veggies ──
+    'corn': SpeciesArt(
+        'Corn',
+        '#5e9a3a',
+        10.0,
+        _ring(6, 5.2, 2.1, 4.8)
+        + _ring(6, 4.6, 2.0, 4.4, phase=30)
+        + _spokes(6, 1.0, 9.8, '#cfe0a8')
+        + ''.join(
+            f'<g transform="rotate({a}) translate(0 -4.6)">'
+            '<ellipse rx="1.8" ry="3.4" fill="#9cbf5a"/>'
+            '<ellipse cy="-0.4" rx="1.1" ry="2.6" fill="#f2cf45"/>'
+            '<path d="M-1.1,-1.4 H1.1 M-1.1,-0.2 H1.1 M-1.1,1 H1.1'
+            ' M0,-2.8 V2.2" fill="none" stroke="#c9a02a"'
+            ' stroke-width="0.3"/></g>'
+            for a in (15, 135, 255)
+        )
+        + _spokes(8, 0.4, 2.6, '#d9b25a')
+        + '<circle r="0.9" fill="#b8903a"/>',
+        scale=1.35,
     ),
     'cauliflower': SpeciesArt(
         'Cauliflower',
@@ -187,7 +186,41 @@ SPECIES: dict[str, SpeciesArt] = {
         + '<path d="M3,-1 q2.8,1.6 2.2,4.6 q-2.4,-0.2 -3.4,-3.6 z"'
         ' fill="#d13a2a"/>' + '<circle r="1.1" fill="#2f5a22"/>',
     ),
+    'melon': SpeciesArt(
+        'Melon',
+        '#4f8f3a',
+        9.5,
+        _lobes(5, 5.6, 3.4)
+        + VEIN
+        + _spokes(5, 0.5, 8, '#000').replace('<g ', '<g opacity="0.3" ')
+        + '</g>'
+        + '<g transform="translate(-1.8 1.6)">'
+        + '<circle r="3.6" fill="#c9c27a"/>'
+        + '<g fill="none" stroke="#8f8a4a" stroke-width="0.4">'
+        + '<path d="M-2.6,-1.4 L2.4,1.8 M-1.6,-2.8 L2.8,0.2'
+        ' M-3,0.4 L1,2.8 M-2.6,1.8 L2.6,-1.8"/></g></g>',
+    ),
     # ── Sonnet pool: leafy greens ──
+    'cabbage': SpeciesArt(
+        'Cabbage',
+        '#7f60b5',
+        9.0,
+        _lobes(8, 7.0, 2.8)
+        + '<circle r="7.2" fill="currentColor"/>'
+        + VEIN
+        + '<circle r="5.2"/><circle r="3.3"/><circle r="1.6"/></g>'
+        + '<circle r="3.3" fill="#fff" fill-opacity="0.12"/>',
+    ),
+    'kale': SpeciesArt(
+        'Kale',
+        '#4c7d78',
+        9.5,
+        _ring(7, 5.2, 2.6, 5.4)
+        + _ring(7, 8.4, 1.4, 1.4, phase=10)
+        + _ring(7, 8.4, 1.4, 1.4, phase=-10)
+        + _spokes(7, 1.0, 8.5, '#c8dcd6')
+        + '<circle r="1.6" fill="currentColor"/>',
+    ),
     'lettuce': SpeciesArt(
         'Lettuce',
         '#3fae5f',
@@ -321,10 +354,10 @@ SPECIES: dict[str, SpeciesArt] = {
     ),
 }
 
+# Sort lines to taste: a family's busiest combo gets its first plant.
 FAMILY_POOLS: dict[str, tuple[str, ...]] = {
     'opus': (
-        'cabbage',
-        'kale',
+        'corn',
         'cauliflower',
         'broccoli',
         'artichoke',
@@ -333,35 +366,20 @@ FAMILY_POOLS: dict[str, tuple[str, ...]] = {
         'pumpkin',
         'eggplant',
         'pepper',
+        'melon',
+        'beet',
     ),
     'sonnet': (
+        'cabbage',
+        'bok-choy',
+        'spinach',
         'lettuce',
         'red-lettuce',
         'chard',
-        'bok-choy',
-        'spinach',
-        'beet',
+        'kale',
     ),
     'haiku': ('basil', 'mint', 'parsley', 'chives'),
     'unknown': ('sprout',),
-}
-
-# Hand-placed so the gardens already out there keep their plants.
-PINNED: dict[str, str] = {
-    'claude-opus-4-6 (low)': 'cabbage',
-    'claude-opus-4-6 (medium)': 'kale',
-    'claude-opus-4-6 (high)': 'cauliflower',
-    'claude-opus-4-7 (low)': 'broccoli',
-    'claude-opus-4-7 (high)': 'artichoke',
-    'claude-opus-5 (low)': 'squash',
-    'claude-opus-5 (medium)': 'pepper',
-    'claude-opus-5 (xhigh)': 'pumpkin',
-    'claude-opus-5-5 (medium)': 'eggplant',
-    'claude-sonnet-5 (low)': 'lettuce',
-    'claude-sonnet-5 (medium)': 'red-lettuce',
-    'claude-sonnet-5 (high)': 'chard',
-    'claude-sonnet-5 (xhigh)': 'bok-choy',
-    'claude-haiku-4-5-20251001': 'basil',
 }
 
 
@@ -373,24 +391,22 @@ def model_family(label: str) -> str:
     return 'unknown'
 
 
-def assign_species(labels: list[str]) -> dict[str, str]:
-    """Give every combo in this garden its own plant from its pool.
+def assign_species(usage: dict[str, int]) -> dict[str, str]:
+    """Hand each family's pool out down its combos, busiest first.
 
-    Pinned combos keep their plant; the rest, in label order so input
-    order can't matter, probe their family pool from a hashed start for
-    the first plant nobody here has. A pool smaller than its combos
-    wraps around rather than fail -- two combos share a plant before
-    one goes unplanted.
+    Ties go by label so the mapping never depends on input order. A
+    pool smaller than its combos wraps around rather than fail -- two
+    combos share a plant before one goes unplanted.
     """
-    mapping = {label: PINNED[label] for label in labels if label in PINNED}
-    taken = set(mapping.values())
-    for label in sorted(set(labels) - set(mapping)):
-        pool = FAMILY_POOLS[model_family(label)]
-        start = zlib.crc32(label.encode()) % len(pool)
-        order = pool[start:] + pool[:start]
-        species = next((s for s in order if s not in taken), order[0])
-        mapping[label] = species
-        taken.add(species)
+    ranked = sorted(usage, key=lambda label: (-usage[label], label))
+    mapping: dict[str, str] = {}
+    seen: dict[str, int] = {}
+    for label in ranked:
+        family = model_family(label)
+        pool = FAMILY_POOLS[family]
+        rank = seen.get(family, 0)
+        mapping[label] = pool[rank % len(pool)]
+        seen[family] = rank + 1
     return mapping
 
 

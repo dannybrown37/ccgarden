@@ -193,7 +193,8 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   shared strip for species with under a row of plants), a
   `PATCH_GAP` of bare soil between strips. `PLANT_OVERLAP` < 1 on
   purpose — soil must show between plants, or it reads as wallpaper.
-  Plant size is garden-wide (`PLANT_BASE_SIZE` × effort), never per
+  Plant size is garden-wide (`PLANT_BASE_SIZE` × effort × the
+  species' own `SpeciesArt.scale`, e.g. corn stands taller), never per
   bed: a quiet bed spaces its plants out instead of growing them big.
   Spacing is per strip (`BedPlanting.spacings`), floored by the
   strip's biggest plant, so high-effort blocks keep soil between
@@ -231,11 +232,14 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   (`SWAY_VARIANTS`) stop a bed moving in step, and `-still` copies
   serve the legend (a `.legend` selector can't reach into a `<use>`).
 - One plant species per model/effort combo, from a per-family pool
-  (`FAMILY_POOLS`). Known combos are pinned in `PINNED` so a garden
-  never reshuffles; add a new combo there rather than letting it fall
-  through to the hashed probe once it's a regular. Assignment is
-  garden-wide (`_garden_species`), so a combo is the same plant in
-  every bed and the legend. Only species in use get symbols.
+  (`FAMILY_POOLS`: Opus fruits and veggies, Sonnet leafy greens, Haiku
+  herbs). Each pool is in the owner's order of preference: the
+  family's busiest combo, by *final* totals, gets the first plant, the
+  next busiest the second. Reorder the pool to change favourites. A
+  replay never swaps plants mid-way; a later render can, if usage
+  ranks change. Assignment is garden-wide (`_garden_species`), so a
+  combo is the same plant in every bed and the legend. Only species in
+  use get symbols.
 - Tooltips are `<title>` text, one item per line (`\n`); the tap
   tooltip script splits them. A bed's `data-plants` lists species +
   tint for its last lines, so the tooltip draws each plant's `-still`

@@ -528,25 +528,32 @@ def _plant_specs(
     same combo is the same plant in every bed; without it the bed
     assigns its own, which only a lone bed should rely on.
     """
-    labels = [lbl for lbl, n in branch.model_effort_counts.items() if n > 0]
-    plants = species or assign_species(labels)
+    usage = {lbl: n for lbl, n in branch.model_effort_counts.items() if n > 0}
+    labels = list(usage)
+    plants = species or assign_species(usage)
     specs = [
         PlantSpec(
             model_family=model_family(label),
             effort=_effort_from_label(label),
             replies=branch.model_effort_counts[label],
             label=label,
-            species=plants.get(label) or assign_species([label])[label],
+            species=plants.get(label) or assign_species({label: 1})[label],
         )
         for label in labels
     ]
     return sorted(specs, key=lambda s: s.replies, reverse=True)
 
 
+def _combo_totals(branches: list[RepoBranch]) -> dict[str, int]:
+    totals: dict[str, int] = {}
+    for branch in branches:
+        for label, n in branch.model_effort_counts.items():
+            totals[label] = totals.get(label, 0) + n
+    return totals
+
+
 def _garden_species(branches: list[RepoBranch]) -> dict[str, str]:
-    return assign_species(
-        sorted({lbl for b in branches for lbl in b.model_effort_counts})
-    )
+    return assign_species(_combo_totals(branches))
 
 
 class Combo(NamedTuple):
@@ -557,11 +564,8 @@ class Combo(NamedTuple):
 
 def _garden_combos(branches: list[RepoBranch]) -> list[Combo]:
     """Every combo the garden grows, most-used first, with its share."""
-    totals: dict[str, int] = {}
-    for branch in branches:
-        for label, n in branch.model_effort_counts.items():
-            totals[label] = totals.get(label, 0) + n
-    species = _garden_species(branches)
+    totals = _combo_totals(branches)
+    species = assign_species(totals)
     grand = sum(n for n in totals.values() if n > 0)
     return [
         Combo(label, species[label], totals[label] / grand)
@@ -641,8 +645,9 @@ def _plant_color(species: str, vitality: float) -> str:
     return _blend_hex(PLANT_DORMANT, base, vitality)
 
 
-def _plant_scale(effort: str | None) -> float:
-    return EFFORT_SCALE.get(effort or 'medium', 1.0)
+def _plant_scale(spec: PlantSpec) -> float:
+    art = SPECIES.get(spec.species, SPECIES['sprout'])
+    return EFFORT_SCALE.get(spec.effort or 'medium', 1.0) * art.scale
 
 
 # ── Weeds (dormancy) ──────────────────────────────────────────
@@ -864,7 +869,7 @@ class BedPlanting(NamedTuple):
 
 
 def _group_scale(group: list[tuple[PlantSpec, int]]) -> float:
-    return max(1.0, *(_plant_scale(spec.effort) for spec, _ in group))
+    return max(1.0, *(_plant_scale(spec) for spec, _ in group))
 
 
 def _bed_planting(
@@ -906,10 +911,7 @@ def _bed_planting(
     groups = _patch_groups(planting, len(_hex_grid(row_area, spacing)))
     strips = _strip_split(
         area,
-        [
-            sum(n * _plant_scale(spec.effort) ** 2 for spec, n in g)
-            for g in groups
-        ],
+        [sum(n * _plant_scale(spec) ** 2 for spec, n in g) for g in groups],
         spacing,
     )
     spacings = [
@@ -946,7 +948,7 @@ def _plant_layout(
                     x=min(max(px + rng.uniform(-jitter, jitter), sx), sx + sw),
                     y=min(max(py + rng.uniform(-jitter, jitter), sy), sy + sh),
                     size=base
-                    * _plant_scale(spec.effort)
+                    * _plant_scale(spec)
                     * rng.uniform(
                         1 - PLANT_SIZE_JITTER, 1 + PLANT_SIZE_JITTER
                     ),
