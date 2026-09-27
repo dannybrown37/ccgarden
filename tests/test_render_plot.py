@@ -49,6 +49,7 @@ from ccgarden.render_plot import (
     _bed_tooltip,
     _barrel_water,
     _bench_tools,
+    _butterfly_keyframes,
     _feature_boxes,
     _flower_positions,
     _frame_planks,
@@ -983,6 +984,9 @@ class TestLegend:
     def test_entry_present(self, label):
         assert f'>{label}<' in _legend(render_plot_svg(_garden()))
 
+    def test_icons_carry_no_tooltip(self):
+        assert '<title>' not in _legend(render_plot_svg(_garden()))
+
     def test_plant_key_lists_every_combo_used(self):
         garden = _garden(branches=[_branch(model_effort_counts=MIXED)])
         legend = _legend(render_plot_svg(garden))
@@ -1633,3 +1637,14 @@ def _timeline(
         },
         hour_counts={10: 5, 14: 8, 16: 3},
     )
+
+
+def test_butterflies_roam_the_whole_fenced_garden():
+    garden_h = FENCE_Y + FENCE_H + 80
+    css = _butterfly_keyframes(30, garden_h)
+    ys = [
+        float(y) for y in re.findall(r'translate\([\d.]+px,([\d.]+)px\)', css)
+    ]
+    assert min(ys) >= BED_ZONE_Y
+    assert max(ys) <= garden_h
+    assert min(ys) < FENCE_Y + FENCE_H / 3

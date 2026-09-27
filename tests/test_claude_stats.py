@@ -27,6 +27,7 @@ from ccgarden.claude_stats import (
     compute_cost,
     CostBreakdown,
     daily_series,
+    DEFAULT_PRICING_PATH,
     ensure_schema,
     find_model_price,
     format_report,
@@ -624,6 +625,29 @@ def test_load_pricing_parses_optional_expiry(tmp_path: Path) -> None:
     assert pricing.models['claude-sonnet-5'].expires == date(2026, 8, 31)
 
 
+def test_load_pricing_parses_per_model_cache_read_multiplier(
+    tmp_path: Path,
+) -> None:
+    path = _write_pricing(
+        tmp_path,
+        models={
+            'claude-opus-5-5': {
+                'input': 4.0,
+                'output': 20.0,
+                'cache_read_multiplier': 0.05,
+            },
+            'claude-opus-5': {'input': 5.0, 'output': 25.0},
+        },
+    )
+
+    pricing = load_pricing(path)
+
+    assert pricing.models['claude-opus-5-5'].cache_read_multiplier == (
+        pytest.approx(0.05)
+    )
+    assert pricing.models['claude-opus-5'].cache_read_multiplier is None
+
+
 def test_find_model_price_matches_dated_suffix_via_prefix(
     tmp_path: Path,
 ) -> None:
@@ -677,6 +701,58 @@ def test_compute_cost_prices_each_token_category() -> None:
     assert cost.by_category['cache_write'] == pytest.approx(6.25)
     assert cost.total == pytest.approx(25.0 + 5.0 + 0.5 + 6.25)
     assert cost.by_model['claude-opus-5'] == pytest.approx(cost.total)
+
+
+def test_compute_cost_uses_per_model_cache_read_multiplier() -> None:
+    stats = UsageStats(
+        model_usage={
+            'claude-opus-5-5': ModelUsage(cache_read_tokens=1_000_000),
+        },
+    )
+    pricing = _pricing_table(
+        models={
+            'claude-opus-5-5': ModelPrice(
+                input_per_million=4.0,
+                output_per_million=20.0,
+                cache_read_multiplier=0.05,
+            ),
+        },
+    )
+
+    cost = compute_cost(stats, pricing, today=date(2026, 7, 1))
+
+    assert cost.by_category['cache_read'] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ('model', 'cache_read_per_million'),
+    [
+        ('claude-opus-5-5', 0.20),
+        ('claude-opus-5', 0.50),
+        ('claude-fable-5-1', 0.25),
+        ('claude-mythos-5-1', 0.25),
+        ('claude-fable-5', 1.00),
+        ('claude-sonnet-5', 0.20),
+    ],
+)
+def test_shipped_pricing_cache_read_rates(
+    model: str, cache_read_per_million: float
+) -> None:
+    pricing = load_pricing(DEFAULT_PRICING_PATH)
+    price = find_model_price(model, pricing)
+    assert price is not None
+    multiplier = price.cache_read_multiplier or pricing.cache_read_multiplier
+
+    assert price.input_per_million * multiplier == pytest.approx(
+        cache_read_per_million
+    )
+
+
+def test_shipped_sonnet_5_price_has_no_expiry() -> None:
+    price = load_pricing(DEFAULT_PRICING_PATH).models['claude-sonnet-5']
+
+    assert (price.input_per_million, price.output_per_million) == (2.0, 10.0)
+    assert price.expires is None
 
 
 def test_compute_cost_flags_unpriced_models() -> None:
@@ -785,6 +861,8 @@ def test_format_report_flags_stale_pricing() -> None:
     )
 
     assert 'stale' in report
+    assert 'src/ccgarden/model_pricing.json' in report
+    assert DEFAULT_PRICING_PATH.match('src/ccgarden/model_pricing.json')
 
 
 def test_stats_as_dict_includes_cost_when_given() -> None:

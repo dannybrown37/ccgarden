@@ -79,6 +79,7 @@ class ModelPrice:
     output_per_million: float
     expires: date | None = None
     note: str | None = None
+    cache_read_multiplier: float | None = None
 
 
 @dataclass(frozen=True)
@@ -803,7 +804,7 @@ def collect_stats_by_repo(
 
 
 def load_pricing(path: Path) -> PricingTable:
-    """Load scripts/model_pricing.json (or an override path)."""
+    """Load src/ccgarden/model_pricing.json (or an override path)."""
     data = json.loads(path.read_text())
     models = {
         name: ModelPrice(
@@ -815,6 +816,7 @@ def load_pricing(path: Path) -> PricingTable:
                 else None
             ),
             note=entry.get('note'),
+            cache_read_multiplier=entry.get('cache_read_multiplier'),
         )
         for name, entry in data['models'].items()
     }
@@ -875,7 +877,7 @@ def compute_cost(
             usage.cache_read_tokens
             / TOKENS_PER_MILLION
             * price.input_per_million
-            * pricing.cache_read_multiplier
+            * (price.cache_read_multiplier or pricing.cache_read_multiplier)
         )
         cache_write_cost = (
             usage.cache_write_tokens
@@ -1756,7 +1758,7 @@ def cost_lines(cost: CostBreakdown) -> list[str]:
             expired = f'expired pricing for {names}; '
         lines.append(
             f'    pricing dated {cost.pricing_as_of} looks stale -- {expired}'
-            'ask Claude to refresh scripts/model_pricing.json',
+            'ask Claude to refresh src/ccgarden/model_pricing.json',
         )
 
     return lines

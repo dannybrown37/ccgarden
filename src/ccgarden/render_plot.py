@@ -2137,6 +2137,8 @@ def _render_flower(
     x: float,
     y: float,
     peak: int,
+    *,
+    tooltip: bool = True,
 ) -> str:
     """One top-down bloom over two leaves, sized by the skill's calls."""
     r = _flower_radius(skill.count, peak)
@@ -2156,9 +2158,9 @@ def _render_flower(
         f' transform="rotate({i * 60} {x:.1f} {y:.1f})"/>'
         for i in range(6)
     )
+    title = _title(f'{skill.skill}: {skill.count:,} calls') if tooltip else ''
     return (
-        '<g class="flower">'
-        f'{_title(f"{skill.skill}: {skill.count:,} calls")}'
+        f'<g class="flower">{title}'
         f'<ellipse cx="{x + 1.5:.1f}" cy="{y + 2:.1f}" rx="{r:.1f}"'
         f' ry="{r * 0.9:.1f}" fill="#000" opacity="0.25"/>'
         f'<g class="{sway}">{leaves}{petals}'
@@ -2207,7 +2209,7 @@ def _render_border_flowers(skills: list[SkillFruit]) -> str:
 
 
 def _render_butterflies(n_skills: int, opacity: str, anim: str = '') -> str:
-    """Butterflies working the flower border -- only on a dry day."""
+    """Butterflies working the beds and border -- only on a dry day."""
     count = min(BUTTERFLY_MAX, 1 + n_skills // BUTTERFLY_PER_SKILLS)
     if n_skills <= 0:
         return ''
@@ -2241,7 +2243,7 @@ def _butterfly_keyframes(n_skills: int, garden_h: float) -> str:
         points = [
             (
                 rng.uniform(FENCE_X + 20, FENCE_X + FENCE_W - 20),
-                rng.uniform(FENCE_Y + FENCE_H * 0.4, garden_h - 20),
+                rng.uniform(BED_ZONE_Y, garden_h - 20),
             )
             for _ in range(BUTTERFLY_WAYPOINTS)
         ]
@@ -2577,7 +2579,7 @@ def _legend_bed(x: float, y: float) -> str:
 def _legend_flower(x: float, y: float) -> str:
     from ccgarden.data import SkillFruit as Fruit
 
-    return _render_flower(Fruit('legend', 1), x, y, 1)
+    return _render_flower(Fruit('legend', 1), x, y, 1, tooltip=False)
 
 
 def _legend_tool(x: float, y: float) -> str:
