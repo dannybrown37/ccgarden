@@ -1,3 +1,13 @@
+## v0.7.0 (2026-09-27)
+
+### Feat
+
+- add sprinklers to indicate recency worked
+
+### Fix
+
+- reduce weed onset days, remove rain barrel from legend
+
 ## v0.6.0 (2026-09-27)
 
 ### Feat
