@@ -1098,6 +1098,14 @@ def _load_rings(
     ]
 
 
+def load_repo_model_efforts(
+    db_path: str,
+    days: DayRange = ALL_DAYS,
+) -> dict[str, dict[str, int]]:
+    with sqlite3.connect(db_path) as conn:
+        return _load_repo_model_effort_counts(conn, days)
+
+
 def _load_repo_model_effort_counts(
     conn: sqlite3.Connection, days: DayRange = ALL_DAYS
 ) -> dict[str, dict[str, int]]:

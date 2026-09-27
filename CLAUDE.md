@@ -18,6 +18,10 @@ Three modules, each a stage; keep them in that order of dependency
 - `src/ccgarden/render.py` — turns those dataclasses into SVG strings.
   `render_svg` for a static garden, `render_timeline_svg` for the animated
   timelapse (what the CLI actually ships).
+- `src/ccgarden/render_plot.py` — the `--plot` renderer: a top-down
+  kitchen garden from the same dataclasses. `render_plot_svg` (static)
+  and `render_plot_timeline_svg` (replay + scrubber, `--poster`).
+  Shared SVG/animation helpers live in `render_utils.py`.
 - `src/ccgarden/__init__.py` — the `ccgarden` CLI: record → load → render →
   write → open in browser (WSL-aware via `explorer.exe`).
 
@@ -171,6 +175,26 @@ canopy of thousands of leaves. Never give a leaf its own colour animation.
   isn't split keeps `key == repo`, so a wide garden is unchanged. Anything
   seeded per-branch (placement, bow, collar, foliage) must seed off
   `limb.key`; anything user-facing (titles, `data-repo`) off the repo.
+
+## Plot conventions (`render_plot.py`)
+
+- One light source, top-left: every cast shadow goes through the
+  `softShadow` filter, whose `feOffset` is the sun. Don't offset a
+  shadow by hand — the timeline animates that `feOffset` so every
+  shadow swings at once.
+- Beds are a squarified treemap. Minimum sizes go in *before* the
+  layout (`_floored_metrics`); growing a bed afterwards pushes it past
+  the fence. Everything above the fence is listed in `_feature_boxes`.
+- Static and timeline share every drawing function
+  (`_render_bed_body`, `_plant_layout`, `_render_flower`,
+  `_signboard`) and lay out from final totals, so the replay ends on
+  the static render.
+- Plant sway is a CSS animation *inside* the plant `<symbol>`s, so it
+  moves every `<use>` at once; three copies on different clocks
+  (`SWAY_VARIANTS`) stop a bed moving in step, and `-still` copies
+  serve the legend (a `.legend` selector can't reach into a `<use>`).
+- Tests parse the output as XML and check every `url(#…)` /
+  `href="#…"` resolves — keep both passing when adding defs.
 
 `cartoon` is an optional external binary. Every failure mode (missing,
 non-zero exit, timeout, unparseable) must degrade to "no birds", never

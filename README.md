@@ -74,6 +74,10 @@ rings, longer branches, bigger clouds, more leaves.
 | `--static` | render one still garden instead of the timelapse |
 | `--since`, `--until` | limit the garden to a date range |
 | `--no-record` | render the db as-is, skipping today's snapshot |
+| `--plot` | draw a top-down kitchen garden instead of the tree |
+| `--poster` | open on the finished garden, scrubber showing, no auto-play |
+| `--web` | tree for a web page: light wind, no scrubber |
+| `--exclude-repo REPO` | leave a repo out (repeatable) |
 | `--version` | print the installed version |
 
 So a still image of just this year's garden, written somewhere else and
@@ -82,6 +86,17 @@ without touching the db, is:
 ```sh
 ccgarden --static --since 2026-01-01 --no-record --no-open -o garden.svg
 ```
+
+### The plot (`--plot`)
+
+A bird's-eye kitchen garden from the same data. Each repo is a raised
+bed (area = lines added + sessions). Plants show which model did the
+work: herb = Haiku, lettuce = Sonnet, cabbage = Opus; bigger plants
+mean more effort. Skills bloom in the flower border. The potting bench
+holds your busiest tools, the rain barrel fills with tokens, and the
+sundial shows the hours you prompt (blue petals = night). Butterflies
+come out on working days, fireflies at night, and rain and weeds when
+you stay away. The timelapse has a Replay button and a day slider.
 
 ### `ccstats`
 

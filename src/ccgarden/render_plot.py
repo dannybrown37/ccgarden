@@ -13,17 +13,25 @@ import random
 from typing import TYPE_CHECKING, NamedTuple
 
 from ccgarden.render_utils import (
+    _animate_tag,
     _blend_hex,
     _escape_xml,
+    _frame_weights,
+    _format_day,
+    _lerp_hex,
     _rain_opacity,
     _saturated_nightness,
+    _timeline_duration,
     _title,
+    _weighted_key_times,
 )
 
 if TYPE_CHECKING:
     from ccgarden.data import (
         GardenData,
+        GardenTimeline,
         RepoBranch,
+        RepoBranchDay,
         SkillFruit,
         ToolBush,
     )
@@ -31,27 +39,109 @@ if TYPE_CHECKING:
 # ── Viewbox and layout constants ───────────────────────────────
 
 PLOT_VIEWBOX_WIDTH = 800
-PLOT_VIEWBOX_HEIGHT = 800
 
-FENCE_X = 60
-FENCE_Y = 80
-FENCE_W = 680
-FENCE_H = 580
+FENCE_X = 40
+FENCE_Y = 146
+FENCE_W = 720
+FENCE_H = 560
 
 BED_ZONE_PAD = 12
 BED_ZONE_X = FENCE_X + BED_ZONE_PAD
 BED_ZONE_Y = FENCE_Y + BED_ZONE_PAD
 BED_ZONE_W = FENCE_W - 2 * BED_ZONE_PAD
 BED_ZONE_H = FENCE_H - 2 * BED_ZONE_PAD
-BED_GUTTER = 8
+BED_GUTTER = 14
 BED_MIN_DIM = 40
+# A floored bed still loses its gutter and may come out oblong, so the
+# floor is set above BED_MIN_DIM² to leave room for both.
+BED_MIN_AREA_SLACK = 1.6
+BED_MIN_SHARE_CAP = 0.5
 
-LEGEND_BAND_Y = 740
+FLOWER_SPACING = 28
+FLOWER_ROW_HEIGHT = 26
+FLOWER_BORDER_PAD = 6
+FLOWER_BORDER_X0 = FENCE_X + 10
+FLOWER_BORDER_X1 = FENCE_X + FENCE_W - 10
+FLOWER_BORDER_TOP = FENCE_Y + FENCE_H + 8
+FLOWERS_PER_ROW = int((FLOWER_BORDER_X1 - FLOWER_BORDER_X0) // FLOWER_SPACING)
+
+LEGEND_GAP = 16
+PLOT_SCRUBBER_H = 44
 LEGEND_BAND_HEIGHT = 130
+
+# ── Features above the fence ─────────────────────────────────
+
+SHED_BOX = (22.0, 16.0, 124.0, 92.0)
+BARREL_CX = 180.0
+BARREL_CY = 96.0
+BARREL_R = 25.0
+BARREL_RIM = 5.0
+BARREL_MIN_WATER = 0.35
+BENCH_BOX = (222.0, 20.0, 262.0, 96.0)
+BENCH_PAD = 8.0
+BENCH_MAX_TOOLS = 8
+TOOL_MIN_LEN = 34.0
+TOOL_MAX_LEN = 72.0
+TOOL_HEAD_LEN = 12.0
+TOOL_LABEL_CHARS = 8
+SHINGLE_RIDGE_CLEAR = 3
+TOOL_KINDS = ('spade', 'rake', 'fork', 'trowel', 'hoe', 'shears')
+TOOL_HANDLE = '#c0925a'
+TOOL_METAL = '#8d969c'
+SIGN_BOX = (500.0, 38.0, 144.0, 56.0)
+SUNDIAL_CX = 718.0
+SUNDIAL_CY = 70.0
+SUNDIAL_R = 50.0
+SUNDIAL_PATIO_R = 58.0
+SUNDIAL_DAY = '#e8b64c'
+SUNDIAL_NIGHT = '#7d8fd6'
+NIGHT_START_HOUR = 21
+NIGHT_END_HOUR = 6
+
+# ── Motion ───────────────────────────────────────────────────
+
+SWAY_VARIANTS = (
+    ('', 'ccp-sway-a'),
+    ('-b', 'ccp-sway-b'),
+    ('-c', 'ccp-sway-c'),
+)
+SWAY_TIMING = ((5.3, 0.0), (6.1, 2.0), (7.4, 4.5))
+SWAY_DEGREES = 4
+FLOWER_MIN_R = 5.0
+FLOWER_MAX_R = 11.0
+MULCH_COLOR = '#4a3524'
+BUTTERFLY_MAX = 5
+BUTTERFLY_PER_SKILLS = 6
+BUTTERFLY_WAYPOINTS = 6
+FIREFLY_COUNT = 24
+RAIN_STREAKS = 50
+RAIN_RIPPLES = 40
+NIGHT_VEIL_MAX = 0.55
+# Shadows swing from morning (cast west) to the static render's
+# afternoon offset as the replay runs, like the tree's sun.
+SUN_SWEEP_START_DX = -6.0
+
+# ── Light and depth ───────────────────────────────────────────
+
+# One sun for the whole plot, up and to the left: every shadow falls
+# down-right by this offset and every bevel is lit on its top-left.
+LIGHT_DX = 4.0
+LIGHT_DY = 5.0
+SHADOW_BLUR = 2.5
+SHADOW_OPACITY = 0.4
+FRAME_WIDTH = 5.0
+INNER_SHADE = 7.0
+LAWN_STRIPE_WIDTH = 34
+
+FENCE_POST_SPACING = 40
+FENCE_POST_SIZE = 7
+GATE_X = FENCE_X + FENCE_W / 2
+GATE_WIDTH = 56
 
 # ── Color palette ──────────────────────────────────────────────
 
-SOIL_COLOR = '#5c4033'
+SOIL_COLOR = '#6b4a33'
+FRAME_WOOD = '#a57a4c'
 SOIL_DORMANT = '#7a6b5a'
 FENCE_COLOR = '#8b6f47'
 FENCE_POST_COLOR = '#5a3d1a'
@@ -69,10 +159,10 @@ BARREL_BAND = '#4a4a4a'
 BARREL_WATER = '#4a90c4'
 
 PLANT_COLORS = {
-    'haiku': '#7dba6d',
-    'sonnet': '#4a8f4a',
-    'opus': '#2d6b3d',
-    'unknown': '#6a9a5a',
+    'haiku': '#a9d153',
+    'sonnet': '#3fae5f',
+    'opus': '#7f60b5',
+    'unknown': '#5fa8a0',
 }
 PLANT_DORMANT = '#b8a88a'
 WEED_COLOR = '#8a7a55'
@@ -84,14 +174,39 @@ FLOWER_CENTER = '#5a3d1a'
 
 NIGHT_VEIL_COLOR = '#0a1628'
 
+# ── Dark-theme colors ─────────────────────────────────────────
+
+DARK_FRAME_STROKE = '#2a3a1a'
+DARK_GRASS = '#3d6630'
+DARK_LEGEND_BG = '#2a3d18'
+DARK_LEGEND_INNER = '#2c3422'
+DARK_LEGEND_TEXT = '#d4d4c8'
+DARK_LEGEND_DESC = '#a0a090'
+DARK_TOOLTIP_BG = '#2c3422'
+DARK_TOOLTIP_BORDER = '#5a6a3a'
+DARK_TOOLTIP_TEXT = '#d4d4c8'
+
 # ── Plant grid constants ───────────────────────────────────────
 
-PLANT_SPACING_X = 16
-PLANT_SPACING_Y = 18
-PLANT_ROW_OFFSET = 8
-PLANT_JITTER = 2.0
+PLANT_MIN_SPACING = 17.0
+PLANT_MAX_SPACING = 32.0
+PLANT_OVERLAP = 1.2
+PLANT_MAX_SIZE = 30.0
+PLANT_FILL_MIN = 0.2
+PLANT_JITTER_FRACTION = 0.12
+PLANT_SIZE_JITTER = 0.08
+PLANT_EDGE_PAD = 4.0
+HEX_ROW_RATIO = math.sqrt(3) / 2
+
+LABEL_FONT_SIZE = 9.0
+LABEL_MIN_FONT = 5.5
+LABEL_CHAR_WIDTH = 0.55
+LABEL_PAD = 4.0
+LABEL_RESERVE = 12.0
+TAG_FILL = '#efe3c4'
+TAG_EDGE = '#7a5a36'
+TAG_TEXT = '#3a2a18'
 BED_AREA_SESSION_BONUS = 50
-BED_FILL_FRACTION = 0.7
 
 # ── Effort → plant scale ──────────────────────────────────────
 
@@ -112,7 +227,8 @@ EFFORT_DARKNESS = {
 
 # ── Token saturation for barrel ────────────────────────────────
 
-BARREL_TOKEN_SATURATION = 5_000_000
+# Totals include cache reads, which run to billions within weeks.
+BARREL_TOKEN_SATURATION = 10_000_000_000
 
 OPACITY_EPSILON = 0.01
 
@@ -129,10 +245,44 @@ class BedRect(NamedTuple):
     branch: RepoBranch
 
 
+class PlotLayout(NamedTuple):
+    flower_rows: int
+    legend_y: float
+    total_h: int
+
+
 class PlantSpec(NamedTuple):
     model_family: str
     effort: str | None
-    count: int
+    replies: int
+
+
+class ToolPlacement(NamedTuple):
+    tool: ToolBush
+    x: float
+    y: float
+    length: float
+    kind: str
+
+
+class SundialWedge(NamedTuple):
+    hour: int
+    length: float
+    night: bool
+
+
+class WaterDisc(NamedTuple):
+    cx: float
+    cy: float
+    r: float
+
+
+class PlantPlacement(NamedTuple):
+    x: float
+    y: float
+    size: float
+    spec: PlantSpec
+    variant: int = 0
 
 
 # ── Squarified treemap ─────────────────────────────────────────
@@ -222,11 +372,33 @@ def _squarify(
     return [r for r in results if r is not None]
 
 
+def _floored_metrics(metrics: list[float]) -> list[float]:
+    """Raise tiny values so no bed's slot drops below a usable size.
+
+    Inflating a bed *after* the treemap pushes it out of its slot and
+    past the fence, so the floor has to go in before the layout runs.
+    """
+    zone_area = BED_ZONE_W * BED_ZONE_H
+    slot = (BED_MIN_DIM + BED_GUTTER) ** 2 * BED_MIN_AREA_SLACK
+    share = min(slot / zone_area, BED_MIN_SHARE_CAP / len(metrics))
+    floored: set[int] = set()
+    while True:
+        free = sum(v for i, v in enumerate(metrics) if i not in floored)
+        total = free / (1 - len(floored) * share)
+        grown = {i for i, v in enumerate(metrics) if v < share * total}
+        if grown <= floored:
+            break
+        floored |= grown
+    return [
+        share * total if i in floored else v for i, v in enumerate(metrics)
+    ]
+
+
 def _layout_beds(branches: list[RepoBranch]) -> list[BedRect]:
     if not branches:
         return []
 
-    metrics = [_bed_area_metric(b) for b in branches]
+    metrics = _floored_metrics([_bed_area_metric(b) for b in branches])
     rects = _squarify(
         metrics, (BED_ZONE_X, BED_ZONE_Y, BED_ZONE_W, BED_ZONE_H)
     )
@@ -234,12 +406,40 @@ def _layout_beds(branches: list[RepoBranch]) -> list[BedRect]:
     beds = []
     half = BED_GUTTER / 2
     for branch, (x, y, w, h) in zip(branches, rects, strict=True):
-        bx = x + half
-        by = y + half
-        bw = max(w - BED_GUTTER, BED_MIN_DIM)
-        bh = max(h - BED_GUTTER, BED_MIN_DIM)
-        beds.append(BedRect(branch.repo, bx, by, bw, bh, branch))
+        bw = max(w - BED_GUTTER, 0.0)
+        bh = max(h - BED_GUTTER, 0.0)
+        beds.append(BedRect(branch.repo, x + half, y + half, bw, bh, branch))
     return beds
+
+
+def _flower_rows(n_skills: int) -> int:
+    return math.ceil(n_skills / FLOWERS_PER_ROW)
+
+
+def _plot_layout(n_skills: int) -> PlotLayout:
+    rows = _flower_rows(n_skills)
+    border_h = rows * FLOWER_ROW_HEIGHT + (
+        2 * FLOWER_BORDER_PAD if rows else 0
+    )
+    legend_y = FLOWER_BORDER_TOP + border_h + LEGEND_GAP
+    return PlotLayout(rows, legend_y, math.ceil(legend_y + LEGEND_BAND_HEIGHT))
+
+
+def _flower_positions(n_skills: int) -> list[tuple[float, float]]:
+    positions: list[tuple[float, float]] = []
+    span = FLOWER_BORDER_X1 - FLOWER_BORDER_X0
+    for row in range(_flower_rows(n_skills)):
+        in_row = min(FLOWERS_PER_ROW, n_skills - row * FLOWERS_PER_ROW)
+        x0 = FLOWER_BORDER_X0 + (span - in_row * FLOWER_SPACING) / 2
+        y = (
+            FLOWER_BORDER_TOP
+            + FLOWER_BORDER_PAD
+            + (row + 0.5) * FLOWER_ROW_HEIGHT
+        )
+        positions.extend(
+            (x0 + (i + 0.5) * FLOWER_SPACING, y) for i in range(in_row)
+        )
+    return positions
 
 
 # ── Model family detection ─────────────────────────────────────
@@ -270,72 +470,122 @@ def _plant_specs(branch: RepoBranch) -> list[PlantSpec]:
             PlantSpec(
                 model_family=_model_family(label),
                 effort=_effort_from_label(label),
-                count=count,
+                replies=count,
             )
         )
-    return sorted(specs, key=lambda s: s.count, reverse=True)
+    return sorted(specs, key=lambda s: s.replies, reverse=True)
 
 
 # ── Plant shapes (SVG symbols) ─────────────────────────────────
 
 
+def _leaf_ring(
+    count: int,
+    offset: float,
+    rx: float,
+    ry: float,
+    *,
+    phase: float = 0.0,
+    fill: str = 'currentColor',
+    extra: str = '',
+) -> str:
+    return ''.join(
+        f'<ellipse cx="0" cy="{-offset:.1f}" rx="{rx:.1f}" ry="{ry:.1f}"'
+        f' transform="rotate({phase + i * 360 / count:.1f})"'
+        f' fill="{fill}"{extra}/>'
+        for i in range(count)
+    )
+
+
+def _midribs(count: int, inner: float, outer: float, phase: float) -> str:
+    return ''.join(
+        f'<line x1="0" y1="{-inner:.1f}" x2="0" y2="{-outer:.1f}"'
+        f' transform="rotate({phase + i * 360 / count:.1f})"/>'
+        for i in range(count)
+    )
+
+
+def _plant_symbol(family: str, shadow_r: float, body: str) -> str:
+    """One top-down plant: cast shadow, leaves, then a shared highlight.
+
+    Leaves are ``currentColor`` so each `<use>` tints its own plant,
+    while the shine is one gradient shared by every plant on the plot.
+    Each family comes in ``SWAY_VARIANTS`` copies on different wind
+    clocks: a CSS animation inside a symbol moves every `<use>` of it,
+    so one copy per phase is what keeps a bed from twitching in step.
+    """
+    symbols = []
+    for suffix, sway in (*SWAY_VARIANTS, ('-still', 'plant-still')):
+        symbols.append(
+            f'<symbol id="plant-{family}{suffix}" viewBox="-10 -10 20 20"'
+            f' overflow="visible">'
+            f'<ellipse class="plant-shadow" cx="{LIGHT_DX * 0.45:.1f}"'
+            f' cy="{LIGHT_DY * 0.45:.1f}" rx="{shadow_r:.1f}"'
+            f' ry="{shadow_r * 0.92:.1f}" fill="#000" opacity="0.3"/>'
+            f'<g class="{sway}" stroke="#000" stroke-opacity="0.28"'
+            f' stroke-width="0.4">{body}</g>'
+            f'<circle r="{shadow_r:.1f}" fill="url(#plantShine)"/>'
+            f'</symbol>'
+        )
+    return ''.join(symbols)
+
+
 def _render_plant_defs() -> str:
-    """<defs> block with <symbol> for each plant family."""
-    haiku = (
-        '<symbol id="plant-haiku" viewBox="-8 -8 16 16">'
-        '<circle cx="0" cy="0" r="1.5" fill="#3a5a2a"/>'
-        '<ellipse cx="0" cy="-4" rx="2" ry="3.5"'
-        ' fill="currentColor" opacity="0.85"/>'
-        '<ellipse cx="3.5" cy="2" rx="2" ry="3.5"'
-        ' transform="rotate(120,0,0)"'
-        ' fill="currentColor" opacity="0.80"/>'
-        '<ellipse cx="-3.5" cy="2" rx="2" ry="3.5"'
-        ' transform="rotate(-120,0,0)"'
-        ' fill="currentColor" opacity="0.80"/>'
-        '</symbol>'
-    )
-    sonnet = (
-        '<symbol id="plant-sonnet" viewBox="-8 -8 16 16">'
-        '<circle cx="0" cy="0" r="2" fill="#3a5a2a"/>'
-    )
-    for i in range(6):
-        angle = i * 60
-        sonnet += (
-            f'<ellipse cx="0" cy="-4.5" rx="2.2" ry="3.8"'
-            f' transform="rotate({angle},0,0)"'
-            f' fill="currentColor" opacity="0.82"/>'
-        )
-    sonnet += '</symbol>'
+    """<defs> block with <symbol> for each plant family.
 
-    opus = (
-        '<symbol id="plant-opus" viewBox="-8 -8 16 16">'
-        '<circle cx="0" cy="0" r="2.5" fill="#1a4a2a"/>'
+    The four families differ in silhouette as well as colour -- herb,
+    rosette, cabbage, sprout -- so the plot still reads in greyscale.
+    """
+    vein = '<g stroke="#000" stroke-opacity="0.3" stroke-width="0.45">'
+    haiku = _plant_symbol(
+        'haiku',
+        7.5,
+        _leaf_ring(5, 4.2, 2.4, 4.0)
+        + vein
+        + _midribs(5, 1.0, 7.4, 0)
+        + '</g><circle r="1.4" fill="currentColor"/>',
     )
-    for i in range(8):
-        angle = i * 45
-        opus += (
-            f'<ellipse cx="0" cy="-4" rx="2.5" ry="4"'
-            f' transform="rotate({angle},0,0)"'
-            f' fill="currentColor" opacity="0.78"/>'
+    sonnet = _plant_symbol(
+        'sonnet',
+        8.5,
+        _leaf_ring(9, 4.6, 3.4, 4.6)
+        + _leaf_ring(6, 2.6, 2.6, 3.4, phase=30)
+        + _leaf_ring(
+            6,
+            2.6,
+            2.6,
+            3.4,
+            phase=30,
+            fill='#fff',
+            extra=' fill-opacity="0.22"',
         )
-    for i in range(4):
-        angle = i * 90 + 22.5
-        opus += (
-            f'<ellipse cx="0" cy="-2.8" rx="1.8" ry="2.8"'
-            f' transform="rotate({angle},0,0)"'
-            f' fill="currentColor" opacity="0.65"/>'
+        + '<circle r="1.8" fill="currentColor"/>'
+        + '<circle r="1.8" fill="#fff" fill-opacity="0.35"/>',
+    )
+    opus = _plant_symbol(
+        'opus',
+        9.0,
+        ''.join(
+            f'<circle cx="{7 * math.cos(a):.1f}" cy="{7 * math.sin(a):.1f}"'
+            f' r="2.8" fill="currentColor"/>'
+            for a in (i * math.tau / 8 for i in range(8))
         )
-    opus += '</symbol>'
-
-    unknown = (
-        '<symbol id="plant-unknown" viewBox="-8 -8 16 16">'
-        '<circle cx="0" cy="0" r="1.5" fill="#3a5a2a"/>'
-        '<ellipse cx="0" cy="-3.5" rx="1.8" ry="3"'
-        ' fill="currentColor" opacity="0.8"/>'
-        '<ellipse cx="3" cy="1.5" rx="1.8" ry="3"'
-        ' transform="rotate(90,0,0)"'
-        ' fill="currentColor" opacity="0.75"/>'
-        '</symbol>'
+        + '<circle r="7.2" fill="currentColor"/>'
+        + vein
+        + _midribs(8, 3.0, 8.6, 22.5)
+        + '</g><g fill="none" stroke="#000" stroke-opacity="0.25"'
+        ' stroke-width="0.5">'
+        '<circle r="5.2"/><circle r="3.3"/><circle r="1.6"/></g>'
+        '<circle r="3.3" fill="#fff" fill-opacity="0.12"/>',
+    )
+    unknown = _plant_symbol(
+        'unknown',
+        5.0,
+        '<ellipse cx="-2.6" cy="0" rx="3" ry="1.8" transform="rotate(-20)"'
+        ' fill="currentColor"/>'
+        '<ellipse cx="2.6" cy="0" rx="3" ry="1.8" transform="rotate(-20)"'
+        ' fill="currentColor"/>'
+        '<circle r="0.9" fill="currentColor"/>',
     )
 
     weed = (
@@ -354,8 +604,14 @@ def _render_plant_defs() -> str:
         f' fill="{WEED_COLOR}" opacity="0.6"/>'
         '</symbol>'
     )
+    shine = (
+        '<radialGradient id="plantShine" cx="0.32" cy="0.28" r="0.7">'
+        '<stop offset="0" stop-color="#fff" stop-opacity="0.5"/>'
+        '<stop offset="0.55" stop-color="#fff" stop-opacity="0"/>'
+        '</radialGradient>'
+    )
 
-    return haiku + sonnet + opus + unknown + weed
+    return shine + haiku + sonnet + opus + unknown + weed
 
 
 def _plant_color(
@@ -418,21 +674,124 @@ def _render_bed_weeds(
 # ── Bed rendering ──────────────────────────────────────────────
 
 
-def _bed_plant_count(
+def _label_vertical(bed: BedRect) -> bool:
+    _, _, sw, sh = _soil_rect(bed)
+    text_w = len(bed.repo) * LABEL_FONT_SIZE * LABEL_CHAR_WIDTH
+    return text_w + 2 * LABEL_PAD > sw and sh > sw
+
+
+def _plant_area(bed: BedRect) -> tuple[float, float, float, float]:
+    """The soil a bed's plants may be centred in: clear of the tag."""
+    sx, sy, sw, sh = _soil_rect(bed)
+    pad = PLANT_EDGE_PAD
+    if _label_vertical(bed):
+        reserve = min(LABEL_RESERVE, sw / 3)
+        return (
+            sx + pad + reserve,
+            sy + pad,
+            sw - 2 * pad - reserve,
+            sh - 2 * pad,
+        )
+    reserve = min(LABEL_RESERVE, sh / 3)
+    return (sx + pad, sy + pad, sw - 2 * pad, sh - 2 * pad - reserve)
+
+
+def _hex_grid(
+    area: tuple[float, float, float, float],
+    spacing: float,
+) -> list[tuple[float, float]]:
+    """Staggered rows centred in ``area``, row-major."""
+    ax, ay, aw, ah = area
+    row_step = spacing * HEX_ROW_RATIO
+    rows = max(1, int(ah / row_step) + 1)
+    cols = max(1, int(aw / spacing) + 1)
+    used_h = (rows - 1) * row_step
+    y0 = ay + (ah - used_h) / 2
+    points: list[tuple[float, float]] = []
+    for row in range(rows):
+        stagger = spacing / 2 if row % 2 and cols > 1 else 0.0
+        n = cols - 1 if stagger else cols
+        used_w = (n - 1) * spacing
+        x0 = ax + (aw - used_w) / 2
+        points.extend(
+            (x0 + col * spacing, y0 + row * row_step) for col in range(n)
+        )
+    return points
+
+
+def _patch_sizes(specs: list[PlantSpec], total: int) -> list[int]:
+    """Split ``total`` plants across species by largest remainder."""
+    weight = sum(s.replies for s in specs)
+    exact = [s.replies / weight * total for s in specs]
+    sizes = [int(e) for e in exact]
+    by_remainder = sorted(
+        range(len(specs)), key=lambda i: exact[i] - sizes[i], reverse=True
+    )
+    for i in by_remainder[: total - sum(sizes)]:
+        sizes[i] += 1
+    return sizes
+
+
+def _plant_layout(
     bed: BedRect,
     max_sessions: int,
-) -> int:
-    """How many plant icons to draw in this bed.
+) -> list[PlantPlacement]:
+    """Where every plant in a bed goes, how big, and which species.
 
-    Each bed fills up to BED_FILL_FRACTION of its grid capacity,
-    scaled by the repo's sessions relative to the busiest repo.
+    Density follows the repo's sessions relative to the busiest repo,
+    so a busy bed is packed with overlapping foliage and a quiet one is
+    spread thin -- but always across the whole bed, never bunched at
+    the top. Species go in contiguous patches, the way a kitchen garden
+    is planted, so a bed's model mix reads at a glance.
     """
-    pad = 8
-    cols = max(1, int((bed.w - 2 * pad) / PLANT_SPACING_X))
-    rows = max(1, int((bed.h - 2 * pad) / PLANT_SPACING_Y))
-    capacity = cols * rows
+    area = _plant_area(bed)
+    _, _, aw, ah = area
+    if aw <= 0 or ah <= 0:
+        return []
+    specs = _plant_specs(bed.branch) or [PlantSpec('unknown', None, 1)]
+    capacity = len(_hex_grid(area, PLANT_MIN_SPACING))
     share = bed.branch.sessions / max_sessions if max_sessions > 0 else 1.0
-    return max(1, round(capacity * BED_FILL_FRACTION * share))
+    fill = PLANT_FILL_MIN + (1 - PLANT_FILL_MIN) * math.sqrt(min(share, 1.0))
+    target = max(1, round(capacity * fill))
+    spacing = math.sqrt(aw * ah / (target * HEX_ROW_RATIO))
+    spacing = max(PLANT_MIN_SPACING, min(PLANT_MAX_SPACING, spacing))
+    grid = _hex_grid(area, spacing)
+    count = min(target, len(grid))
+    points = [grid[i * len(grid) // count] for i in range(count)]
+
+    rng = random.Random(f'plot-plants-{bed.repo}')
+    jitter = spacing * PLANT_JITTER_FRACTION
+    base = min(spacing * PLANT_OVERLAP, PLANT_MAX_SIZE)
+    species = [
+        spec
+        for spec, n in zip(specs, _patch_sizes(specs, count), strict=True)
+        for _ in range(n)
+    ]
+    ax, ay = area[0], area[1]
+    return [
+        PlantPlacement(
+            x=min(max(px + rng.uniform(-jitter, jitter), ax), ax + aw),
+            y=min(max(py + rng.uniform(-jitter, jitter), ay), ay + ah),
+            size=base
+            * _plant_scale(spec.effort)
+            * rng.uniform(1 - PLANT_SIZE_JITTER, 1 + PLANT_SIZE_JITTER),
+            spec=spec,
+            variant=rng.randrange(len(SWAY_VARIANTS)),
+        )
+        for (px, py), spec in zip(points, species, strict=True)
+    ]
+
+
+def _plant_use(plant: PlantPlacement, color: str, inner: str = '') -> str:
+    half = plant.size / 2
+    suffix = SWAY_VARIANTS[plant.variant][0]
+    open_tag = (
+        f'<use href="#plant-{plant.spec.model_family}{suffix}"'
+        f' x="{plant.x - half:.1f}" y="{plant.y - half:.1f}"'
+        f' width="{plant.size:.1f}" height="{plant.size:.1f}"'
+        f' color="{color}"'
+    )
+    return f'{open_tag}>{inner}</use>' if inner else f'{open_tag}/>'
 
 
 FURROW_MAX = 8
@@ -452,31 +811,126 @@ def _furrow_count(lines_added: int) -> int:
     return max(1, int(raw))
 
 
+def _shade(color: str, amount: float) -> str:
+    """Lighten (``amount`` > 0) or darken (< 0) toward white or black."""
+    target = '#ffffff' if amount > 0 else '#000000'
+    return _lerp_hex(color, target, abs(amount))
+
+
+def _frame_planks(
+    bed: BedRect,
+) -> list[tuple[str, tuple[float, float, float, float], str]]:
+    """The four boards of a raised bed, shaded for top-left light.
+
+    Sides are listed first so the top and bottom boards overlap them at
+    the corners, the way a real frame's end boards cover the sides.
+    """
+    fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
+    return [
+        ('left', (bed.x, bed.y, fw, bed.h), _shade(FRAME_WOOD, 0.08)),
+        (
+            'right',
+            (bed.x + bed.w - fw, bed.y, fw, bed.h),
+            _shade(FRAME_WOOD, -0.28),
+        ),
+        ('top', (bed.x, bed.y, bed.w, fw), _shade(FRAME_WOOD, 0.2)),
+        (
+            'bottom',
+            (bed.x, bed.y + bed.h - fw, bed.w, fw),
+            _shade(FRAME_WOOD, -0.2),
+        ),
+    ]
+
+
+def _rect(
+    rect: tuple[float, float, float, float],
+    attrs: str,
+    inner: str = '',
+) -> str:
+    x, y, w, h = rect
+    open_tag = (
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{w:.1f}" height="{h:.1f}"'
+        f' {attrs}'
+    )
+    return f'{open_tag}>{inner}</rect>' if inner else f'{open_tag}/>'
+
+
+def _soil_rect(bed: BedRect) -> tuple[float, float, float, float]:
+    fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
+    return (bed.x + fw, bed.y + fw, bed.w - 2 * fw, bed.h - 2 * fw)
+
+
+def _render_bed_shadow(bed: BedRect) -> str:
+    return _rect(
+        (bed.x, bed.y, bed.w, bed.h),
+        f'class="bed-shadow" rx="3" fill="#000"'
+        f' opacity="{SHADOW_OPACITY}" filter="url(#softShadow)"',
+    )
+
+
+def _render_furrows(bed: BedRect) -> str:
+    n = _furrow_count(bed.branch.lines_added)
+    if n <= 0 or bed.h <= FURROW_MIN_BED_HEIGHT:
+        return ''
+    sx, sy, sw, sh = _soil_rect(bed)
+    pad = 4
+    parts = []
+    for i in range(1, n + 1):
+        fy = sy + i * sh / (n + 1)
+        parts.append(
+            f'<line x1="{sx + pad:.1f}" y1="{fy:.1f}"'
+            f' x2="{sx + sw - pad:.1f}" y2="{fy:.1f}"'
+            f' stroke="#000" stroke-width="1.2" opacity="0.12"/>'
+            f'<line x1="{sx + pad:.1f}" y1="{fy - 1.2:.1f}"'
+            f' x2="{sx + sw - pad:.1f}" y2="{fy - 1.2:.1f}"'
+            f' stroke="#fff" stroke-width="0.8" opacity="0.08"/>'
+        )
+    return ''.join(parts)
+
+
+def _render_bed_body(
+    bed: BedRect,
+    soil_color: str,
+    soil_anim: str = '',
+    *,
+    shadow: bool = True,
+) -> str:
+    """Shadow, soil and frame of one raised bed.
+
+    The static and timeline renderers both draw beds through here, so
+    the timelapse ends on exactly the bed the static render shows.
+    """
+    soil = _soil_rect(bed)
+    sx, sy, sw, sh = soil
+    edge = min(INNER_SHADE, sw / 2, sh / 2)
+    parts = [
+        _render_bed_shadow(bed) if shadow else '',
+        _rect(soil, f'fill="{soil_color}"', soil_anim),
+        _rect(soil, 'fill="url(#soilTexture)"'),
+        _render_furrows(bed),
+        _rect((sx, sy, sw, edge), 'fill="url(#shadeDown)"'),
+        _rect((sx, sy, edge, sh), 'fill="url(#shadeRight)"'),
+    ]
+    parts.extend(
+        _rect(rect, f'fill="{color}"') for _, rect, color in _frame_planks(bed)
+    )
+    fw = min(FRAME_WIDTH, bed.w / 4, bed.h / 4)
+    post = _shade(FRAME_WOOD, -0.4)
+    parts.extend(
+        _rect((px, py, fw, fw), f'fill="{post}"')
+        for px in (bed.x, bed.x + bed.w - fw)
+        for py in (bed.y, bed.y + bed.h - fw)
+    )
+    return ''.join(parts)
+
+
 def _render_bed_soil(
     bed: BedRect,
     vitality: float,
 ) -> str:
-    color = _blend_hex(SOIL_DORMANT, SOIL_COLOR, vitality)
-    parts = [
-        (
-            f'<rect x="{bed.x:.1f}" y="{bed.y:.1f}"'
-            f' width="{bed.w:.1f}" height="{bed.h:.1f}"'
-            f' rx="3" fill="{color}" stroke="{FENCE_POST_COLOR}"'
-            f' stroke-width="1"/>'
-        )
-    ]
-    n = _furrow_count(bed.branch.lines_added)
-    if n > 0 and bed.h > FURROW_MIN_BED_HEIGHT:
-        pad = 6
-        for i in range(1, n + 1):
-            fy = bed.y + pad + i * (bed.h - 2 * pad) / (n + 1)
-            parts.append(
-                f'<line x1="{bed.x + pad:.1f}" y1="{fy:.1f}"'
-                f' x2="{bed.x + bed.w - pad:.1f}" y2="{fy:.1f}"'
-                f' stroke="{FENCE_POST_COLOR}" stroke-width="0.4"'
-                f' opacity="0.25"/>'
-            )
-    return ''.join(parts)
+    return _render_bed_body(
+        bed, _blend_hex(SOIL_DORMANT, SOIL_COLOR, vitality)
+    )
 
 
 def _render_bed_plants(
@@ -484,79 +938,47 @@ def _render_bed_plants(
     max_sessions: int,
     vitality: float,
 ) -> str:
-    specs = _plant_specs(bed.branch)
-    if not specs:
-        return ''
-
-    total_count = sum(s.count for s in specs)
-    rng = random.Random(f'plot-plants-{bed.repo}')
-
-    pad = 8
-    cols = max(1, int((bed.w - 2 * pad) / PLANT_SPACING_X))
-    rows = max(1, int((bed.h - 2 * pad) / PLANT_SPACING_Y))
-    max_plants = cols * rows
-    num_plants = min(max_plants, _bed_plant_count(bed, max_sessions))
-
-    plant_list: list[PlantSpec] = []
-    for spec in specs:
-        share = spec.count / total_count if total_count > 0 else 1.0
-        n = max(1, round(share * num_plants))
-        plant_list.extend([spec] * n)
-    plant_list = plant_list[:max_plants]
-
-    parts: list[str] = []
-    idx = 0
-    for row in range(rows):
-        if idx >= len(plant_list):
-            break
-        for col in range(cols):
-            if idx >= len(plant_list):
-                break
-            spec = plant_list[idx]
-            offset = PLANT_ROW_OFFSET if row % 2 else 0
-            cx = (
-                bed.x
-                + pad
-                + col * PLANT_SPACING_X
-                + offset
-                + rng.uniform(-PLANT_JITTER, PLANT_JITTER)
-            )
-            cy = (
-                bed.y
-                + pad
-                + row * PLANT_SPACING_Y
-                + rng.uniform(-PLANT_JITTER, PLANT_JITTER)
-            )
-            if cx > bed.x + bed.w - pad or cy > bed.y + bed.h - pad:
-                idx += 1
-                continue
-            color = _plant_color(spec.model_family, spec.effort, vitality)
-            scale = _plant_scale(spec.effort)
-            size = 12 * scale
-            symbol = f'plant-{spec.model_family}'
-            parts.append(
-                f'<use href="#{symbol}"'
-                f' x="{cx - size / 2:.1f}" y="{cy - size / 2:.1f}"'
-                f' width="{size:.1f}" height="{size:.1f}"'
-                f' color="{color}"/>'
-            )
-            idx += 1
-    return ''.join(parts)
+    return ''.join(
+        _plant_use(
+            plant,
+            _plant_color(plant.spec.model_family, plant.spec.effort, vitality),
+        )
+        for plant in _plant_layout(bed, max_sessions)
+    )
 
 
 def _render_bed_label(bed: BedRect) -> str:
-    cx = bed.x + bed.w / 2
-    cy = bed.y + bed.h - 8
-    name = _escape_xml(bed.repo)
-    font_size = min(11, max(6, bed.w / len(bed.repo) * 0.85))
+    """A wooden plant marker pinned to the bed's frame.
+
+    A bed too narrow for its name turns the marker on its side rather
+    than shrinking the text into illegibility.
+    """
+    sx, sy, sw, sh = _soil_rect(bed)
+    vertical = _label_vertical(bed)
+    room = (sh if vertical else sw) - 2 * LABEL_PAD
+    per_char = LABEL_CHAR_WIDTH * max(len(bed.repo), 1)
+    font = max(LABEL_MIN_FONT, min(LABEL_FONT_SIZE, room / per_char))
+    tag_w = per_char * font + 2 * LABEL_PAD
+    tag_h = font + 5
+    if vertical:
+        cx = sx + tag_h / 2 + 1
+        cy = sy + sh - tag_w / 2 - 2
+    else:
+        cx = sx + tag_w / 2 + 2
+        cy = bed.y + bed.h - tag_h / 2 - 1
+    x, y = cx - tag_w / 2, cy - tag_h / 2
+    turn = f' transform="rotate(-90 {cx:.1f} {cy:.1f})"' if vertical else ''
     return (
-        f'<text x="{cx:.1f}" y="{cy:.1f}"'
-        f' text-anchor="middle"'
-        f' font-family="Georgia, serif" font-size="{font_size:.1f}"'
-        f' fill="#fff" opacity="0.8"'
-        f' paint-order="stroke" stroke="{SOIL_COLOR}"'
-        f' stroke-width="2.5" stroke-linejoin="round">'
-        f'{name}</text>'
+        f'<g class="bed-tag"{turn}>'
+        f'<rect x="{x + 1.5:.1f}" y="{y + 2:.1f}" width="{tag_w:.1f}"'
+        f' height="{tag_h:.1f}" rx="2" fill="#000" opacity="0.3"/>'
+        f'<rect x="{x:.1f}" y="{y:.1f}" width="{tag_w:.1f}"'
+        f' height="{tag_h:.1f}" rx="2" fill="{TAG_FILL}"'
+        f' stroke="{TAG_EDGE}" stroke-width="0.8"/>'
+        f'<text x="{cx:.1f}" y="{cy + font * 0.35:.1f}"'
+        f' text-anchor="middle" font-family="Georgia, serif"'
+        f' font-size="{font:.1f}" fill="{TAG_TEXT}">'
+        f'{_escape_xml(bed.repo)}</text></g>'
     )
 
 
@@ -614,22 +1036,26 @@ def _render_paths(beds: list[BedRect]) -> str:
     gravel = (
         f'<rect x="{BED_ZONE_X}" y="{BED_ZONE_Y}"'
         f' width="{BED_ZONE_W}" height="{BED_ZONE_H}"'
-        f' fill="{PATH_COLOR}" rx="2"/>'
+        f' fill="url(#gravel)" rx="2"/>'
     )
     rng = random.Random('stepping-stones')
     stones: list[str] = []
     for _ in range(STONE_COUNT):
         sx = rng.uniform(BED_ZONE_X + 4, BED_ZONE_X + BED_ZONE_W - 4)
         sy = rng.uniform(BED_ZONE_Y + 4, BED_ZONE_Y + BED_ZONE_H - 4)
-        if _point_in_any_bed(sx, sy, beds):
-            continue
         r = rng.uniform(STONE_RADIUS_MIN, STONE_RADIUS_MAX)
         rot = rng.uniform(0, 360)
+        if _point_in_any_bed(sx, sy, beds, margin=r):
+            continue
         stones.append(
+            f'<g transform="rotate({rot:.0f} {sx:.1f} {sy:.1f})">'
+            f'<ellipse cx="{sx + LIGHT_DX / 2:.1f}"'
+            f' cy="{sy + LIGHT_DY / 2:.1f}"'
+            f' rx="{r:.1f}" ry="{r * 0.7:.1f}"'
+            f' fill="#000" opacity="0.2"/>'
             f'<ellipse cx="{sx:.1f}" cy="{sy:.1f}"'
             f' rx="{r:.1f}" ry="{r * 0.7:.1f}"'
-            f' fill="{STONE_COLOR}" opacity="0.6"'
-            f' transform="rotate({rot:.0f} {sx:.1f} {sy:.1f})"/>'
+            f' fill="url(#stoneShade)"/></g>'
         )
     return gravel + ''.join(stones)
 
@@ -638,9 +1064,12 @@ def _point_in_any_bed(
     px: float,
     py: float,
     beds: list[BedRect],
+    *,
+    margin: float = 0.0,
 ) -> bool:
     return any(
-        bed.x <= px <= bed.x + bed.w and bed.y <= py <= bed.y + bed.h
+        bed.x - margin <= px <= bed.x + bed.w + margin
+        and bed.y - margin <= py <= bed.y + bed.h + margin
         for bed in beds
     )
 
@@ -648,60 +1077,260 @@ def _point_in_any_bed(
 # ── Fence ──────────────────────────────────────────────────────
 
 
-def _render_fence() -> str:
-    parts = [
-        (
-            f'<rect x="{FENCE_X}" y="{FENCE_Y}"'
-            f' width="{FENCE_W}" height="{FENCE_H}"'
-            f' fill="none" stroke="{FENCE_COLOR}"'
-            f' stroke-width="4" rx="4"/>'
-        ),
+def _fence_posts() -> list[tuple[float, float]]:
+    """Post centres around the fence, skipping the gate opening."""
+    posts: list[tuple[float, float]] = []
+    x0, y0 = FENCE_X, FENCE_Y
+    x1, y1 = FENCE_X + FENCE_W, FENCE_Y + FENCE_H
+    nx = max(1, round(FENCE_W / FENCE_POST_SPACING))
+    ny = max(1, round(FENCE_H / FENCE_POST_SPACING))
+    gate_lo = GATE_X - GATE_WIDTH / 2
+    gate_hi = GATE_X + GATE_WIDTH / 2
+    for i in range(nx + 1):
+        x = x0 + i * FENCE_W / nx
+        posts.append((x, y0))
+        if not gate_lo < x < gate_hi:
+            posts.append((x, y1))
+    for j in range(1, ny):
+        y = y0 + j * FENCE_H / ny
+        posts.extend(((x0, y), (x1, y)))
+    return posts
+
+
+def _fence_rails() -> list[tuple[float, float, float, float]]:
+    x0, y0 = FENCE_X, FENCE_Y
+    x1, y1 = FENCE_X + FENCE_W, FENCE_Y + FENCE_H
+    gate_lo = GATE_X - GATE_WIDTH / 2
+    gate_hi = GATE_X + GATE_WIDTH / 2
+    return [
+        (x0, y0, x1, y0),
+        (x0, y0, x0, y1),
+        (x1, y0, x1, y1),
+        (x0, y1, gate_lo, y1),
+        (gate_hi, y1, x1, y1),
     ]
-    post_size = 6
-    for px, py in [
-        (FENCE_X, FENCE_Y),
-        (FENCE_X + FENCE_W - post_size, FENCE_Y),
-        (FENCE_X, FENCE_Y + FENCE_H - post_size),
-        (FENCE_X + FENCE_W - post_size, FENCE_Y + FENCE_H - post_size),
-    ]:
-        parts.append(
-            f'<rect x="{px:.1f}" y="{py:.1f}"'
-            f' width="{post_size}" height="{post_size}"'
-            f' fill="{FENCE_POST_COLOR}" rx="1"/>'
-        )
-    return ''.join(parts)
+
+
+def _render_fence() -> str:
+    rails = _fence_rails()
+    posts = _fence_posts()
+    half = FENCE_POST_SIZE / 2
+    shadow = ''.join(
+        f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{bx:.1f}" y2="{by:.1f}"/>'
+        for ax, ay, bx, by in rails
+    ) + ''.join(
+        f'<rect x="{px - half:.1f}" y="{py - half:.1f}"'
+        f' width="{FENCE_POST_SIZE}" height="{FENCE_POST_SIZE}"'
+        f' stroke="none"/>'
+        for px, py in posts
+    )
+    rail_lines = ''.join(
+        f'<line x1="{ax:.1f}" y1="{ay:.1f}" x2="{bx:.1f}" y2="{by:.1f}"/>'
+        for ax, ay, bx, by in rails
+    )
+    rail_shine = ''.join(
+        f'<line x1="{ax - 0.8:.1f}" y1="{ay - 0.8:.1f}"'
+        f' x2="{bx - 0.8:.1f}" y2="{by - 0.8:.1f}"/>'
+        for ax, ay, bx, by in rails
+    )
+    post_rects = ''.join(
+        f'<rect x="{px - half:.1f}" y="{py - half:.1f}"'
+        f' width="{FENCE_POST_SIZE}" height="{FENCE_POST_SIZE}" rx="1"/>'
+        f'<rect x="{px - half:.1f}" y="{py - half:.1f}"'
+        f' width="{FENCE_POST_SIZE - 2}" height="{FENCE_POST_SIZE - 2}"'
+        f' rx="1" fill="{_shade(FENCE_POST_COLOR, 0.25)}"/>'
+        for px, py in posts
+    )
+    return (
+        f'<g class="fence">'
+        f'<g stroke="#000" stroke-width="3" fill="#000" opacity="0.25"'
+        f' filter="url(#softShadow)">{shadow}</g>'
+        f'<g stroke="{FENCE_COLOR}" stroke-width="3"'
+        f' stroke-linecap="round">{rail_lines}</g>'
+        f'<g stroke="{_shade(FENCE_COLOR, 0.3)}" stroke-width="1"'
+        f' stroke-linecap="round">{rail_shine}</g>'
+        f'<g fill="{FENCE_POST_COLOR}">{post_rects}</g>'
+        f'</g>'
+    )
 
 
 # ── Periphery: Shed ────────────────────────────────────────────
 
 
+def _feature_boxes() -> dict[str, tuple[float, float, float, float]]:
+    """Footprint of every object in the band above the fence."""
+    return {
+        'shed': SHED_BOX,
+        'barrel': (
+            BARREL_CX - BARREL_R,
+            BARREL_CY - BARREL_R,
+            2 * BARREL_R,
+            2 * BARREL_R,
+        ),
+        'bench': BENCH_BOX,
+        'sign': SIGN_BOX,
+        'sundial': (
+            SUNDIAL_CX - SUNDIAL_PATIO_R,
+            SUNDIAL_CY - SUNDIAL_PATIO_R,
+            2 * SUNDIAL_PATIO_R,
+            2 * SUNDIAL_PATIO_R,
+        ),
+    }
+
+
+def _drop_shadow(shape: str) -> str:
+    return (
+        f'<g fill="#000" opacity="{SHADOW_OPACITY}"'
+        f' filter="url(#softShadow)">'
+        f'{shape}</g>'
+    )
+
+
 def _render_shed(tools: list[ToolBush]) -> str:
-    sx, sy, sw, sh = 8, 12, 46, 60
+    """The shed from above: a slate gable roof, ridge running east-west."""
+    x, y, w, h = SHED_BOX
+    ridge = y + h / 2
+    lit = _shade(SHED_ROOF, 0.18)
+    dim = _shade(SHED_ROOF, -0.25)
+    shingles = []
+    for i, row_y in enumerate(range(int(y) + 7, int(y + h), 7)):
+        if abs(row_y - ridge) < SHINGLE_RIDGE_CLEAR:
+            continue
+        shingles.append(
+            f'<line x1="{x + 2}" y1="{row_y}" x2="{x + w - 2}" y2="{row_y}"/>'
+        )
+        stagger = 6 if i % 2 else 0
+        shingles.extend(
+            f'<line x1="{tx}" y1="{row_y - 7}" x2="{tx}" y2="{row_y}"/>'
+            for tx in range(int(x) + 6 + stagger, int(x + w) - 2, 12)
+        )
+    calls = sum(t.count for t in tools)
+    return (
+        f'<g class="shed">'
+        f'{_title(f"Tool shed: {calls:,} tool calls, {len(tools)} tools")}'
+        + _drop_shadow(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>')
+        + f'<rect x="{x}" y="{y}" width="{w}" height="{h / 2}" fill="{lit}"/>'
+        f'<rect x="{x}" y="{ridge}" width="{w}" height="{h / 2}"'
+        f' fill="{dim}"/>'
+        f'<g stroke="#000" stroke-opacity="0.18" stroke-width="0.7">'
+        f'{"".join(shingles)}</g>'
+        f'<rect x="{x + w * 0.62}" y="{y + 10}" width="22" height="16"'
+        f' fill="#a9c6d8" stroke="{_shade(SHED_ROOF, -0.4)}"'
+        f' stroke-width="1.5"/>'
+        f'<line x1="{x + w * 0.62 + 11}" y1="{y + 10}"'
+        f' x2="{x + w * 0.62 + 11}" y2="{y + 26}"'
+        f' stroke="{_shade(SHED_ROOF, -0.4)}" stroke-width="1"/>'
+        f'<rect x="{x - 2}" y="{ridge - 2.5}" width="{w + 4}" height="5"'
+        f' rx="1" fill="{_shade(SHED_ROOF, -0.45)}"/>'
+        f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="none"'
+        f' stroke="{_shade(SHED_ROOF, -0.5)}" stroke-width="1.5"/>'
+        f'<path d="M{x + w},{y + h - 6} H{BARREL_CX - 4}'
+        f' V{BARREL_CY - BARREL_R * 0.5}" fill="none"'
+        f' stroke="{BARREL_BAND}" stroke-width="3" stroke-linejoin="round"/>'
+        f'</g>' + _render_bench(tools)
+    )
+
+
+def _bench_tools(tools: list[ToolBush]) -> list[ToolPlacement]:
+    """The busiest tools laid on the potting bench, longest = most used."""
+    top = sorted(tools, key=lambda t: t.count, reverse=True)[:BENCH_MAX_TOOLS]
+    if not top:
+        return []
+    bx, by, bw, _ = BENCH_BOX
+    slot = (bw - 2 * BENCH_PAD) / len(top)
+    peak = top[0].count or 1
+    return [
+        ToolPlacement(
+            tool=tool,
+            x=bx + BENCH_PAD + (i + 0.5) * slot,
+            y=by + BENCH_PAD,
+            length=TOOL_MIN_LEN
+            + (TOOL_MAX_LEN - TOOL_MIN_LEN) * math.sqrt(tool.count / peak),
+            kind=TOOL_KINDS[i % len(TOOL_KINDS)],
+        )
+        for i, tool in enumerate(top)
+    ]
+
+
+def _tool_head(kind: str, x: float, y: float) -> str:
+    """A tool's metal end, drawn around its tip at (x, y)."""
+    metal = f'fill="url(#metal)" stroke="{BARREL_BAND}" stroke-width="0.5"'
+    tine = f'stroke="{TOOL_METAL}" stroke-width="1.1" stroke-linecap="round"'
+    heads = {
+        'spade': (
+            f'<path d="M{x - 4.5},{y - 2} h9 v8 q0,4 -4.5,5'
+            f' q-4.5,-1 -4.5,-5 z" {metal}/>'
+        ),
+        'rake': (
+            f'<rect x="{x - 7}" y="{y - 1}" width="14" height="2.4" {metal}/>'
+            + ''.join(
+                f'<line x1="{x + dx}" y1="{y + 1}" x2="{x + dx}" y2="{y + 5}"'
+                f' {tine}/>'
+                for dx in (-6, -3.6, -1.2, 1.2, 3.6, 6)
+            )
+        ),
+        'fork': (
+            f'<rect x="{x - 4}" y="{y - 1}" width="8" height="2.2" {metal}/>'
+            + ''.join(
+                f'<line x1="{x + dx}" y1="{y + 1}" x2="{x + dx}" y2="{y + 9}"'
+                f' {tine}/>'
+                for dx in (-3.2, -1.1, 1.1, 3.2)
+            )
+        ),
+        'trowel': (
+            f'<path d="M{x},{y - 1} q5,3 3.5,9 l-3.5,4 l-3.5,-4'
+            f' q-1.5,-6 3.5,-9 z" {metal}/>'
+        ),
+        'hoe': (
+            f'<rect x="{x - 6}" y="{y - 1}" width="12" height="4" {metal}/>'
+        ),
+        'shears': (
+            f'<path d="M{x - 1},{y} l-3,11 l2,0.5 z M{x + 1},{y}'
+            f' l3,11 l-2,0.5 z" {metal}/>'
+        ),
+    }
+    return heads[kind]
+
+
+def _render_bench(tools: list[ToolBush]) -> str:
+    x, y, w, h = BENCH_BOX
+    planks = ''.join(
+        f'<rect x="{x}" y="{y + i * h / 3:.1f}" width="{w}"'
+        f' height="{h / 3 - 1:.1f}"'
+        f' fill="{_shade(FRAME_WOOD, 0.1 - i * 0.08)}"/>'
+        for i in range(3)
+    )
     parts = [
+        f'<g class="bench">{_title("Potting bench: most-used tools")}',
+        _drop_shadow(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>'),
         (
-            f'<g class="shed">'
-            f'{_title("Tool shed")}'
-            f'<rect x="{sx}" y="{sy}" width="{sw}" height="{sh}"'
-            f' rx="3" fill="{SHED_BODY}" stroke="{FENCE_POST_COLOR}"'
-            f' stroke-width="1"/>'
-            f'<line x1="{sx + sw // 2}" y1="{sy}"'
-            f' x2="{sx + sw // 2}" y2="{sy + sh}"'
-            f' stroke="{SHED_ROOF}" stroke-width="3"/>'
-            f'<rect x="{sx}" y="{sy}" width="{sw // 2}" height="{sh}"'
-            f' rx="3" fill="{SHED_ROOF}" opacity="0.5"/>'
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}"'
+            f' fill="{_shade(FRAME_WOOD, -0.5)}"/>'
+        ),
+        planks,
+        (
+            f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="none"'
+            f' stroke="{_shade(FRAME_WOOD, -0.4)}" stroke-width="1"/>'
         ),
     ]
-    top_tools = sorted(tools, key=lambda t: t.count, reverse=True)[:4]
-    for i, tool in enumerate(top_tools):
-        tx = sx + 6 + (i % 2) * 20
-        ty = sy + sh + 6 + (i // 2) * 12
+    for placed in _bench_tools(tools):
+        tip_y = placed.y + placed.length - TOOL_HEAD_LEN
+        name = _escape_xml(placed.tool.tool[:TOOL_LABEL_CHARS])
         parts.append(
-            f'<text x="{tx}" y="{ty}"'
-            f' font-family="monospace" font-size="7"'
-            f' fill="{FENCE_COLOR}">'
-            f'{_escape_xml(tool.tool[:6])}'
-            f'{_title(f"{tool.tool}: {tool.count} calls")}'
-            f'</text>'
+            f'<g class="tool">'
+            f'{_title(f"{placed.tool.tool}: {placed.tool.count:,} calls")}'
+            f'<g opacity="0.3" transform="translate(1.5 2)">'
+            f'<line x1="{placed.x:.1f}" y1="{placed.y:.1f}"'
+            f' x2="{placed.x:.1f}" y2="{tip_y:.1f}" stroke="#000"'
+            f' stroke-width="2.6" stroke-linecap="round"/></g>'
+            f'<line x1="{placed.x:.1f}" y1="{placed.y:.1f}"'
+            f' x2="{placed.x:.1f}" y2="{tip_y:.1f}" stroke="{TOOL_HANDLE}"'
+            f' stroke-width="2.4" stroke-linecap="round"/>'
+            f'{_tool_head(placed.kind, placed.x, tip_y)}'
+            f'<text x="{placed.x:.1f}" y="{y + h - 3:.1f}"'
+            f' text-anchor="middle" font-family="Georgia, serif"'
+            f' font-size="6.5" fill="{TAG_TEXT}">{name}</text>'
+            f'</g>'
         )
     parts.append('</g>')
     return ''.join(parts)
@@ -710,214 +1339,807 @@ def _render_shed(tools: list[ToolBush]) -> str:
 # ── Periphery: Sundial ─────────────────────────────────────────
 
 
-def _render_sundial(hour_counts: dict[int, int]) -> str:
-    cx, cy, r = 755, 45, 30
-    parts = [
-        (
-            f'<g class="sundial">'
-            f'{_title("Activity by hour")}'
-            f'<circle cx="{cx}" cy="{cy}" r="{r}"'
-            f' fill="{SUNDIAL_STONE}" stroke="{FENCE_POST_COLOR}"'
-            f' stroke-width="1"/>'
-        ),
+def _sundial_wedges(hour_counts: dict[int, int]) -> list[SundialWedge]:
+    """One wedge per active hour; length is that hour's share of the peak."""
+    if not hour_counts:
+        return []
+    peak = max(hour_counts.values()) or 1
+    return [
+        SundialWedge(
+            hour=hour,
+            length=count / peak,
+            night=hour >= NIGHT_START_HOUR or hour < NIGHT_END_HOUR,
+        )
+        for hour, count in sorted(hour_counts.items())
+        if count > 0
     ]
-    if hour_counts:
-        max_count = max(hour_counts.values()) or 1
-        peak_hour = max(hour_counts, key=lambda h: hour_counts[h])
-        for hour, count in hour_counts.items():
-            angle = (hour / 24) * 2 * math.pi - math.pi / 2
-            intensity = count / max_count
-            ex = cx + (r - 4) * math.cos(angle)
-            ey = cy + (r - 4) * math.sin(angle)
-            parts.append(
-                f'<circle cx="{ex:.1f}" cy="{ey:.1f}"'
-                f' r="{2 + intensity * 2:.1f}"'
-                f' fill="#f4c95d" opacity="{0.3 + intensity * 0.6:.2f}"/>'
+
+
+def _hour_angle(hour: float) -> float:
+    return hour / 24 * math.tau - math.pi / 2
+
+
+def _polar(r: float, angle: float) -> tuple[float, float]:
+    return SUNDIAL_CX + r * math.cos(angle), SUNDIAL_CY + r * math.sin(angle)
+
+
+def _wedge_path(r0: float, r1: float, a0: float, a1: float) -> str:
+    (x0, y0), (x1, y1) = _polar(r0, a0), _polar(r1, a0)
+    (x2, y2), (x3, y3) = _polar(r1, a1), _polar(r0, a1)
+    return (
+        f'M{x0:.1f},{y0:.1f} L{x1:.1f},{y1:.1f}'
+        f' A{r1:.1f},{r1:.1f} 0 0 1 {x2:.1f},{y2:.1f}'
+        f' L{x3:.1f},{y3:.1f} A{r0:.1f},{r0:.1f} 0 0 0 {x0:.1f},{y0:.1f}Z'
+    )
+
+
+def _render_sundial(hour_counts: dict[int, int]) -> str:
+    """A 24-hour stone dial whose petals are a histogram of prompt hours.
+
+    Midnight is at the top, noon at the bottom; night hours are tinted
+    moonlight blue so a night-owl habit shows as a blue crown.
+    """
+    cx, cy, r = SUNDIAL_CX, SUNDIAL_CY, SUNDIAL_R
+    wedges = _sundial_wedges(hour_counts)
+    r0 = r * 0.28
+    reach = r * 0.62
+    half = math.tau / 48 * 0.82
+    petals = ''.join(
+        f'<path d="{
+            _wedge_path(
+                r0,
+                r0 + reach * max(w.length, 0.06),
+                _hour_angle(w.hour + 0.5) - half,
+                _hour_angle(w.hour + 0.5) + half,
             )
-        shadow_angle = (peak_hour / 24) * 2 * math.pi - math.pi / 2
-        sx = cx + (r - 8) * math.cos(shadow_angle)
-        sy = cy + (r - 8) * math.sin(shadow_angle)
-        parts.append(
-            f'<line x1="{cx}" y1="{cy}" x2="{sx:.1f}" y2="{sy:.1f}"'
-            f' stroke="{SUNDIAL_GNOMON}" stroke-width="2"'
-            f' stroke-linecap="round"/>'
+        }"'
+        f' fill="{SUNDIAL_NIGHT if w.night else SUNDIAL_DAY}"'
+        f' opacity="{0.55 + 0.45 * w.length:.2f}">'
+        f'{_title(f"{w.hour:02d}:00 — {hour_counts[w.hour]:,} prompts")}'
+        f'</path>'
+        for w in wedges
+    )
+    ticks = ''.join(
+        '<line x1="{:.1f}" y1="{:.1f}" x2="{:.1f}" y2="{:.1f}"/>'.format(
+            *_polar(r - 2, _hour_angle(h)),
+            *_polar(r - (6 if h % 6 == 0 else 3.5), _hour_angle(h)),
         )
-        parts.append(
-            f'<circle cx="{cx}" cy="{cy}" r="3" fill="{SUNDIAL_GNOMON}"/>'
+        for h in range(24)
+    )
+    numerals = ''.join(
+        f'<text x="{nx:.1f}" y="{ny:.1f}">{h}</text>'
+        for h in (0, 6, 12, 18)
+        for nx, ny in (_polar(r - 11, _hour_angle(h)),)
+    )
+    gnomon = ''
+    if wedges:
+        peak = max(wedges, key=lambda w: w.length).hour + 0.5
+        angle = _hour_angle(peak)
+        tip = _polar(reach + r0, angle)
+        left = _polar(4, angle - math.pi / 2)
+        right = _polar(4, angle + math.pi / 2)
+        tri = (
+            f'M{left[0]:.1f},{left[1]:.1f} L{tip[0]:.1f},{tip[1]:.1f}'
+            f' L{right[0]:.1f},{right[1]:.1f}Z'
         )
-    parts.append('</g>')
-    return ''.join(parts)
+        gnomon = (
+            f'<path d="{tri}" fill="#000" opacity="0.3"'
+            f' transform="translate({LIGHT_DX * 0.8} {LIGHT_DY * 0.8})"/>'
+            f'<path d="{tri}" fill="url(#metal)" stroke="{SUNDIAL_GNOMON}"'
+            f' stroke-width="0.8"/>'
+        )
+    peak_note = (
+        f' — peak {max(wedges, key=lambda w: w.length).hour:02d}:00'
+        if wedges
+        else ''
+    )
+    return (
+        f'<g class="sundial">{_title(f"Prompts by hour{peak_note}")}'
+        + _drop_shadow(f'<circle cx="{cx}" cy="{cy}" r="{SUNDIAL_PATIO_R}"/>')
+        + f'<circle cx="{cx}" cy="{cy}" r="{SUNDIAL_PATIO_R}"'
+        f' fill="url(#gravel)"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{SUNDIAL_PATIO_R}" fill="none"'
+        f' stroke="{_shade(STONE_COLOR, -0.3)}" stroke-width="1"/>'
+        f'<circle cx="{cx + 2}" cy="{cy + 3}" r="{r}" fill="#000"'
+        f' opacity="0.3"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="url(#dialStone)"'
+        f' stroke="{_shade(SUNDIAL_STONE, -0.35)}" stroke-width="1.5"/>'
+        f'{petals}'
+        f'<g stroke="{SUNDIAL_GNOMON}" stroke-width="1" opacity="0.6">'
+        f'{ticks}</g>'
+        f'<g font-family="Georgia, serif" font-size="7"'
+        f' fill="{SUNDIAL_GNOMON}" text-anchor="middle"'
+        f' dominant-baseline="central" opacity="0.7">'
+        f'{numerals}</g>'
+        f'{gnomon}'
+        f'<circle cx="{cx}" cy="{cy}" r="2.5" fill="{SUNDIAL_GNOMON}"/>'
+        f'</g>'
+    )
 
 
 # ── Periphery: Water Barrel ────────────────────────────────────
 
 
+def _barrel_water(total_tokens: int) -> WaterDisc:
+    """The water surface seen from above: fuller sits nearer the rim.
+
+    Looking into a half-empty barrel from above and to the side, the
+    surface shrinks and slides away from the viewer -- so fill reads as
+    both size and offset, and a full barrel's water meets its rim.
+    """
+    fill = math.sqrt(min(1.0, total_tokens / BARREL_TOKEN_SATURATION))
+    inner = BARREL_R - BARREL_RIM
+    r = inner * (BARREL_MIN_WATER + (1 - BARREL_MIN_WATER) * fill) - 0.5
+    slack = inner - r - 0.5
+    return WaterDisc(
+        cx=BARREL_CX + slack * 0.45,
+        cy=BARREL_CY + slack * 0.55,
+        r=r,
+    )
+
+
+def _render_barrel_shell(total_tokens: int, water: str) -> str:
+    cx, cy, r = BARREL_CX, BARREL_CY, BARREL_R
+    inner = r - BARREL_RIM
+    staves = ''.join(
+        f'<line x1="{cx + inner * math.cos(a):.1f}"'
+        f' y1="{cy + inner * math.sin(a):.1f}"'
+        f' x2="{cx + r * math.cos(a):.1f}" y2="{cy + r * math.sin(a):.1f}"/>'
+        for a in (i * math.tau / 20 for i in range(20))
+    )
+    return (
+        f'<g class="barrel">{_title(f"Rain barrel: {total_tokens:,} tokens")}'
+        + _drop_shadow(f'<circle cx="{cx}" cy="{cy}" r="{r}"/>')
+        + f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="{BARREL_WOOD}"/>'
+        f'<g stroke="#000" stroke-opacity="0.3" stroke-width="0.8">'
+        f'{staves}</g>'
+        f'<circle cx="{cx}" cy="{cy}" r="{r - 1.2}" fill="none"'
+        f' stroke="{BARREL_BAND}" stroke-width="2"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{inner}" fill="#2e2012"/>'
+        f'<circle cx="{cx}" cy="{cy}" r="{inner}" fill="url(#shadeDown)"/>'
+        f'{water}'
+        f'<circle cx="{cx}" cy="{cy}" r="{inner}" fill="none"'
+        f' stroke="{BARREL_BAND}" stroke-width="1.5"/>'
+        f'</g>'
+    )
+
+
+def _render_water(disc: WaterDisc, anims: str = '') -> str:
+    return (
+        f'<circle class="water" cx="{disc.cx:.1f}" cy="{disc.cy:.1f}"'
+        f' r="{disc.r:.1f}" fill="url(#waterFill)">{anims}</circle>'
+    )
+
+
 def _render_barrel(total_tokens: int) -> str:
-    cx, cy = 30, 695
-    rw, rh = 18, 24
-    fill = min(1.0, total_tokens / BARREL_TOKEN_SATURATION)
-    parts = [
-        (
-            f'<g class="barrel">'
-            f'{_title(f"Tokens: {total_tokens:,}")}'
-            f'<ellipse cx="{cx}" cy="{cy}" rx="{rw}" ry="{rh}"'
-            f' fill="{BARREL_WOOD}" stroke="{BARREL_BAND}"'
-            f' stroke-width="1.5"/>'
-        ),
-    ]
-    for band_y in (-rh * 0.5, 0, rh * 0.5):
-        parts.append(
-            f'<ellipse cx="{cx}" cy="{cy + band_y:.1f}"'
-            f' rx="{rw - 1}" ry="2"'
-            f' fill="none" stroke="{BARREL_BAND}"'
-            f' stroke-width="1" opacity="0.6"/>'
-        )
-    water_ry = rh * fill * 0.7
-    if water_ry > 1:
-        parts.append(
-            f'<ellipse cx="{cx}" cy="{cy + rh * 0.15:.1f}"'
-            f' rx="{rw - 3}" ry="{water_ry:.1f}"'
-            f' fill="{BARREL_WATER}" opacity="0.7"/>'
-        )
-    parts.append('</g>')
-    return ''.join(parts)
+    return _render_barrel_shell(
+        total_tokens, _render_water(_barrel_water(total_tokens))
+    )
+
+
+def _render_signboard(garden: GardenData) -> str:
+    sessions = sum(b.sessions for b in garden.branches)
+    span = ''
+    if garden.rings:
+        first, last = garden.rings[0].day, garden.rings[-1].day
+        span = f'{_format_day(first)} to {_format_day(last)}'
+    return _signboard(sessions, span)
+
+
+def _signboard(sessions: int, subtitle: str, *, live: bool = False) -> str:
+    """A painted garden sign: the plot's headline number and its dates.
+
+    ``live`` gives the date line the id the timeline's clock script
+    rewrites as the replay advances.
+    """
+    x, y, w, h = SIGN_BOX
+    date_attrs = ' id="plot-date"' if live else ''
+    count_attrs = ' id="plot-sessions"' if live else ''
+    return (
+        '<g class="signboard">'
+        + _drop_shadow(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>')
+        + f'<rect x="{x}" y="{y}" width="{w}" height="{h}" rx="4"'
+        f' fill="{_shade(FRAME_WOOD, -0.15)}"'
+        f' stroke="{_shade(FRAME_WOOD, -0.45)}" stroke-width="1.5"/>'
+        f'<rect x="{x + 4}" y="{y + 4}" width="{w - 8}" height="{h - 8}"'
+        f' rx="2" fill="{TAG_FILL}"/>'
+        f'<text x="{x + w / 2}" y="{y + h * 0.48:.1f}" text-anchor="middle"'
+        f' font-family="Georgia, serif" font-size="14" font-weight="bold"'
+        f' fill="{TAG_TEXT}"{count_attrs}>{sessions:,} sessions</text>'
+        f'<text class="date-label"{date_attrs} x="{x + w / 2}"'
+        f' y="{y + h * 0.78:.1f}" text-anchor="middle"'
+        f' font-family="Georgia, serif" font-size="8.5"'
+        f' fill="{TAG_EDGE}">{_escape_xml(subtitle)}</text>'
+        f'</g>'
+    )
 
 
 # ── Periphery: Border Flowers ──────────────────────────────────
 
 
+def _flower_color(skill: str) -> str:
+    return random.Random(f'flower-{skill}').choice(FLOWER_COLORS)
+
+
+def _render_flower(
+    skill: SkillFruit,
+    x: float,
+    y: float,
+    peak: int,
+    anim: str = '',
+) -> str:
+    """One top-down bloom over two leaves, sized by the skill's calls."""
+    share = math.sqrt(skill.count / peak) if peak > 0 else 0.0
+    r = FLOWER_MIN_R + (FLOWER_MAX_R - FLOWER_MIN_R) * share
+    color = _flower_color(skill.skill)
+    rng = random.Random(f'flower-sway-{skill.skill}')
+    sway = SWAY_VARIANTS[rng.randrange(len(SWAY_VARIANTS))][1]
+    leaves = ''.join(
+        f'<ellipse cx="{x:.1f}" cy="{y - r * 0.9:.1f}" rx="{r * 0.32:.1f}"'
+        f' ry="{r * 0.75:.1f}" fill="#4f8a3c"'
+        f' transform="rotate({angle} {x:.1f} {y:.1f})"/>'
+        for angle in (rng.uniform(100, 150), rng.uniform(210, 260))
+    )
+    petals = ''.join(
+        f'<ellipse cx="{x:.1f}" cy="{y - r * 0.5:.1f}" rx="{r * 0.36:.1f}"'
+        f' ry="{r * 0.55:.1f}" fill="{color}" stroke="#000"'
+        f' stroke-opacity="0.18" stroke-width="0.4"'
+        f' transform="rotate({i * 60} {x:.1f} {y:.1f})"/>'
+        for i in range(6)
+    )
+    return (
+        f'<g class="flower"{' opacity="0"' if anim else ""}>{anim}'
+        f'{_title(f"{skill.skill}: {skill.count:,} calls")}'
+        f'<ellipse cx="{x + 1.5:.1f}" cy="{y + 2:.1f}" rx="{r:.1f}"'
+        f' ry="{r * 0.9:.1f}" fill="#000" opacity="0.25"/>'
+        f'<g class="{sway}">{leaves}{petals}'
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r * 0.3:.1f}"'
+        f' fill="{FLOWER_CENTER}"/>'
+        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}"'
+        f' fill="url(#plantShine)"/></g></g>'
+    )
+
+
+def _render_flower_bed(n_skills: int) -> str:
+    rows = _flower_rows(n_skills)
+    if not rows:
+        return ''
+    x = FLOWER_BORDER_X0 - 8
+    w = FLOWER_BORDER_X1 - FLOWER_BORDER_X0 + 16
+    h = rows * FLOWER_ROW_HEIGHT + 2 * FLOWER_BORDER_PAD
+    y = FLOWER_BORDER_TOP
+    rect = (x, y, w, h)
+    return (
+        _rect(
+            rect,
+            'rx="10" fill="#000" filter="url(#softShadow)"'
+            f' opacity="{SHADOW_OPACITY}"',
+        )
+        + _rect(rect, f'rx="10" fill="{MULCH_COLOR}"')
+        + _rect(rect, 'rx="10" fill="url(#soilTexture)"')
+        + _rect(
+            rect,
+            f'rx="10" fill="none" stroke="{_shade(STONE_COLOR, -0.1)}"'
+            ' stroke-width="3" stroke-dasharray="9 3"',
+        )
+    )
+
+
 def _render_border_flowers(skills: list[SkillFruit]) -> str:
     if not skills:
         return ''
-    x_start, x_end = 100, 740
-    y = FENCE_Y + FENCE_H + 12
-    span = x_end - x_start
-    step = min(span / len(skills), 30)
-    parts: list[str] = []
-    for i, skill in enumerate(skills):
-        fx = x_start + i * step + step / 2
-        color = FLOWER_COLORS[i % len(FLOWER_COLORS)]
-        radius = min(8, max(4, 3 + skill.count * 0.3))
-        parts.append(f'<g>{_title(f"{skill.skill}: {skill.count}")}')
-        for petal in range(5):
-            angle = petal * 72
-            parts.append(
-                f'<ellipse cx="{fx:.1f}" cy="{y:.1f}"'
-                f' rx="{radius * 0.45:.1f}" ry="{radius:.1f}"'
-                f' transform="rotate({angle},{fx:.1f},{y:.1f})"'
-                f' fill="{color}" opacity="0.8"/>'
-            )
-        parts.append(
-            f'<circle cx="{fx:.1f}" cy="{y:.1f}" r="{radius * 0.3:.1f}"'
-            f' fill="{FLOWER_CENTER}"/>'
-            f'</g>'
+    peak = max(s.count for s in skills)
+    return _render_flower_bed(len(skills)) + ''.join(
+        _render_flower(skill, x, y, peak)
+        for skill, (x, y) in zip(
+            skills, _flower_positions(len(skills)), strict=True
         )
-    return ''.join(parts)
+    )
+
+
+def _render_butterflies(n_skills: int, opacity: str, anim: str = '') -> str:
+    """Butterflies working the flower border -- only on a dry day."""
+    count = min(BUTTERFLY_MAX, 1 + n_skills // BUTTERFLY_PER_SKILLS)
+    if n_skills <= 0:
+        return ''
+    parts = []
+    for i in range(count):
+        color = FLOWER_COLORS[(i * 2 + 1) % len(FLOWER_COLORS)]
+        wing = (
+            f'<ellipse cx="-3" cy="-1.5" rx="3" ry="2.4" fill="{color}"/>'
+            f'<ellipse cx="3" cy="-1.5" rx="3" ry="2.4" fill="{color}"/>'
+            f'<ellipse cx="-2.2" cy="2" rx="2" ry="1.6" fill="{color}"/>'
+            f'<ellipse cx="2.2" cy="2" rx="2" ry="1.6" fill="{color}"/>'
+        )
+        parts.append(
+            f'<g class="ccp-fly-{i}"><g class="ccp-flap"'
+            f' style="animation-delay:-{i * 0.11:.2f}s"'
+            f' stroke="#3a2a18" stroke-width="0.3">{wing}</g>'
+            f'<line x1="0" y1="-3" x2="0" y2="3.5" stroke="#2a1d10"'
+            f' stroke-width="1.1" stroke-linecap="round"/></g>'
+        )
+    return (
+        f'<g class="butterfly" opacity="{opacity}" pointer-events="none">'
+        f'{anim}{"".join(parts)}</g>'
+    )
+
+
+def _butterfly_keyframes(n_skills: int, garden_h: float) -> str:
+    count = min(BUTTERFLY_MAX, 1 + n_skills // BUTTERFLY_PER_SKILLS)
+    rules = []
+    for i in range(count):
+        rng = random.Random(f'butterfly-{i}')
+        points = [
+            (
+                rng.uniform(FENCE_X + 20, FENCE_X + FENCE_W - 20),
+                rng.uniform(FENCE_Y + FENCE_H * 0.4, garden_h - 20),
+            )
+            for _ in range(BUTTERFLY_WAYPOINTS)
+        ]
+        points.append(points[0])
+        steps = ''.join(
+            f'{k * 100 / BUTTERFLY_WAYPOINTS:.0f}%'
+            f'{{transform:translate({x:.0f}px,{y:.0f}px)}}'
+            for k, (x, y) in enumerate(points)
+        )
+        rules.append(
+            f'@keyframes ccp-fly-{i}{{{steps}}}'
+            f'.ccp-fly-{i}{{animation:ccp-fly-{i}'
+            f' {rng.uniform(22, 34):.1f}s ease-in-out infinite;'
+            f'transform-box:view-box;transform-origin:0 0}}'
+        )
+    return ''.join(rules)
 
 
 # ── Night veil ─────────────────────────────────────────────────
 
 
-def _render_plot_night(nightness: float) -> str:
-    opacity = _saturated_nightness(nightness) * 0.55
-    if opacity < OPACITY_EPSILON:
-        return ''
+def _render_fireflies(opacity: str, anim: str = '') -> str:
+    rng = random.Random('fireflies')
+    flies = []
+    for _ in range(FIREFLY_COUNT):
+        x = rng.uniform(FENCE_X, FENCE_X + FENCE_W)
+        y = rng.uniform(FENCE_Y, FENCE_Y + FENCE_H)
+        flies.append(
+            f'<g class="ccp-wander"'
+            f' style="animation-delay:-{rng.uniform(0, 11):.1f}s">'
+            f'<circle class="ccp-glow" cx="{x:.1f}" cy="{y:.1f}" r="6"'
+            f' fill="url(#fireflyGlow)"'
+            f' style="animation-delay:-{rng.uniform(0, 3):.1f}s"/></g>'
+        )
+    return (
+        f'<g class="fireflies" opacity="{opacity}" pointer-events="none">'
+        f'{anim}{"".join(flies)}</g>'
+    )
+
+
+def _render_night_veil(garden_h: float, opacity: str, anim: str = '') -> str:
     return (
         f'<rect x="0" y="0"'
-        f' width="{PLOT_VIEWBOX_WIDTH}" height="{PLOT_VIEWBOX_HEIGHT}"'
-        f' fill="{NIGHT_VEIL_COLOR}" opacity="{opacity:.3f}"'
-        f' pointer-events="none"/>'
+        f' width="{PLOT_VIEWBOX_WIDTH}" height="{garden_h:.0f}"'
+        f' fill="{NIGHT_VEIL_COLOR}" opacity="{opacity}"'
+        f' pointer-events="none">{anim}</rect>'
     )
+
+
+def _render_plot_night(nightness: float, garden_h: float) -> str:
+    level = _saturated_nightness(nightness)
+    if level < OPACITY_EPSILON:
+        return ''
+    return _render_night_veil(
+        garden_h, f'{level * NIGHT_VEIL_MAX:.3f}'
+    ) + _render_fireflies(f'{level:.3f}')
 
 
 # ── Rain overlay ───────────────────────────────────────────────
 
 
-def _render_plot_rain(vitality: float) -> str:
+def _render_rain_layer(garden_h: float, opacity: str, anim: str = '') -> str:
+    """Rain from above: slanting streaks and rings spreading on the ground."""
+    rng = random.Random('plot-rain')
+    streaks = []
+    for _ in range(RAIN_STREAKS):
+        x = rng.uniform(0, PLOT_VIEWBOX_WIDTH)
+        y = rng.uniform(0, garden_h)
+        streaks.append(
+            f'<line x1="{x:.1f}" y1="{y:.1f}"'
+            f' x2="{x + 1.5:.1f}" y2="{y + 8:.1f}"/>'
+        )
+    ripples = ''.join(
+        f'<circle class="ccp-ripple"'
+        f' cx="{rng.uniform(0, PLOT_VIEWBOX_WIDTH):.1f}"'
+        f' cy="{rng.uniform(0, garden_h):.1f}" r="5"'
+        f' style="animation-delay:-{rng.uniform(0, 1.6):.2f}s"/>'
+        for _ in range(RAIN_RIPPLES)
+    )
+    return (
+        f'<g class="rain" opacity="{opacity}" pointer-events="none">{anim}'
+        f'<g stroke="#9bb8d3" stroke-width="0.8">{"".join(streaks)}</g>'
+        f'<g fill="none" stroke="#d7e8f5" stroke-width="0.9">{ripples}</g>'
+        f'</g>'
+    )
+
+
+def _render_plot_rain(vitality: float, garden_h: float) -> str:
     opacity = _rain_opacity(vitality)
     if opacity < OPACITY_EPSILON:
         return ''
-    rng = random.Random('plot-rain')
-    parts: list[str] = []
-    for _ in range(80):
-        rx = rng.uniform(0, PLOT_VIEWBOX_WIDTH)
-        ry = rng.uniform(0, PLOT_VIEWBOX_HEIGHT)
-        parts.append(
-            f'<line x1="{rx:.1f}" y1="{ry:.1f}"'
-            f' x2="{rx + 1.5:.1f}" y2="{ry + 8:.1f}"'
-            f' stroke="#7799bb" stroke-width="0.8"'
-            f' opacity="{opacity:.2f}"/>'
-        )
-    return ''.join(parts)
+    return _render_rain_layer(garden_h, f'{opacity:.2f}')
 
 
 # ── Background ─────────────────────────────────────────────────
 
 
-def _render_background(vitality: float) -> str:
-    grass = _blend_hex(GRASS_DORMANT, GRASS_COLOR, vitality)
-    return (
-        f'<rect x="0" y="0"'
-        f' width="{PLOT_VIEWBOX_WIDTH}"'
-        f' height="{PLOT_VIEWBOX_HEIGHT}"'
-        f' fill="{grass}"/>'
+def _render_lawn(
+    grass: str,
+    total_h: int,
+    garden_h: float,
+    fill_anim: str = '',
+) -> str:
+    """Grass, mown stripes, tufts and a soft vignette.
+
+    Stripes and tufts are translucent overlays in shared patterns, so
+    the grass colour underneath can animate with vitality while the
+    texture stays put.
+    """
+    base = _rect(
+        (0, 0, PLOT_VIEWBOX_WIDTH, total_h),
+        f'class="plot-frame" rx="6" fill="{grass}"',
+        fill_anim,
     )
+    lawn = (0, 0, PLOT_VIEWBOX_WIDTH, garden_h)
+    return (
+        base
+        + _rect(lawn, 'rx="6" fill="url(#lawnStripes)"')
+        + _rect(lawn, 'rx="6" fill="url(#lawnTufts)"')
+        + _rect(lawn, 'rx="6" fill="url(#vignette)" pointer-events="none"')
+    )
+
+
+def _render_background(
+    vitality: float,
+    total_h: int,
+    garden_h: float,
+) -> str:
+    grass = _blend_hex(GRASS_DORMANT, GRASS_COLOR, vitality)
+    return _render_lawn(grass, total_h, garden_h)
 
 
 # ── Defs ───────────────────────────────────────────────────────
 
 
-def _render_plot_defs() -> str:
-    return f'<defs>{_render_plant_defs()}</defs>'
+def _render_motion_style(n_skills: int, garden_h: float) -> str:
+    """Every idle-motion rule, emitted once.
+
+    CSS keyframes, never SMIL, for the same reason as the tree's wind:
+    it runs on the compositor and on its own clock, so a paused or
+    scrubbed timelapse is still alive.
+    """
+    sway = ''.join(
+        f'.{cls}{{animation:ccp-sway {secs}s ease-in-out -{delay}s infinite}}'
+        for (_, cls), (secs, delay) in zip(
+            SWAY_VARIANTS, SWAY_TIMING, strict=True
+        )
+    )
+    return (
+        f'@keyframes ccp-sway{{0%,100%{{transform:rotate(-{SWAY_DEGREES}deg)}}'
+        f'50%{{transform:rotate({SWAY_DEGREES}deg)}}}}'
+        f'{sway}'
+        '[class*="ccp-sway"]{transform-box:fill-box;transform-origin:center}'
+        '@keyframes ccp-flap{0%,100%{transform:scaleX(1)}'
+        '50%{transform:scaleX(0.2)}}'
+        '.ccp-flap{animation:ccp-flap 0.32s ease-in-out infinite;'
+        'transform-box:fill-box;transform-origin:center}'
+        '@keyframes ccp-ripple{0%{transform:scale(0.2);opacity:0.9}'
+        '100%{transform:scale(1.8);opacity:0}}'
+        '.ccp-ripple{animation:ccp-ripple 1.6s ease-out infinite;'
+        'transform-box:fill-box;transform-origin:center}'
+        '@keyframes ccp-glow{0%,100%{opacity:0.1}50%{opacity:1}}'
+        '.ccp-glow{animation:ccp-glow 3s ease-in-out infinite}'
+        '@keyframes ccp-wander{0%,100%{transform:translate(0,0)}'
+        '33%{transform:translate(9px,-6px)}66%{transform:translate(-7px,5px)}}'
+        '.ccp-wander{animation:ccp-wander 11s ease-in-out infinite}'
+        + _butterfly_keyframes(n_skills, garden_h)
+        + '.legend [class*="ccp-"]{animation:none}'
+        '@media (prefers-reduced-motion:reduce){[class*="ccp-"]'
+        '{animation:none}}'
+    )
+
+
+def _render_plot_style(n_skills: int = 0, garden_h: float = 0.0) -> str:
+    return (
+        '<style>'
+        + _render_motion_style(n_skills, garden_h)
+        + '@media (prefers-color-scheme:dark){'
+        f'.plot-frame{{fill:{DARK_GRASS};'
+        f'stroke:{DARK_FRAME_STROKE};stroke-width:2}}'
+        f'.legend-bg{{fill:{DARK_LEGEND_BG}}}'
+        f'.legend-inner{{fill:{DARK_LEGEND_INNER}}}'
+        f'.legend-label{{fill:{DARK_LEGEND_TEXT}}}'
+        f'.legend-desc{{fill:{DARK_LEGEND_DESC}}}'
+        f'#plot-tooltip-box{{fill:{DARK_TOOLTIP_BG};'
+        f'stroke:{DARK_TOOLTIP_BORDER}}}'
+        f'#plot-tooltip-text{{fill:{DARK_TOOLTIP_TEXT}}}'
+        '}'
+        '</style>'
+    )
+
+
+def _seeded_marks(
+    seed: str,
+    size: int,
+    count: int,
+    colors: tuple[str, ...],
+    radius: tuple[float, float],
+) -> str:
+    rng = random.Random(seed)
+    marks = []
+    for _ in range(count):
+        cx, cy = rng.uniform(0, size), rng.uniform(0, size)
+        r = rng.uniform(*radius)
+        marks.append(
+            f'<ellipse cx="{cx:.1f}" cy="{cy:.1f}" rx="{r:.1f}"'
+            f' ry="{r * rng.uniform(0.6, 1.0):.1f}"'
+            f' fill="{rng.choice(colors)}"'
+            f' opacity="{rng.uniform(0.35, 0.8):.2f}"/>'
+        )
+    return ''.join(marks)
+
+
+def _render_tufts(seed: str, size: int, count: int) -> str:
+    rng = random.Random(seed)
+    tufts = []
+    for _ in range(count):
+        x, y = rng.uniform(0, size), rng.uniform(0, size)
+        color = rng.choice(('#000', '#fff'))
+        opacity = 0.1 if color == '#000' else 0.07
+        for lean in (-2.0, 0.0, 2.0):
+            tufts.append(
+                f'<path d="M{x:.1f},{y:.1f} q{lean * 0.4:.1f},-2'
+                f' {lean:.1f},-4" stroke="{color}" stroke-width="0.8"'
+                f' fill="none" opacity="{opacity}"/>'
+            )
+    return ''.join(tufts)
+
+
+def _render_paint_defs(sun_anim: str = '') -> str:
+    """Shared textures and gradients, referenced by url() everywhere."""
+    stripe = LAWN_STRIPE_WIDTH
+    gradient_stop = '<stop offset="{}" stop-color="{}" stop-opacity="{}"/>'
+    return (
+        f'<filter id="softShadow" x="-30%" y="-30%"'
+        f' width="160%" height="160%">'
+        f'<feOffset dx="{LIGHT_DX}" dy="{LIGHT_DY}">{sun_anim}</feOffset>'
+        f'<feGaussianBlur stdDeviation="{SHADOW_BLUR}"/></filter>'
+        '<radialGradient id="fireflyGlow">'
+        '<stop offset="0" stop-color="#fffbd0"/>'
+        '<stop offset="0.25" stop-color="#f3ef7a" stop-opacity="0.9"/>'
+        '<stop offset="1" stop-color="#f3ef7a" stop-opacity="0"/>'
+        '</radialGradient>'
+        f'<pattern id="lawnStripes" width="{stripe * 2}" height="10"'
+        f' patternUnits="userSpaceOnUse" patternTransform="rotate(-8)">'
+        f'<rect width="{stripe}" height="10" fill="#fff" opacity="0.07"/>'
+        f'<rect x="{stripe}" width="{stripe}" height="10" fill="#000"'
+        f' opacity="0.05"/></pattern>'
+        f'<pattern id="lawnTufts" width="70" height="70"'
+        f' patternUnits="userSpaceOnUse">'
+        f'{_render_tufts("lawn-tufts", 70, 9)}</pattern>'
+        f'<pattern id="gravel" width="22" height="22"'
+        f' patternUnits="userSpaceOnUse">'
+        f'<rect width="22" height="22" fill="{PATH_COLOR}"/>'
+        + _seeded_marks(
+            'gravel',
+            22,
+            14,
+            ('#b8a484', '#7d6a50', '#cdbd9c', '#8f7b5e'),
+            (0.6, 1.6),
+        )
+        + '</pattern>'
+        '<pattern id="soilTexture" width="18" height="18"'
+        ' patternUnits="userSpaceOnUse">'
+        + _seeded_marks(
+            'soil',
+            18,
+            10,
+            ('#2e1d12', '#8a6448', '#3d2819'),
+            (0.5, 1.4),
+        )
+        + '</pattern>'
+        '<linearGradient id="shadeDown" x1="0" y1="0" x2="0" y2="1">'
+        + gradient_stop.format(0, '#000', 0.45)
+        + gradient_stop.format(1, '#000', 0)
+        + '</linearGradient>'
+        '<linearGradient id="shadeRight" x1="0" y1="0" x2="1" y2="0">'
+        + gradient_stop.format(0, '#000', 0.35)
+        + gradient_stop.format(1, '#000', 0)
+        + '</linearGradient>'
+        '<radialGradient id="stoneShade" cx="0.35" cy="0.3" r="0.8">'
+        + gradient_stop.format(0, _shade(STONE_COLOR, 0.35), 1)
+        + gradient_stop.format(1, _shade(STONE_COLOR, -0.2), 1)
+        + '</radialGradient>'
+        '<linearGradient id="metal" x1="0" y1="0" x2="1" y2="1">'
+        + gradient_stop.format(0, '#e4e9ec', 1)
+        + gradient_stop.format(1, TOOL_METAL, 1)
+        + '</linearGradient>'
+        '<radialGradient id="waterFill" cx="0.35" cy="0.3" r="0.8">'
+        + gradient_stop.format(0, '#9fd3f0', 1)
+        + gradient_stop.format(0.5, BARREL_WATER, 1)
+        + gradient_stop.format(1, _shade(BARREL_WATER, -0.45), 1)
+        + '</radialGradient>'
+        '<radialGradient id="dialStone" cx="0.38" cy="0.32" r="0.8">'
+        + gradient_stop.format(0, _shade(SUNDIAL_STONE, 0.3), 1)
+        + gradient_stop.format(1, _shade(SUNDIAL_STONE, -0.18), 1)
+        + '</radialGradient>'
+        '<radialGradient id="vignette" cx="0.5" cy="0.45" r="0.75">'
+        + gradient_stop.format(0.6, '#000', 0)
+        + gradient_stop.format(1, '#000', 0.28)
+        + '</radialGradient>'
+    )
+
+
+def _render_plot_defs(sun_anim: str = '') -> str:
+    return f'<defs>{_render_paint_defs(sun_anim)}{_render_plant_defs()}</defs>'
 
 
 # ── Legend ─────────────────────────────────────────────────────
 
 
-def _render_plot_legend() -> str:
-    ly = LEGEND_BAND_Y
+def _legend_plant(family: str, x: float, y: float) -> str:
+    color = _plant_color(family, None, 1.0)
+    return (
+        f'<use href="#plant-{family}-still" x="{x - 10:.1f}"'
+        f' y="{y - 10:.1f}" width="20" height="20" color="{color}"/>'
+    )
+
+
+def _legend_bed(x: float, y: float) -> str:
+    from ccgarden.data import RepoBranch as Branch
+
+    bed = BedRect('', x - 11, y - 8, 22, 16, Branch('', 0, 0, 0, 0, 0, 0))
+    return _render_bed_body(bed, SOIL_COLOR, shadow=False)
+
+
+def _legend_flower(x: float, y: float) -> str:
+    from ccgarden.data import SkillFruit as Fruit
+
+    return _render_flower(Fruit('legend', 1), x, y, 1)
+
+
+def _legend_tool(x: float, y: float) -> str:
+    return (
+        f'<line x1="{x}" y1="{y - 10}" x2="{x}" y2="{y + 1}"'
+        f' stroke="{TOOL_HANDLE}" stroke-width="2.4"'
+        f' stroke-linecap="round"/>' + _tool_head('spade', x, y + 1)
+    )
+
+
+def _legend_barrel(x: float, y: float) -> str:
+    return (
+        f'<circle cx="{x}" cy="{y}" r="9" fill="{BARREL_WOOD}"'
+        f' stroke="{BARREL_BAND}" stroke-width="1.5"/>'
+        f'<circle cx="{x + 0.8}" cy="{y + 1}" r="5.5"'
+        f' fill="url(#waterFill)"/>'
+    )
+
+
+def _legend_sundial(x: float, y: float) -> str:
+    return (
+        f'<circle cx="{x}" cy="{y}" r="9.5" fill="url(#dialStone)"'
+        f' stroke="{_shade(SUNDIAL_STONE, -0.35)}"/>'
+        f'<path d="M{x},{y} l-3,-8 a8.5,8.5 0 0 1 6,0z"'
+        f' fill="{SUNDIAL_NIGHT}"/>'
+        f'<path d="M{x},{y} l3,8 a8.5,8.5 0 0 1 -6,0z"'
+        f' fill="{SUNDIAL_DAY}"/>'
+    )
+
+
+def _legend_butterfly(x: float, y: float) -> str:
+    c = FLOWER_COLORS[1]
+    wings = ''.join(
+        f'<ellipse cx="{x + dx}" cy="{y + dy}" rx="{rx}" ry="{ry}"'
+        f' fill="{c}"/>'
+        for dx, dy, rx, ry in (
+            (-3.5, -2, 3.6, 3),
+            (3.5, -2, 3.6, 3),
+            (-2.6, 2.5, 2.4, 2),
+            (2.6, 2.5, 2.4, 2),
+        )
+    )
+    return (
+        f'{wings}<line x1="{x}" y1="{y - 4}" x2="{x}" y2="{y + 4}"'
+        f' stroke="#2a1d10" stroke-width="1.2"/>'
+    )
+
+
+def _legend_firefly(x: float, y: float) -> str:
+    return (
+        f'<circle cx="{x}" cy="{y}" r="10" fill="{NIGHT_VEIL_COLOR}"/>'
+        f'<circle cx="{x - 3}" cy="{y - 2}" r="5"'
+        f' fill="url(#fireflyGlow)"/>'
+        f'<circle cx="{x + 4}" cy="{y + 3}" r="4"'
+        f' fill="url(#fireflyGlow)"/>'
+    )
+
+
+def _legend_rain(x: float, y: float) -> str:
+    return (
+        f'<circle cx="{x - 3}" cy="{y + 2}" r="6" fill="none"'
+        f' stroke="#6f93b6" stroke-width="1"/>'
+        f'<use href="#plant-weed" x="{x - 2}" y="{y - 10}" width="14"'
+        f' height="14"/>'
+    )
+
+
+def _legend_icon(kind: str, x: float, y: float) -> str:
+    """A key icon centred on (x, y), drawn by the plot's own renderers."""
+    if kind.startswith('plant-'):
+        return _legend_plant(kind.removeprefix('plant-'), x, y)
+    icons = {
+        'bed': _legend_bed,
+        'flower': _legend_flower,
+        'tool': _legend_tool,
+        'barrel': _legend_barrel,
+        'sundial': _legend_sundial,
+        'butterfly': _legend_butterfly,
+        'firefly': _legend_firefly,
+        'rain': _legend_rain,
+    }
+    return icons[kind](x, y)
+
+
+LEGEND_ENTRIES = (
+    ('bed', 'Bed', 'a repo; area = lines + sessions'),
+    ('plant-haiku', 'Herb', 'Haiku sessions'),
+    ('plant-sonnet', 'Lettuce', 'Sonnet sessions'),
+    ('plant-opus', 'Cabbage', 'Opus; bigger = more effort'),
+    ('flower', 'Flower', 'a skill; bigger = more calls'),
+    ('tool', 'Tools', 'busiest tools; longer = more'),
+    ('barrel', 'Rain barrel', 'all tokens; fuller = more'),
+    ('sundial', 'Sundial', 'prompts by hour; blue = night'),
+    ('butterfly', 'Butterflies', 'a dry, working streak'),
+    ('firefly', 'Fireflies', 'late-night prompting'),
+    ('rain', 'Rain, weeds', 'days away from the garden'),
+    ('plant-unknown', 'Sprout', 'other or unknown model'),
+)
+LEGEND_COLS = 4
+LEGEND_ROW_H = 36
+
+
+def _render_plot_legend(ly: float) -> str:
+    """The key, in a `.legend` group so every icon holds still."""
     lh = LEGEND_BAND_HEIGHT
     lpad = 16
     parts = [
+        '<g class="legend">',
         (
-            f'<rect x="0" y="{ly}" width="{PLOT_VIEWBOX_WIDTH}"'
+            f'<rect class="legend-bg" x="0" y="{ly}"'
+            f' width="{PLOT_VIEWBOX_WIDTH}"'
             f' height="{lh}" fill="#3f5620"/>'
         ),
         (
-            f'<rect x="{lpad}" y="{ly + 6}"'
+            f'<rect class="legend-inner" x="{lpad}" y="{ly + 6}"'
             f' width="{PLOT_VIEWBOX_WIDTH - 2 * lpad}"'
             f' height="{lh - 12}" rx="6"'
-            f' fill="#fbfbf3" opacity="0.88"/>'
+            f' fill="#fbfbf3" opacity="0.92"/>'
         ),
     ]
-    entries = [
-        ('Beds', 'repos (area = lines added)'),
-        ('Plants', 'model sessions (shape = model)'),
-        ('Weeds', 'dormancy (low vitality)'),
-        ('Flowers', 'skill usage'),
-        ('Sundial', 'prompt hours'),
-        ('Barrel', 'total tokens'),
-        ('Shed', 'tool calls'),
-    ]
-    n_cols = 3
-    col_w = (PLOT_VIEWBOX_WIDTH - 2 * lpad) / n_cols
-    for i, (label, desc) in enumerate(entries):
-        col = i % n_cols
-        row = i // n_cols
-        ex = lpad + 10 + col * col_w
-        ey = ly + 22 + row * 36
+    col_w = (PLOT_VIEWBOX_WIDTH - 2 * lpad) / LEGEND_COLS
+    for i, (kind, label, desc) in enumerate(LEGEND_ENTRIES):
+        col = i % LEGEND_COLS
+        row = i // LEGEND_COLS
+        ix = lpad + 22 + col * col_w
+        iy = ly + 29 + row * LEGEND_ROW_H
+        parts.append(_legend_icon(kind, ix, iy))
         parts.append(
-            f'<text x="{ex}" y="{ey}"'
+            f'<text class="legend-label" x="{ix + 20:.1f}" y="{iy - 2:.1f}"'
             f' font-family="Georgia, serif" font-size="10"'
             f' font-weight="bold" fill="#333">'
             f'{_escape_xml(label)}</text>'
-        )
-        parts.append(
-            f'<text x="{ex}" y="{ey + 13}"'
+            f'<text class="legend-desc" x="{ix + 20:.1f}" y="{iy + 10:.1f}"'
             f' font-family="Georgia, serif" font-size="8"'
-            f' fill="#666">'
-            f'{_escape_xml(desc)}</text>'
+            f' fill="#666">{_escape_xml(desc)}</text>'
         )
+    parts.append('</g><!--/legend-->')
     return ''.join(parts)
 
 
@@ -928,7 +2150,7 @@ TOOLTIP_FONT_SIZE = 11.0
 TOOLTIP_HEIGHT = TOOLTIP_FONT_SIZE + TOOLTIP_PAD * 2
 
 
-def _render_plot_tap_tooltip() -> str:
+def _render_plot_tap_tooltip(total_h: int) -> str:
     box = (
         f'<rect id="plot-tooltip-box" x="0" y="0" width="10"'
         f' height="{TOOLTIP_HEIGHT:.1f}" rx="5"'
@@ -957,7 +2179,7 @@ def _render_plot_tap_tooltip() -> str:
         f'  var pad={TOOLTIP_PAD:.1f};\n'
         f'  var bh={TOOLTIP_HEIGHT:.1f};\n'
         f'  var vw={PLOT_VIEWBOX_WIDTH};\n'
-        f'  var vh={LEGEND_BAND_Y + LEGEND_BAND_HEIGHT};\n'
+        f'  var vh={total_h};\n'
         '  function findTooltip(n){\n'
         '    while(n&&n!==svg){\n'
         '      var c=n.childNodes||[];\n'
@@ -1017,28 +2239,522 @@ def _render_plot_tap_tooltip() -> str:
 
 def render_plot_svg(garden: GardenData) -> str:
     beds = _layout_beds(garden.branches)
-
-    total_h = LEGEND_BAND_Y + LEGEND_BAND_HEIGHT
+    layout = _plot_layout(len(garden.skills))
+    total_h = layout.total_h
     body = (
-        _render_background(garden.vitality)
+        _render_background(garden.vitality, total_h, layout.legend_y)
         + _render_paths(beds)
         + _render_fence()
         + _render_beds(beds, garden.branches, garden.vitality)
         + _render_shed(garden.tools)
         + _render_sundial(garden.hour_counts)
         + _render_barrel(garden.total_tokens)
+        + _render_signboard(garden)
         + _render_border_flowers(garden.skills)
-        + _render_plot_rain(garden.vitality)
-        + _render_plot_night(garden.nightness)
-        + _render_plot_legend()
-        + _render_plot_tap_tooltip()
+        + (
+            _render_butterflies(len(garden.skills), '1')
+            if _rain_opacity(garden.vitality) < OPACITY_EPSILON
+            else ''
+        )
+        + _render_plot_rain(garden.vitality, layout.legend_y)
+        + _render_plot_night(garden.nightness, layout.legend_y)
+        + _render_plot_legend(layout.legend_y)
+        + _render_plot_tap_tooltip(total_h)
     )
 
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg"'
         f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'
         f' width="{PLOT_VIEWBOX_WIDTH}" height="{total_h}">'
+        f'{_render_plot_style(len(garden.skills), layout.legend_y)}'
         f'{_render_plot_defs()}'
         f'{body}'
         f'</svg>'
     )
+
+
+# ── Timeline helpers ──────────────────────────────────────────
+
+
+def _branch_at_day(
+    days: list[RepoBranchDay],
+    repo: str,
+    day_idx: int,
+    *,
+    model_effort_counts: dict[str, int] | None = None,
+) -> RepoBranch:
+    from ccgarden.data import RepoBranch as Branch
+
+    d = days[day_idx]
+    return Branch(
+        repo=repo,
+        sessions=d.sessions,
+        lines_added=d.lines_added,
+        lines_removed=d.lines_removed,
+        output_tokens=d.output_tokens,
+        input_tokens=d.input_tokens,
+        cost=d.cost,
+        prompts=d.prompts,
+        cache_read_tokens=d.cache_read_tokens,
+        cache_write_tokens=d.cache_write_tokens,
+        model_effort_counts=model_effort_counts or {},
+    )
+
+
+def _final_branches(
+    timeline: GardenTimeline,
+    repo_model_efforts: dict[str, dict[str, int]] | None = None,
+) -> list[RepoBranch]:
+    last = len(timeline.days) - 1
+    efforts = repo_model_efforts or {}
+    return [
+        _branch_at_day(
+            timeline.branch_days[repo],
+            repo,
+            last,
+            model_effort_counts=efforts.get(repo),
+        )
+        for repo in timeline.branch_order
+        if repo in timeline.branch_days
+    ]
+
+
+def _bed_first_day(
+    timeline: GardenTimeline,
+    repo: str,
+) -> int:
+    days = timeline.branch_days.get(repo, [])
+    for i, d in enumerate(days):
+        if d.sessions > 0:
+            return i
+    return 0
+
+
+def _render_timeline_beds(
+    beds: list[BedRect],
+    timeline: GardenTimeline,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    n = len(timeline.days)
+    max_sessions = max((b.branch.sessions for b in beds), default=1)
+    parts: list[str] = []
+
+    for bed in beds:
+        repo = bed.repo
+        days = timeline.branch_days.get(repo, [])
+        if not days:
+            continue
+
+        first = _bed_first_day(timeline, repo)
+        opacity_vals = ['0' if i < first else '1' for i in range(n)]
+        opacity_anim = _animate_tag(
+            'opacity',
+            opacity_vals,
+            key_times,
+            dur,
+        )
+
+        vit_vals = timeline.daily_vitality or [1.0] * n
+        soil_vals = [
+            _blend_hex(SOIL_DORMANT, SOIL_COLOR, vit_vals[i]) for i in range(n)
+        ]
+        soil_anim = _animate_tag(
+            'fill',
+            soil_vals,
+            key_times,
+            dur,
+            smooth=True,
+        )
+
+        bed_soil = _render_bed_body(bed, soil_vals[-1], soil_anim)
+
+        plant_parts = _render_timeline_bed_plants(
+            bed,
+            days,
+            vit_vals,
+            max_sessions=max_sessions,
+            key_times=key_times,
+            dur=dur,
+        )
+
+        tt = _title(_bed_tooltip(bed.branch))
+        parts.append(
+            f'<g class="bed" opacity="0">{tt}'
+            f'{opacity_anim}'
+            f'{bed_soil}'
+            f'{plant_parts}'
+            f'{_render_bed_label(bed)}'
+            f'</g>'
+        )
+    return ''.join(parts)
+
+
+def _render_timeline_bed_plants(
+    bed: BedRect,
+    days: list[RepoBranchDay],
+    vitality: list[float],
+    *,
+    max_sessions: int,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    """The static bed's own plants, each sprouting on its share of days.
+
+    Laid out from the final totals, so the replay ends on exactly the
+    bed ``render_plot_svg`` draws; plants come up in planting order as
+    the repo's cumulative sessions pass each one's share.
+    """
+    final_sessions = days[-1].sessions
+    plants = _plant_layout(bed, max_sessions)
+    if final_sessions <= 0 or not plants:
+        return ''
+    parts: list[str] = []
+    for i, plant in enumerate(plants):
+        threshold = i / len(plants)
+        opacity_vals = [
+            '1' if d.sessions / final_sessions > threshold else '0'
+            for d in days
+        ]
+        color = _plant_color(
+            plant.spec.model_family, plant.spec.effort, vitality[-1]
+        )
+        parts.append(
+            _plant_use(
+                plant,
+                color,
+                _animate_tag('opacity', opacity_vals, key_times, dur),
+            ).replace('<use ', '<use opacity="0" ', 1)
+        )
+    return ''.join(parts)
+
+
+def _render_timeline_barrel(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    n = len(timeline.days)
+    tokens = timeline.cumulative_total_tokens or [0] * n
+    discs = [_barrel_water(t) for t in tokens]
+    anims = ''.join(
+        _animate_tag(
+            attr, [f'{getattr(d, attr):.1f}' for d in discs], key_times, dur
+        )
+        for attr in ('cx', 'cy', 'r')
+    )
+    return _render_barrel_shell(tokens[-1], _render_water(discs[0], anims))
+
+
+def _render_timeline_grass(
+    vitality: list[float],
+    total_h: int,
+    garden_h: float,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    fill_vals = [_blend_hex(GRASS_DORMANT, GRASS_COLOR, v) for v in vitality]
+    anim = _animate_tag('fill', fill_vals, key_times, dur, smooth=True)
+    return _render_lawn(fill_vals[0], total_h, garden_h, anim)
+
+
+def _render_timeline_night(
+    nightness: list[float],
+    garden_h: float,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    levels = [_saturated_nightness(n) for n in nightness]
+    veil = [f'{v * NIGHT_VEIL_MAX:.3f}' for v in levels]
+    glow = [f'{v:.3f}' for v in levels]
+    out = _render_night_veil(
+        garden_h,
+        veil[0],
+        _animate_tag('opacity', veil, key_times, dur, smooth=True),
+    )
+    if max(levels) >= OPACITY_EPSILON:
+        out += _render_fireflies(
+            glow[0], _animate_tag('opacity', glow, key_times, dur, smooth=True)
+        )
+    return out
+
+
+def _render_timeline_rain(
+    vitality: list[float],
+    garden_h: float,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    vals = [f'{_rain_opacity(v):.2f}' for v in vitality]
+    anim = _animate_tag('opacity', vals, key_times, dur, smooth=True)
+    return _render_rain_layer(garden_h, vals[0], anim)
+
+
+def _render_date_label(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    """The signboard, with a script that walks its date line day by day.
+
+    SMIL can't animate text content, so one script reads the document
+    clock and swaps the label -- one element instead of one per day.
+    """
+    days = [_format_day(d) for d in timeline.days]
+    counts = timeline.cumulative_sessions or [0] * len(days)
+    days_json = ','.join(f'"{_escape_xml(d)}"' for d in days)
+    counts_json = ','.join(f'"{c:,} sessions"' for c in counts)
+    kt_json = ','.join(f'{t:.4f}' for t in key_times)
+    script = (
+        '<script><![CDATA[\n'
+        '(function(){\n'
+        f'  var ds=[{days_json}];\n'
+        f'  var cs=[{counts_json}];\n'
+        f'  var kt=[{kt_json}];\n'
+        f'  var dur={dur:.3f};\n'
+        '  var el=document.getElementById("plot-date");\n'
+        '  var ct=document.getElementById("plot-sessions");\n'
+        '  if(!el)return;\n'
+        '  var svg=el.ownerSVGElement;\n'
+        '  function upd(){\n'
+        '    var t=svg.getCurrentTime()/dur;\n'
+        '    if(t<0)t=0;if(t>1)t=1;\n'
+        '    var idx=0;\n'
+        '    for(var i=1;i<kt.length;i++){\n'
+        '      if(t>=kt[i])idx=i;\n'
+        '    }\n'
+        '    el.textContent=ds[idx];ct.textContent=cs[idx];\n'
+        '  }\n'
+        '  svg.addEventListener("ccp-seek",upd);\n'
+        '  setInterval(upd,200);\n'
+        '})();\n'
+        ']]></script>'
+    )
+    return _signboard(counts[-1], days[0], live=True) + script
+
+
+def _render_plot_scrubber(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    dur: float,
+    top: float,
+    *,
+    start_paused_at_end: bool = False,
+) -> str:
+    """Play/pause and a day slider that seek the replay's own SMIL clock.
+
+    Every animation shares one ``key_times``/``dur`` pair, so a single
+    document time fixes every frame: seeking is ``setCurrentTime``, and
+    the signboard's date script follows on its own. Hidden until the
+    first playthrough ends; ``start_paused_at_end`` (poster mode) skips
+    that playthrough and opens on the finished garden.
+    """
+    last = len(timeline.days) - 1
+    kt_json = ','.join(f'{t:.4f}' for t in key_times)
+    x = 16
+    w = PLOT_VIEWBOX_WIDTH - 32
+    panel = (
+        f'<foreignObject id="plot-scrubber" x="{x}" y="{top + 4:.1f}"'
+        f' width="{w}" height="{PLOT_SCRUBBER_H - 8}"'
+        f' style="opacity:0;pointer-events:none;transition:opacity 0.6s">'
+        '<div xmlns="http://www.w3.org/1999/xhtml" style="height:100%;'
+        'box-sizing:border-box;display:flex;align-items:center;gap:10px;'
+        'padding:0 12px;border-radius:8px;background:#fbfbf3;'
+        'border:1px solid #3a2412;font-family:Georgia,serif;'
+        'color:#2f3b23">'
+        '<button id="plot-play" type="button" style="font:inherit;'
+        'border:1px solid #7a5a36;background:#efe3c4;border-radius:5px;'
+        'padding:2px 10px;cursor:pointer">Replay</button>'
+        '<input id="plot-scrub-input" type="range" min="0"'
+        f' max="{last}" value="{last}" step="1" style="flex:1"/>'
+        '</div></foreignObject>'
+    )
+    startup = (
+        '  svg.pauseAnimations();paused=true;seek(kt.length-1);reveal();\n'
+        if start_paused_at_end
+        else '  window.setTimeout(reveal,dur*1000+150);\n'
+    )
+    script = (
+        '<script><![CDATA[\n'
+        '(function(){\n'
+        '  var box=document.getElementById("plot-scrubber");\n'
+        '  var svg=box.ownerSVGElement;\n'
+        '  var input=document.getElementById("plot-scrub-input");\n'
+        '  var play=document.getElementById("plot-play");\n'
+        f'  var kt=[{kt_json}];\n'
+        f'  var dur={dur:.3f};\n'
+        '  var paused=false;\n'
+        '  function reveal(){\n'
+        '    box.style.opacity="1";box.style.pointerEvents="auto";\n'
+        '  }\n'
+        '  function seek(i){\n'
+        '    if(!paused){svg.pauseAnimations();paused=true;}\n'
+        '    svg.setCurrentTime(kt[i]*dur);input.value=i;\n'
+        '    svg.dispatchEvent(new Event("ccp-seek"));\n'
+        '  }\n'
+        '  input.addEventListener("input",function(){\n'
+        '    seek(parseInt(input.value,10));\n'
+        '  });\n'
+        '  play.addEventListener("click",function(){\n'
+        '    svg.setCurrentTime(0);svg.unpauseAnimations();paused=false;\n'
+        '    window.setTimeout(function(){\n'
+        '      if(!paused){seek(kt.length-1);}\n'
+        '    },dur*1000+50);\n'
+        '  });\n'
+        f'{startup}'
+        '})();\n'
+        ']]></script>'
+    )
+    return panel + script
+
+
+def _timeline_final_skills(timeline: GardenTimeline) -> list[SkillFruit]:
+    from ccgarden.data import SkillFruit as Fruit
+
+    return [
+        Fruit(
+            skill=s,
+            count=timeline.skill_days[s][-1].count
+            if timeline.skill_days.get(s)
+            else 0,
+        )
+        for s in timeline.skill_order
+    ]
+
+
+def _render_timeline_flowers(
+    timeline: GardenTimeline,
+    key_times: list[float],
+    dur: float,
+) -> str:
+    skills = _timeline_final_skills(timeline)
+    if not skills:
+        return ''
+    peak = max(s.count for s in skills)
+    parts = [_render_flower_bed(len(skills))]
+    for skill, (x, y) in zip(
+        skills, _flower_positions(len(skills)), strict=True
+    ):
+        days = timeline.skill_days.get(skill.skill, [])
+        vals = ['1' if d.count > 0 else '0' for d in days]
+        vals += ['0'] * (len(timeline.days) - len(vals))
+        parts.append(
+            _render_flower(
+                skill,
+                x,
+                y,
+                peak,
+                _animate_tag('opacity', vals, key_times, dur),
+            )
+        )
+    return ''.join(parts)
+
+
+# ── Timeline entry point ──────────────────────────────────────
+
+
+def render_plot_timeline_svg(
+    timeline: GardenTimeline,
+    *,
+    repo_model_efforts: dict[str, dict[str, int]] | None = None,
+    start_paused_at_end: bool = False,
+) -> str:
+    n = len(timeline.days)
+    if n == 0:
+        return '<svg xmlns="http://www.w3.org/2000/svg"/>'
+
+    key_times = _weighted_key_times(
+        timeline.daily_sessions,
+        timeline.daily_nightness or None,
+        timeline.daily_vitality or None,
+    )
+    dur = _timeline_duration(
+        1.0
+        + sum(
+            _frame_weights(
+                timeline.daily_sessions or [1] * n,
+                timeline.daily_nightness or None,
+                timeline.daily_vitality or None,
+            )
+        )
+    )
+    vitality = timeline.daily_vitality or [1.0] * n
+    nightness = timeline.daily_nightness or [0.0] * n
+
+    branches = _final_branches(timeline, repo_model_efforts)
+    beds = _layout_beds(branches)
+
+    layout = _plot_layout(len(timeline.skill_order))
+    total_h = layout.total_h + PLOT_SCRUBBER_H
+    body = (
+        _render_timeline_grass(
+            vitality, total_h, layout.legend_y, key_times, dur
+        )
+        + _render_paths(beds)
+        + _render_fence()
+        + _render_timeline_beds(beds, timeline, key_times, dur)
+        + _render_shed(
+            [_tool_bush_final(timeline, t) for t in timeline.tool_order]
+        )
+        + _render_sundial(timeline.hour_counts)
+        + _render_timeline_barrel(timeline, key_times, dur)
+        + _render_timeline_flowers(timeline, key_times, dur)
+        + _render_timeline_butterflies(timeline, vitality, key_times, dur)
+        + _render_timeline_rain(vitality, layout.legend_y, key_times, dur)
+        + _render_timeline_night(nightness, layout.legend_y, key_times, dur)
+        + _render_date_label(timeline, key_times, dur)
+        + _render_plot_legend(layout.legend_y)
+        + _render_plot_scrubber(
+            timeline,
+            key_times,
+            dur,
+            layout.total_h,
+            start_paused_at_end=start_paused_at_end,
+        )
+        + _render_plot_tap_tooltip(total_h)
+    )
+
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg"'
+        f' viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total_h}"'
+        f' width="{PLOT_VIEWBOX_WIDTH}" height="{total_h}">'
+        f'{_render_plot_style(len(timeline.skill_order), layout.legend_y)}'
+        f'{_render_plot_defs(_sun_sweep(key_times, dur))}'
+        f'{body}'
+        f'</svg>'
+    )
+
+
+def _sun_sweep(key_times: list[float], dur: float) -> str:
+    dx = [
+        f'{SUN_SWEEP_START_DX + (LIGHT_DX - SUN_SWEEP_START_DX) * t:.2f}'
+        for t in key_times
+    ]
+    return _animate_tag('dx', dx, key_times, dur, collapse=False)
+
+
+def _render_timeline_butterflies(
+    timeline: GardenTimeline,
+    vitality: list[float],
+    key_times: list[float],
+    dur: float,
+) -> str:
+    vals = [
+        '1' if _rain_opacity(v) < OPACITY_EPSILON else '0' for v in vitality
+    ]
+    return _render_butterflies(
+        len(timeline.skill_order),
+        vals[0],
+        _animate_tag('opacity', vals, key_times, dur, smooth=True),
+    )
+
+
+def _tool_bush_final(
+    timeline: GardenTimeline,
+    tool: str,
+) -> ToolBush:
+    from ccgarden.data import ToolBush as ToolEntry
+
+    days = timeline.tool_days.get(tool, [])
+    count = days[-1].count if days else 0
+    return ToolEntry(tool=tool, count=count)

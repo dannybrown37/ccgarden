@@ -199,3 +199,24 @@ def test_version_flag_exits_cleanly(capsys):
 
     assert exit_info.value.code == 0
     assert 'ccgarden' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ('argv', 'expected'), [([], False), (['--poster'], True)]
+)
+def test_plot_poster_passes_start_paused_at_end(
+    calls,  # noqa: ARG001
+    monkeypatch,
+    argv,
+    expected,
+):
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(ccgarden, 'load_repo_model_efforts', lambda *_a: {})
+    monkeypatch.setattr(
+        ccgarden,
+        'render_plot_timeline_svg',
+        lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
+    )
+    ccgarden.main(['--no-open', '--plot', *argv])
+
+    assert captured.get('start_paused_at_end') is expected

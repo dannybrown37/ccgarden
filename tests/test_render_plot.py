@@ -2,25 +2,57 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import replace
+import re
+from itertools import pairwise
+import xml.etree.ElementTree as ET
+
 import pytest
 
 from ccgarden.data import (
     GardenData,
+    GardenTimeline,
     RepoBranch,
+    RepoBranchDay,
     SkillFruit,
+    SkillUsageDay,
     ToolBush,
+    ToolUsageDay,
 )
 from ccgarden.render_plot import (
+    BedRect,
+    BED_MIN_DIM,
+    BED_ZONE_H,
+    BED_ZONE_W,
+    BED_ZONE_X,
+    BED_ZONE_Y,
+    FENCE_H,
+    FENCE_Y,
+    LEGEND_BAND_HEIGHT,
+    PLOT_VIEWBOX_WIDTH,
     _bed_area_metric,
     _bed_tooltip,
+    _barrel_water,
+    _bench_tools,
+    _feature_boxes,
+    _flower_positions,
+    _frame_planks,
     _furrow_count,
     _layout_beds,
     _model_family,
+    _plant_layout,
     _plant_specs,
+    _render_bed_label,
+    _render_signboard,
+    _sundial_wedges,
+    _soil_rect,
+    _plot_layout,
     _point_in_any_bed,
     _squarify,
     _weed_count,
     render_plot_svg,
+    render_plot_timeline_svg,
 )
 
 
@@ -109,6 +141,471 @@ class TestLayoutBeds:
 
     def test_empty_branches(self):
         assert _layout_beds([]) == []
+
+
+def _skewed_branches(n_tiny: int) -> list[RepoBranch]:
+    return [
+        _branch('huge', lines_added=90_000, sessions=300),
+        *(
+            _branch(f'tiny-{i}', lines_added=5, sessions=1)
+            for i in range(n_tiny)
+        ),
+    ]
+
+
+def _even_branches(n: int) -> list[RepoBranch]:
+    return [
+        _branch(f'r{i}', lines_added=1000 * (i + 1), sessions=10 + i)
+        for i in range(n)
+    ]
+
+
+LAYOUT_CASES = [
+    pytest.param(_skewed_branches, 3, id='one-huge-three-tiny'),
+    pytest.param(_skewed_branches, 14, id='one-huge-fourteen-tiny'),
+    pytest.param(_even_branches, 15, id='fifteen-graded'),
+    pytest.param(_even_branches, 40, id='forty-graded'),
+]
+
+
+class TestLayoutContainment:
+    @pytest.mark.parametrize(('build', 'n'), LAYOUT_CASES)
+    def test_every_bed_inside_zone(self, build, n):
+        eps = 0.01
+        for bed in _layout_beds(build(n)):
+            assert bed.x >= BED_ZONE_X - eps
+            assert bed.y >= BED_ZONE_Y - eps
+            assert bed.x + bed.w <= BED_ZONE_X + BED_ZONE_W + eps
+            assert bed.y + bed.h <= BED_ZONE_Y + BED_ZONE_H + eps
+
+    @pytest.mark.parametrize(('build', 'n'), LAYOUT_CASES)
+    def test_beds_never_overlap(self, build, n):
+        beds = _layout_beds(build(n))
+        for i, a in enumerate(beds):
+            for b in beds[i + 1 :]:
+                ox = min(a.x + a.w, b.x + b.w) - max(a.x, b.x)
+                oy = min(a.y + a.h, b.y + b.h) - max(a.y, b.y)
+                assert ox <= 0 or oy <= 0, (a.repo, b.repo)
+
+    @pytest.mark.parametrize('n_tiny', [3, 14])
+    def test_tiny_repo_still_gets_a_usable_bed(self, n_tiny):
+        beds = _layout_beds(_skewed_branches(n_tiny))
+        for bed in beds:
+            assert bed.w * bed.h >= BED_MIN_DIM**2 * 0.8, bed.repo
+
+
+class TestFlowerBorder:
+    @pytest.mark.parametrize('n', [1, 10, 42, 90])
+    def test_flowers_sit_below_fence_and_above_legend(self, n):
+        layout = _plot_layout(n)
+        positions = _flower_positions(n)
+        assert len(positions) == n
+        for x, y in positions:
+            assert y > FENCE_Y + FENCE_H
+            assert y < layout.legend_y
+            assert 0 < x < PLOT_VIEWBOX_WIDTH
+
+    def test_no_flowers_means_no_border(self):
+        assert _flower_positions(0) == []
+
+    def test_many_flowers_wrap_to_more_rows(self):
+        rows = {round(y) for _, y in _flower_positions(90)}
+        assert len(rows) > 1
+
+
+class TestViewbox:
+    @pytest.mark.parametrize('n_skills', [0, 5, 60])
+    def test_size_matches_viewbox(self, n_skills):
+        skills = [SkillFruit(f's{i}', i + 1) for i in range(n_skills)]
+        svg = render_plot_svg(_garden(skills=skills))
+        total = _plot_layout(n_skills).total_h
+        assert f'viewBox="0 0 {PLOT_VIEWBOX_WIDTH} {total}"' in svg
+        assert f'height="{total}"' in svg
+
+
+# ── Depth and light ─────────────────────────────────────────
+
+
+def _luma(hex_color: str) -> float:
+    r, g, b = (int(hex_color[i : i + 2], 16) for i in (1, 3, 5))
+    return 0.299 * r + 0.587 * g + 0.114 * b
+
+
+class TestDepthAndLight:
+    @pytest.mark.parametrize(
+        'pattern', ['lawnStripes', 'gravel', 'soilTexture', 'softShadow']
+    )
+    def test_shared_paint_defined_and_used(self, pattern):
+        svg = render_plot_svg(_garden())
+        assert f'id="{pattern}"' in svg
+        assert f'url(#{pattern})' in svg
+
+    def test_one_shadow_per_bed(self):
+        branches = _even_branches(6)
+        svg = render_plot_svg(_garden(branches=branches))
+        assert svg.count('class="bed-shadow"') == len(branches)
+
+    def test_frame_lit_from_top_left(self):
+        bed = _layout_beds([_branch()])[0]
+        planks = {side: color for side, _, color in _frame_planks(bed)}
+        assert _luma(planks['top']) > _luma(planks['bottom'])
+        assert _luma(planks['left']) > _luma(planks['right'])
+
+    def test_planks_stay_inside_bed(self):
+        bed = _layout_beds([_branch()])[0]
+        for _, rect, _ in _frame_planks(bed):
+            x, y, w, h = rect
+            assert x >= bed.x
+            assert y >= bed.y
+            assert x + w <= bed.x + bed.w + 0.01
+            assert y + h <= bed.y + bed.h + 0.01
+
+    def test_timeline_shares_the_same_bed_look(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'url(#soilTexture)' in svg
+        assert 'class="bed-shadow"' in svg
+
+
+# ── Plants ─────────────────────────────────────────────────
+
+
+def _bed(repo='r', x=100.0, y=100.0, w=200.0, h=160.0, **branch_kw) -> BedRect:
+    return BedRect(repo, x, y, w, h, _branch(repo, **branch_kw))
+
+
+MIXED = {'claude-sonnet-5 (high)': 60, 'claude-opus-5 (max)': 40}
+
+
+class TestPlantLayout:
+    def test_plants_inside_soil(self):
+        bed = _bed(sessions=50, model_effort_counts=MIXED)
+        sx, sy, sw, sh = _soil_rect(bed)
+        plants = _plant_layout(bed, 50)
+        assert plants
+        for p in plants:
+            assert sx <= p.x <= sx + sw
+            assert sy <= p.y <= sy + sh
+
+    def test_busier_bed_is_lusher(self):
+        quiet = _bed(sessions=5, model_effort_counts=MIXED)
+        busy = _bed(sessions=50, model_effort_counts=MIXED)
+        assert len(_plant_layout(busy, 50)) > len(_plant_layout(quiet, 50))
+
+    def test_plants_spread_over_the_bed(self):
+        bed = _bed(sessions=10, model_effort_counts=MIXED)
+        _, _, _, sh = _soil_rect(bed)
+        ys = [p.y for p in _plant_layout(bed, 50)]
+        assert max(ys) - min(ys) >= 0.5 * sh
+
+    def test_species_planted_in_patches(self):
+        bed = _bed(sessions=50, model_effort_counts=MIXED)
+        families = [p.spec.model_family for p in _plant_layout(bed, 50)]
+        changes = sum(a != b for a, b in pairwise(families))
+        assert changes == len(set(families)) - 1
+
+    @pytest.mark.parametrize(
+        ('small', 'big'),
+        [('low', 'medium'), ('medium', 'high'), ('high', 'max')],
+    )
+    def test_effort_grows_plants(self, small, big):
+        def size_for(effort: str) -> float:
+            bed = _bed(
+                sessions=20,
+                model_effort_counts={f'claude-sonnet-5 ({effort})': 1},
+            )
+            return _plant_layout(bed, 20)[0].size
+
+        assert size_for(big) > size_for(small)
+
+    def test_no_model_data_still_plants_something(self):
+        bed = _bed(sessions=20)
+        assert _plant_layout(bed, 20)
+
+    def test_deterministic(self):
+        bed = _bed(sessions=30, model_effort_counts=MIXED)
+        assert _plant_layout(bed, 30) == _plant_layout(bed, 30)
+
+
+class TestPlantSymbols:
+    @pytest.mark.parametrize('family', ['haiku', 'sonnet', 'opus', 'unknown'])
+    def test_symbol_has_shine_and_shadow(self, family):
+        svg = render_plot_svg(_garden())
+        start = svg.index(f'id="plant-{family}"')
+        symbol = svg[start : svg.index('</symbol>', start)]
+        assert 'url(#plantShine)' in symbol
+        assert 'class="plant-shadow"' in symbol
+
+
+class TestBedLabel:
+    def test_label_is_a_wooden_tag(self):
+        label = _render_bed_label(_bed('my-repo'))
+        assert 'class="bed-tag"' in label
+        assert 'my-repo' in label
+
+    def test_tall_thin_bed_turns_its_label(self):
+        label = _render_bed_label(_bed('a-long-name', w=30.0, h=200.0))
+        assert 'rotate(-90' in label
+
+    def test_wide_bed_keeps_label_flat(self):
+        label = _render_bed_label(_bed('short', w=200.0, h=100.0))
+        assert 'rotate(' not in label
+
+
+class TestTimelinePlants:
+    def test_timeline_uses_repo_model_efforts(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(
+            tl,
+            repo_model_efforts={'test-repo': {'claude-opus-5 (max)': 9}},
+        )
+        assert 'href="#plant-opus"' in svg
+        assert 'href="#plant-sonnet"' not in svg
+
+
+# ── Garden features ──────────────────────────────────────────
+
+
+class TestFeatureLayout:
+    def test_features_clear_of_each_other(self):
+        boxes = list(_feature_boxes().items())
+        for i, (na, (ax, ay, aw, ah)) in enumerate(boxes):
+            for nb, (bx, by, bw, bh) in boxes[i + 1 :]:
+                ox = min(ax + aw, bx + bw) - max(ax, bx)
+                oy = min(ay + ah, by + bh) - max(ay, by)
+                assert ox <= 0 or oy <= 0, (na, nb)
+
+    def test_features_above_fence_and_on_canvas(self):
+        for name, (x, y, w, h) in _feature_boxes().items():
+            assert x >= 0, name
+            assert y >= 0, name
+            assert x + w <= PLOT_VIEWBOX_WIDTH, name
+            assert y + h < FENCE_Y, name
+
+
+class TestToolBench:
+    def test_busier_tool_is_longer(self):
+        placed = _bench_tools([ToolBush('Read', 400), ToolBush('Edit', 40)])
+        by_name = {p.tool.tool: p for p in placed}
+        assert by_name['Read'].length > by_name['Edit'].length
+
+    def test_bench_caps_tool_count(self):
+        tools = [ToolBush(f't{i}', i + 1) for i in range(30)]
+        placed = _bench_tools(tools)
+        assert 0 < len(placed) < len(tools)
+        assert placed[0].tool.count == 30
+
+    def test_tools_fit_on_bench(self):
+        box = _feature_boxes()['bench']
+        tools = [ToolBush(f't{i}', 10 * (i + 1)) for i in range(12)]
+        for p in _bench_tools(tools):
+            assert box[0] <= p.x <= box[0] + box[2]
+            assert box[1] <= p.y
+            assert p.y + p.length <= box[1] + box[3]
+
+    def test_tool_tooltip_in_svg(self):
+        svg = render_plot_svg(_garden(tools=[ToolBush('Bash', 77)]))
+        assert 'Bash: 77 calls' in svg
+
+    def test_no_tools_still_renders_bench(self):
+        assert 'class="bench"' in render_plot_svg(_garden(tools=[]))
+
+
+class TestSundial:
+    def test_peak_hour_has_longest_wedge(self):
+        wedges = _sundial_wedges({9: 2, 14: 10, 23: 4})
+        longest = max(wedges, key=lambda w: w.length)
+        assert longest.hour == 14
+
+    @pytest.mark.parametrize(('hour', 'night'), [(3, True), (14, False)])
+    def test_night_hours_tinted(self, hour, night):
+        wedge = _sundial_wedges({hour: 5})[0]
+        assert wedge.night is night
+
+    def test_empty_hours(self):
+        assert _sundial_wedges({}) == []
+
+
+class TestBarrel:
+    def test_more_tokens_more_water(self):
+        low = _barrel_water(100_000)
+        high = _barrel_water(4_000_000)
+        assert high.r > low.r
+
+    def test_water_stays_inside_barrel(self):
+        from ccgarden.render_plot import BARREL_CX, BARREL_CY, BARREL_R
+
+        for tokens in (0, 1, 10**6, 10**10):
+            w = _barrel_water(tokens)
+            gap = math.hypot(w.cx - BARREL_CX, w.cy - BARREL_CY)
+            assert gap + w.r < BARREL_R
+
+
+class TestSignboard:
+    def test_shows_totals(self):
+        garden = _garden(branches=_even_branches(3))
+        sign = _render_signboard(garden)
+        total = sum(b.sessions for b in garden.branches)
+        assert f'{total:,} sessions' in sign
+
+    def test_timeline_sign_carries_date_label(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'class="signboard"' in svg
+        assert 'id="plot-date"' in svg
+        assert 'id="plot-sessions"' in svg
+        assert '"3 sessions"' in svg
+
+
+# ── Life and motion ─────────────────────────────────────────
+
+
+class TestMotion:
+    @pytest.mark.parametrize(
+        'keyframes', ['ccp-sway', 'ccp-flap', 'ccp-ripple', 'ccp-glow']
+    )
+    def test_keyframes_defined(self, keyframes):
+        assert f'@keyframes {keyframes}' in render_plot_svg(_garden())
+
+    def test_reduced_motion_respected(self):
+        svg = render_plot_svg(_garden())
+        assert '@media (prefers-reduced-motion:reduce)' in svg
+
+    def test_legend_icons_hold_still(self):
+        assert '.legend [class*="ccp-"]{animation:none}' in render_plot_svg(
+            _garden()
+        )
+
+    @pytest.mark.parametrize('renderer', ['static', 'timeline'])
+    def test_wind_never_shares_a_transform(self, renderer):
+        svg = (
+            render_plot_svg(_garden(skills=[SkillFruit('s', 4)]))
+            if renderer == 'static'
+            else render_plot_timeline_svg(_timeline())
+        )
+        for tag in re.findall(r'<[^>]*class="[^"]*ccp-[^>]*>', svg):
+            assert ' transform=' not in tag, tag
+
+    def test_plants_sway_out_of_step(self):
+        garden = _garden(
+            branches=[_branch(sessions=40, model_effort_counts=MIXED)]
+        )
+        svg = render_plot_svg(garden)
+        variants = set(re.findall(r'href="#plant-\w+(-[bc])?"', svg))
+        assert len(variants) > 1
+
+
+class TestWeatherLife:
+    def test_butterflies_on_a_good_day(self):
+        garden = _garden(skills=[SkillFruit('s', 9)], vitality=1.0)
+        assert 'class="butterfly"' in render_plot_svg(garden)
+
+    def test_no_butterflies_in_a_lapse(self):
+        garden = _garden(skills=[SkillFruit('s', 9)], vitality=0.1)
+        assert 'class="butterfly"' not in render_plot_svg(garden)
+
+    @pytest.mark.parametrize(
+        ('nightness', 'present'), [(0.0, False), (0.8, True)]
+    )
+    def test_fireflies_at_night(self, nightness, present):
+        svg = render_plot_svg(_garden(nightness=nightness))
+        assert ('class="fireflies"' in svg) is present
+
+    @pytest.mark.parametrize(
+        ('vitality', 'present'), [(1.0, False), (0.1, True)]
+    )
+    def test_rain_ripples_in_a_lapse(self, vitality, present):
+        svg = render_plot_svg(_garden(vitality=vitality))
+        assert ('class="ccp-ripple"' in svg) is present
+
+    def test_timeline_shadows_follow_the_sun(self):
+        svg = render_plot_timeline_svg(_timeline())
+        start = svg.index('<feOffset')
+        assert (
+            'attributeName="dx"' in svg[start : svg.index('</filter>', start)]
+        )
+
+    def test_timeline_weather_life_animated(self):
+        tl = replace(_timeline(), daily_nightness=[0.0, 0.0, 0.9, 0.0, 0.0])
+        svg = render_plot_timeline_svg(tl)
+        assert 'class="fireflies"' in svg
+        assert 'class="butterfly"' in svg
+
+
+# ── Legend ─────────────────────────────────────────────────
+
+
+def _legend(svg: str) -> str:
+    start = svg.index('<g class="legend"')
+    return svg[start : svg.index('<!--/legend-->', start)]
+
+
+class TestLegend:
+    @pytest.mark.parametrize(
+        'label',
+        [
+            'Bed',
+            'Herb',
+            'Lettuce',
+            'Cabbage',
+            'Flower',
+            'Tools',
+            'Rain barrel',
+            'Sundial',
+            'Butterflies',
+            'Fireflies',
+            'Rain, weeds',
+        ],
+    )
+    def test_entry_present(self, label):
+        assert f'>{label}<' in _legend(render_plot_svg(_garden()))
+
+    @pytest.mark.parametrize('family', ['haiku', 'sonnet', 'opus', 'unknown'])
+    def test_plant_icons_are_the_real_symbols_held_still(self, family):
+        legend = _legend(render_plot_svg(_garden()))
+        assert f'href="#plant-{family}-still"' in legend
+
+    def test_still_symbols_have_no_wind(self):
+        svg = render_plot_svg(_garden())
+        start = svg.index('id="plant-opus-still"')
+        symbol = svg[start : svg.index('</symbol>', start)]
+        assert 'ccp-' not in symbol
+
+    def test_timeline_has_same_legend(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert '>Cabbage<' in _legend(svg)
+
+
+# ── Scrubber and poster ─────────────────────────────────────
+
+
+class TestPlotScrubber:
+    def test_scrubber_seeks_every_day(self):
+        svg = render_plot_timeline_svg(_timeline(n_days=5))
+        assert 'id="plot-scrubber"' in svg
+        assert 'type="range"' in svg
+        assert 'max="4"' in svg
+
+    def test_scrubber_has_play_button(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'id="plot-play"' in svg
+
+    def test_scrubber_sits_below_legend(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        legend_y = _plot_layout(len(tl.skill_order)).legend_y
+        y = float(re.search(r'id="plot-scrubber"[^>]*y="([\d.]+)"', svg)[1])
+        assert y >= legend_y + LEGEND_BAND_HEIGHT
+
+    def test_autoplay_reveals_scrubber_after_replay(self):
+        svg = render_plot_timeline_svg(_timeline())
+        assert 'setTimeout(reveal' in svg
+
+    def test_poster_starts_paused_on_final_day(self):
+        svg = render_plot_timeline_svg(_timeline(), start_paused_at_end=True)
+        assert 'setTimeout(reveal' not in svg
+        assert 'seek(kt.length-1)' in svg
+
+    def test_static_has_no_scrubber(self):
+        assert 'plot-scrubber' not in render_plot_svg(_garden())
 
 
 # ── Model family detection ──────────────────────────────────────
@@ -227,7 +724,8 @@ class TestWeedsInSvg:
     def test_no_weeds_at_full_vitality(self):
         garden = _garden(vitality=1.0)
         svg = render_plot_svg(garden)
-        assert 'href="#plant-weed"' not in svg
+        garden_part = svg[: svg.index('<g class="legend"')]
+        assert 'href="#plant-weed"' not in garden_part
 
     def test_weeds_appear_at_low_vitality(self):
         garden = _garden(vitality=0.3)
@@ -274,7 +772,76 @@ class TestTapTooltip:
         assert 'findTooltip' in svg
 
 
+# ── Dark theme ───────────────────────────────────────────────────
+
+
+class TestDarkTheme:
+    def test_dark_media_query_present(self):
+        svg = render_plot_svg(_garden())
+        assert '@media (prefers-color-scheme:dark)' in svg
+
+    def test_dark_outer_frame_class(self):
+        svg = render_plot_svg(_garden())
+        assert 'class="plot-frame"' in svg
+
+    def test_dark_legend_class(self):
+        svg = render_plot_svg(_garden())
+        assert 'class="legend-bg"' in svg
+
+    def test_dark_legend_inner_class(self):
+        svg = render_plot_svg(_garden())
+        assert 'class="legend-inner"' in svg
+
+    def test_dark_tooltip_styles(self):
+        svg = render_plot_svg(_garden())
+        assert '#plot-tooltip-box{' in svg
+
+    def test_style_block_present(self):
+        svg = render_plot_svg(_garden())
+        assert '<style>' in svg
+
+
 # ── SVG output ──────────────────────────────────────────────────
+
+
+class TestWellFormed:
+    @pytest.mark.parametrize('vitality', [1.0, 0.2])
+    def test_static_parses_as_xml(self, vitality):
+        garden = _garden(
+            branches=_even_branches(5),
+            skills=[SkillFruit('s', 3)],
+            tools=[ToolBush('Read', 40)],
+            hour_counts={9: 3, 22: 5},
+            vitality=vitality,
+            nightness=0.6,
+        )
+        ET.fromstring(render_plot_svg(garden))  # noqa: S314 -- our own output
+
+    def test_timeline_parses_as_xml(self):
+        svg = render_plot_timeline_svg(_timeline())
+        ET.fromstring(svg)  # noqa: S314 -- our own output
+
+
+def _dangling_refs(svg: str) -> set[str]:
+    refs = set(re.findall(r'url\(#([\w-]+)\)', svg))
+    refs |= set(re.findall(r'href="#([\w-]+)"', svg))
+    ids = set(re.findall(r'\bid="([\w-]+)"', svg))
+    return refs - ids
+
+
+class TestReferencesResolve:
+    def test_static(self):
+        garden = _garden(
+            branches=_even_branches(4),
+            tools=[ToolBush('Read', 40), ToolBush('Edit', 9)],
+            skills=[SkillFruit('s', 3)],
+            hour_counts={9: 3, 22: 5},
+            vitality=0.2,
+        )
+        assert _dangling_refs(render_plot_svg(garden)) == set()
+
+    def test_timeline(self):
+        assert _dangling_refs(render_plot_timeline_svg(_timeline())) == set()
 
 
 class TestRenderPlotSvg:
@@ -316,6 +883,53 @@ class TestRenderPlotSvg:
         )
         svg = render_plot_svg(garden)
         assert '42 sessions' in svg
+
+
+# ── Timeline animation ─────────────────────────────────────────
+
+
+class TestPlotTimeline:
+    def test_produces_valid_svg(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert svg.startswith('<svg')
+        assert '</svg>' in svg
+
+    def test_contains_animate_tags(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert '<animate' in svg
+
+    def test_beds_present(self):
+        tl = _timeline(repos=['repo-a', 'repo-b'])
+        svg = render_plot_timeline_svg(tl)
+        assert 'repo-a' in svg
+        assert 'repo-b' in svg
+
+    def test_bed_opacity_animated(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert 'attributeName="opacity"' in svg
+
+    def test_barrel_animated(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert 'class="barrel"' in svg
+
+    def test_date_label_present(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert 'class="date-label"' in svg
+
+    def test_dark_theme_in_timeline(self):
+        tl = _timeline()
+        svg = render_plot_timeline_svg(tl)
+        assert '@media (prefers-color-scheme:dark)' in svg
+
+    def test_single_day_no_crash(self):
+        tl = _timeline(n_days=1)
+        svg = render_plot_timeline_svg(tl)
+        assert '<svg' in svg
 
 
 # ── Test helpers ────────────────────────────────────────────────
@@ -369,4 +983,54 @@ def _garden(
         hour_counts=hour_counts or {},
         nightness=nightness,
         vitality=vitality,
+    )
+
+
+def _timeline(
+    *,
+    n_days: int = 5,
+    repos: list[str] | None = None,
+) -> GardenTimeline:
+    repos = repos or ['test-repo']
+    days = [f'2026-01-{d + 1:02d}' for d in range(n_days)]
+    daily_sessions = [3] * n_days
+    cumulative_sessions = [3 * (i + 1) for i in range(n_days)]
+    branch_days: dict[str, list[RepoBranchDay]] = {}
+    for repo in repos:
+        branch_days[repo] = [
+            RepoBranchDay(
+                day=d,
+                sessions=3 * (i + 1),
+                lines_added=100 * (i + 1),
+                lines_removed=10 * (i + 1),
+                output_tokens=5000 * (i + 1),
+                input_tokens=20000 * (i + 1),
+                cost=0.50 * (i + 1),
+            )
+            for i, d in enumerate(days)
+        ]
+    cumulative_tokens = [25000 * (i + 1) * len(repos) for i in range(n_days)]
+    return GardenTimeline(
+        days=days,
+        daily_sessions=daily_sessions,
+        cumulative_sessions=cumulative_sessions,
+        branch_order=repos,
+        branch_days=branch_days,
+        cumulative_total_tokens=cumulative_tokens,
+        daily_nightness=[0.0] * n_days,
+        daily_vitality=[1.0] * n_days,
+        tool_order=['Read', 'Edit'],
+        tool_days={
+            'Read': [
+                ToolUsageDay(d, 10 * (i + 1)) for i, d in enumerate(days)
+            ],
+            'Edit': [ToolUsageDay(d, 5 * (i + 1)) for i, d in enumerate(days)],
+        },
+        skill_order=['code-review'],
+        skill_days={
+            'code-review': [
+                SkillUsageDay(d, i + 1) for i, d in enumerate(days)
+            ],
+        },
+        hour_counts={10: 5, 14: 8, 16: 3},
     )

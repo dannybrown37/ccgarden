@@ -11,9 +11,10 @@ from ccgarden.data import (
     exclude_repos_from_timeline,
     load_garden_data,
     load_garden_timeline,
+    load_repo_model_efforts,
 )
 from ccgarden.render import render_svg, render_timeline_svg
-from ccgarden.render_plot import render_plot_svg
+from ccgarden.render_plot import render_plot_svg, render_plot_timeline_svg
 
 DEFAULT_DB_PATH = Path.home() / '.claude' / 'ccstats.db'
 DEFAULT_OUTPUT_PATH = Path.home() / '.claude' / 'ccgarden.svg'
@@ -109,8 +110,8 @@ def build_parser() -> argparse.ArgumentParser:
         '--poster',
         action='store_true',
         help=(
-            'render the finished tree with the scrubber visible '
-            'but no auto-play animation (for embedding on a website)'
+            'render the finished garden (tree or --plot) with the scrubber '
+            'visible but no auto-play animation (for embedding on a website)'
         ),
     )
     parser.add_argument(
@@ -139,6 +140,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _render(
+    args: argparse.Namespace,
+    days: DayRange,
+    excluded: set[str],
+) -> str:
+    db = str(args.db)
+    if args.plot and args.static:
+        garden = load_garden_data(db, days=days)
+        if excluded:
+            garden = exclude_repos_from_data(garden, excluded)
+        return render_plot_svg(garden)
+    if args.plot:
+        tl = load_garden_timeline(db, days=days)
+        if excluded:
+            tl = exclude_repos_from_timeline(tl, excluded)
+        efforts = load_repo_model_efforts(db, days)
+        return render_plot_timeline_svg(
+            tl,
+            repo_model_efforts=efforts,
+            start_paused_at_end=args.poster,
+        )
+    if args.static or args.web:
+        garden = load_garden_data(db, days=days)
+        if excluded:
+            garden = exclude_repos_from_data(garden, excluded)
+        date_range = None
+        if args.web and garden.rings:
+            date_range = (garden.rings[0].day, garden.rings[-1].day)
+        return render_svg(garden, date_range=date_range)
+    tl = load_garden_timeline(db, days=days)
+    if excluded:
+        tl = exclude_repos_from_timeline(tl, excluded)
+    return render_timeline_svg(tl, start_paused_at_end=args.poster)
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     log_roots = args.log_roots or [DEFAULT_LOG_ROOT]
@@ -152,24 +188,7 @@ def main(argv: list[str] | None = None) -> None:
         until=args.until.isoformat() if args.until else None,
     )
     excluded = set(args.exclude_repos or [])
-    if args.plot:
-        garden = load_garden_data(str(args.db), days=days)
-        if excluded:
-            garden = exclude_repos_from_data(garden, excluded)
-        svg = render_plot_svg(garden)
-    elif args.static or args.web:
-        garden = load_garden_data(str(args.db), days=days)
-        if excluded:
-            garden = exclude_repos_from_data(garden, excluded)
-        date_range = None
-        if args.web and garden.rings:
-            date_range = (garden.rings[0].day, garden.rings[-1].day)
-        svg = render_svg(garden, date_range=date_range)
-    else:
-        timeline = load_garden_timeline(str(args.db), days=days)
-        if excluded:
-            timeline = exclude_repos_from_timeline(timeline, excluded)
-        svg = render_timeline_svg(timeline, start_paused_at_end=args.poster)
+    svg = _render(args, days, excluded)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(svg)
