@@ -54,6 +54,7 @@ from ccgarden.render_plot import (
     _bed_tag,
     _bed_tooltip,
     _barrel_water,
+    _bench_tooltip,
     _bench_tools,
     _butterfly_keyframes,
     _feature_boxes,
@@ -822,6 +823,34 @@ class TestToolBench:
     def test_tool_tooltip_in_svg(self):
         svg = render_plot_svg(_garden(tools=[ToolBush('Bash', 77)]))
         assert 'Bash: 77 calls' in svg
+
+    @pytest.mark.parametrize(
+        ('tools', 'expected'),
+        [
+            (
+                [ToolBush('Edit', 25), ToolBush('Bash', 75)],
+                (
+                    'Potting bench\n100 tool calls, 2 tools\n'
+                    '75% Bash (75)\n25% Edit (25)'
+                ),
+            ),
+            (
+                [ToolBush('Bash', 1999), ToolBush('Cron', 1)],
+                (
+                    'Potting bench\n2,000 tool calls, 2 tools\n'
+                    '100% Bash (1,999)\n<1% Cron (1)'
+                ),
+            ),
+            ([], 'Potting bench\nno tool calls yet'),
+        ],
+    )
+    def test_bench_tooltip_summarizes_every_tool(self, tools, expected):
+        assert _bench_tooltip(tools) == expected
+
+    def test_bench_tooltip_lists_tools_past_the_bench(self):
+        tools = [ToolBush(f't{i}', i + 1) for i in range(30)]
+        tip = _bench_tooltip(tools)
+        assert all(f' t{i} (' in tip for i in range(30))
 
     def test_no_tools_still_renders_bench(self):
         assert 'class="bench"' in render_plot_svg(_garden(tools=[]))

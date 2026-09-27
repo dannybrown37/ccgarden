@@ -2104,6 +2104,24 @@ def _render_tool(
     )
 
 
+def _bench_tooltip(tools: list[ToolBush]) -> str:
+    """Every tool, not just the ones hung on the bench, busiest first."""
+    total = sum(t.count for t in tools)
+    if total == 0:
+        return 'Potting bench\nno tool calls yet'
+    ranked = sorted(tools, key=lambda t: t.count, reverse=True)
+    return '\n'.join(
+        [
+            'Potting bench',
+            f'{total:,} tool calls, {len(tools)} tools',
+            *(
+                f'{_percent(t.count / total)} {t.tool} ({t.count:,})'
+                for t in ranked
+            ),
+        ]
+    )
+
+
 def _render_bench(
     tools: list[ToolBush], growth: ToolGrowth | None = None
 ) -> str:
@@ -2115,7 +2133,7 @@ def _render_bench(
         for i in range(3)
     )
     parts = [
-        f'<g class="bench">{_title("Potting bench: most-used tools")}',
+        f'<g class="bench">{_title(_bench_tooltip(tools))}',
         _drop_shadow(f'<rect x="{x}" y="{y}" width="{w}" height="{h}"/>'),
         (
             f'<rect x="{x}" y="{y}" width="{w}" height="{h}"'
