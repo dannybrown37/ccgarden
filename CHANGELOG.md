@@ -1,3 +1,9 @@
+## v0.7.1 (2026-09-27)
+
+### Fix
+
+- don't individually animate leaves on tree view
+
 ## v0.7.0 (2026-09-27)
 
 ### Feat
