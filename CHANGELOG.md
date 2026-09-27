@@ -1,3 +1,9 @@
+## v0.7.2 (2026-09-27)
+
+### Fix
+
+- improve tooltip for toolshed to show more info
+
 ## v0.7.1 (2026-09-27)
 
 ### Fix
