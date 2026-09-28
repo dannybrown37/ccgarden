@@ -72,6 +72,20 @@ def _tt_attr(day_labels: list[str]) -> str:
     return f"data-tt='{encoded}'"
 
 
+TOKEN_SCALES = ((1e9, 'b'), (1e6, 'm'))
+THOUSAND = 1000
+
+
+def _format_tokens(tokens: int) -> str:
+    for scale, suffix in TOKEN_SCALES:
+        if round(tokens / scale, 3) >= 1:
+            value = f'{tokens / scale:.3f}'.rstrip('0').rstrip('.')
+            return f'{value}{suffix} tokens'
+    if tokens >= THOUSAND:
+        return f'{tokens / THOUSAND:.0f}k tokens'
+    return f'{tokens} tokens'
+
+
 def _format_day(day: str) -> str:
     try:
         return datetime.date.fromisoformat(day).strftime('%b %-d, %Y')

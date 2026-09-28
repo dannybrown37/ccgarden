@@ -29,6 +29,7 @@ from ccgarden.render_utils import (
     _exact_days_away,
     _frame_weights,
     _format_day,
+    _format_tokens,
     _lerp_hex,
     _rain_opacity,
     _saturated_nightness,
@@ -1582,9 +1583,9 @@ def _bed_tooltip(
         f'{branch.sessions:,} sessions',
         f'+{branch.lines_added:,}/-{branch.lines_removed:,} lines',
     ]
-    tok_k = (branch.input_tokens + branch.output_tokens) / 1000
-    if tok_k > 0:
-        lines.append(f'{tok_k:,.0f}k tokens')
+    tokens = branch.input_tokens + branch.output_tokens
+    if tokens > 0:
+        lines.append(_format_tokens(tokens))
     if branch.idle_days is not None:
         lines.append(_last_worked(branch.idle_days))
     specs = _tooltip_specs(branch, species)
