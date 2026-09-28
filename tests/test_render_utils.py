@@ -18,6 +18,7 @@ from ccgarden.render_utils import (
     _blend_hex,
     _blob_path,
     _collapse_keyframes,
+    _format_tokens,
     _escape_xml,
     _exact_days_away,
     _format_day,
@@ -314,3 +315,21 @@ class TestAnimateTransformTag:
         )
         assert '<animateTransform ' in result
         assert 'type="scale"' in result
+
+
+@pytest.mark.parametrize(
+    ('tokens', 'expected'),
+    [
+        (0, '0 tokens'),
+        (999, '999 tokens'),
+        (60_000, '60k tokens'),
+        (999_499, '999k tokens'),
+        (999_500, '1m tokens'),
+        (1_114_600, '1.115m tokens'),
+        (1_000_000, '1m tokens'),
+        (12_500_000, '12.5m tokens'),
+        (2_300_000_000, '2.3b tokens'),
+    ],
+)
+def test_format_tokens(tokens, expected):
+    assert _format_tokens(tokens) == expected
