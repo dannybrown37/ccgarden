@@ -223,7 +223,10 @@ made the tree replay crawl in the browser.
   today) and `GardenTimeline.branch_idle_days` (per frame, on the
   calendar -- a sampled lapse still counts every day) feed
   `_sprinkler_strength`, which fades linearly to off at
-  `SPRINKLER_DAYS`. Recency reads mainly through the soil: a
+  `SPRINKLER_DAYS`, times how *much* you worked it: sessions in that
+  window (`recent_sessions` / `branch_recent_sessions`) through a
+  saturating curve on `SPRINKLER_SATURATION`. So a one-session poke
+  gets a small spray and damp soil, a busy week a soaked bed. Recency reads mainly through the soil: a
   `bed-wet` overlay under the plants, darkest the day you work the
   bed and drying out across the window. `_sprinkler_grid` puts one
   head per cell (capped at `SPRINKLER_MAX_HEADS` by widening cells),
