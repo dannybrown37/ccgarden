@@ -14,6 +14,7 @@ import zlib
 from dataclasses import replace
 from typing import TYPE_CHECKING, NamedTuple
 
+from ccgarden.data import RECENT_WORK_DAYS
 from ccgarden.plot_species import (
     SPECIES,
     assign_species,
@@ -203,7 +204,10 @@ WEED_FULL_DAYS = 10
 WEED_MAX = 8
 # Days after you last worked a bed until its sprinkler is off; the
 # spray shrinks steadily across the window rather than cutting out.
-SPRINKLER_DAYS = 14
+SPRINKLER_DAYS = RECENT_WORK_DAYS
+# Sessions in that window for a bed's sprinkler to reach ~63% of full
+# strength; the curve flattens so one huge bed can't dwarf the rest.
+SPRINKLER_SATURATION = 20.0
 SPRINKLER_MIN_SCALE = 0.25
 # Heads sit on a grid of cells about this wide; a huge bed widens the
 # cells rather than going past SPRINKLER_MAX_HEADS.
@@ -754,10 +758,20 @@ def _render_timeline_weeds(
 # ── Sprinklers ─────────────────────────────────────────────────
 
 
-def _sprinkler_strength(idle_days: int | None) -> float:
+def _sprinkler_strength(
+    idle_days: int | None, recent_sessions: int | None = None
+) -> float:
+    """How recently (fade) times how much (saturating) you worked a bed.
+
+    ``recent_sessions=None`` means no opinion on the amount: full.
+    """
     if idle_days is None:
         return 0.0
-    return max(0.0, 1.0 - idle_days / SPRINKLER_DAYS)
+    recency = max(0.0, 1.0 - idle_days / SPRINKLER_DAYS)
+    if recent_sessions is None:
+        return recency
+    amount = 1.0 - math.exp(-recent_sessions / SPRINKLER_SATURATION)
+    return recency * amount
 
 
 def _sprinkler_scale(strength: float) -> float:
@@ -932,7 +946,9 @@ def _bed_sprinklers(
 def _render_bed_sprinkler(
     bed: BedRect, plants: Sequence[PlantPlacement]
 ) -> str:
-    scale = _sprinkler_scale(_sprinkler_strength(bed.branch.idle_days))
+    scale = _sprinkler_scale(
+        _sprinkler_strength(bed.branch.idle_days, bed.branch.recent_sessions)
+    )
     if scale <= 0:
         return ''
     return _bed_sprinklers(bed, plants, scale=scale)
@@ -941,16 +957,25 @@ def _render_bed_sprinkler(
 def _render_timeline_sprinkler(
     bed: BedRect,
     plants: Sequence[PlantPlacement],
-    idle_days: list[int | None] | None,
+    strengths: list[float],
     clock: tuple[list[float], float],
 ) -> str:
     """Comes on the day you work the bed and winds down after."""
-    scales = [
-        _sprinkler_scale(_sprinkler_strength(d)) for d in idle_days or []
-    ]
+    scales = [_sprinkler_scale(v) for v in strengths]
     if not any(scales):
         return ''
     return _bed_sprinklers(bed, plants, scales, clock)
+
+
+def _timeline_sprinkler_strengths(
+    timeline: GardenTimeline, repo: str
+) -> list[float]:
+    idle = timeline.branch_idle_days.get(repo) or []
+    counts = timeline.branch_recent_sessions.get(repo)
+    recent: list[int | None] = list(counts) if counts else [None] * len(idle)
+    return [
+        _sprinkler_strength(d, n) for d, n in zip(idle, recent, strict=True)
+    ]
 
 
 def _wet_opacity(strength: float) -> str:
@@ -967,7 +992,9 @@ def _wet_rect(bed: BedRect, opacity: str, anim: str = '') -> str:
 
 
 def _render_bed_wet(bed: BedRect) -> str:
-    strength = _sprinkler_strength(bed.branch.idle_days)
+    strength = _sprinkler_strength(
+        bed.branch.idle_days, bed.branch.recent_sessions
+    )
     if strength <= 0:
         return ''
     return _wet_rect(bed, _wet_opacity(strength))
@@ -975,11 +1002,10 @@ def _render_bed_wet(bed: BedRect) -> str:
 
 def _render_timeline_wet(
     bed: BedRect,
-    idle_days: list[int | None] | None,
+    strengths: list[float],
     clock: tuple[list[float], float],
 ) -> str:
     """Soaked the day you work the bed, drying out day by day after."""
-    strengths = [_sprinkler_strength(d) for d in idle_days or []]
     if not any(strengths):
         return ''
     values = [_wet_opacity(v) for v in strengths]
@@ -2979,7 +3005,7 @@ LEGEND_ENTRIES = (
     ('butterfly', 'Butterflies', 'a dry, working streak'),
     ('firefly', 'Fireflies', 'late-night prompting'),
     ('rain', 'Rain, weeds', 'days away from the garden'),
-    ('sprinkler', 'Sprinklers', 'on + wet soil = worked lately'),
+    ('sprinkler', 'Sprinklers', 'wider + wetter = more work lately'),
 )
 
 
@@ -3323,6 +3349,10 @@ def _final_branches(
                 model_effort_counts=efforts.get(repo),
             ),
             idle_days=(timeline.branch_idle_days.get(repo) or [None])[-1],
+            recent_sessions=next(
+                reversed(timeline.branch_recent_sessions.get(repo) or []),
+                None,
+            ),
         )
         for repo in timeline.branch_order
         if repo in timeline.branch_days
@@ -3396,14 +3426,14 @@ def _render_timeline_beds(
         )
 
         clock = (key_times, dur)
-        idle_days = timeline.branch_idle_days.get(repo)
+        strengths = _timeline_sprinkler_strengths(timeline, repo)
         sprinkler = _render_timeline_sprinkler(
             bed,
             _plant_layout(bed, max_sessions, species),
-            idle_days,
+            strengths,
             clock,
         )
-        wet = _render_timeline_wet(bed, idle_days, clock)
+        wet = _render_timeline_wet(bed, strengths, clock)
         tt = _title(_bed_tooltip(bed.branch, species))
         data = _bed_tooltip_plants(bed.branch, species)
         parts.append(

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from ccgarden.data import (
+    RECENT_WORK_DAYS,
     ALL_DAYS,
     NIGHT_HOURS,
     CartoonBird,
@@ -20,6 +21,7 @@ from ccgarden.data import (
     load_garden_timeline,
     _daily_vitality,
     _days_since_active,
+    _sessions_in_window,
     _nightness,
 )
 
@@ -451,6 +453,7 @@ def test_load_branches_aggregates_same_repo_across_days(
             first_day='2026-07-26',
             last_day='2026-07-27',
             idle_days=(date.today() - date(2026, 7, 27)).days,
+            recent_sessions=0,
         )
     ]
 
@@ -1282,6 +1285,69 @@ def test_timeline_tracks_idle_days_per_repo(tmp_path: Path) -> None:
     assert timeline.branch_idle_days == {
         'a': [None, 0, 0],
         'b': [None, 0, 2],
+    }
+
+
+@pytest.mark.parametrize(
+    ('worked', 'expected'),
+    [
+        ({}, [0, 0, 0, 0]),
+        ({'2026-01-01': 3}, [0, 3, 3, 0]),
+        ({'2026-01-01': 3, '2026-01-15': 2}, [0, 3, 3, 2]),
+        ({'2026-01-02': 4, '2026-01-15': 2}, [0, 0, 4, 6]),
+    ],
+)
+def test_sessions_in_window_counts_only_the_recent_calendar_days(
+    worked: dict[str, int], expected: list[int]
+) -> None:
+    days = ['2025-12-31', '2026-01-01', '2026-01-02', '2026-01-15']
+
+    assert _sessions_in_window(days, worked) == expected
+
+
+def test_branch_counts_its_recent_sessions(tmp_path: Path) -> None:
+    today = date.today()
+    recent = (today - timedelta(days=2)).isoformat()
+    old = (today - timedelta(days=RECENT_WORK_DAYS + 5)).isoformat()
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[totals_row(old, 4, 0, 0), totals_row(recent, 3, 0, 0)],
+        repo_rows=[
+            repo_row(old, 'r', sessions=4, lines_added=1, lines_removed=0),
+            repo_row(recent, 'r', sessions=3, lines_added=1, lines_removed=0),
+        ],
+    )
+
+    garden = load_garden_data(db_path)
+
+    assert [b.recent_sessions for b in garden.branches] == [3]
+
+
+def test_timeline_tracks_recent_sessions_per_repo(tmp_path: Path) -> None:
+    db_path = make_db(
+        tmp_path,
+        totals_rows=[
+            totals_row('2026-01-01', 5, 0, 0),
+            totals_row('2026-01-03', 1, 0, 0),
+        ],
+        repo_rows=[
+            repo_row(
+                '2026-01-01', 'a', sessions=4, lines_added=5, lines_removed=0
+            ),
+            repo_row(
+                '2026-01-01', 'b', sessions=1, lines_added=1, lines_removed=0
+            ),
+            repo_row(
+                '2026-01-03', 'a', sessions=1, lines_added=5, lines_removed=0
+            ),
+        ],
+    )
+
+    timeline = load_garden_timeline(db_path, cartoon_since='')
+
+    assert timeline.branch_recent_sessions == {
+        'a': [0, 4, 5],
+        'b': [0, 1, 1],
     }
 
 

@@ -3,12 +3,16 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
+from typing import TYPE_CHECKING
 
 from ccgarden.claude_stats import (
     DEFAULT_CARTOON_SINCE,
     parse_cartoon_stats,
     run_cartoon_stats,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
 
 
 @dataclass(frozen=True)
@@ -70,6 +74,8 @@ class RepoBranch:
     model_effort_counts: dict[str, int] = field(default_factory=dict)
     # Calendar days from `last_day` to today; None when not loaded from a db.
     idle_days: int | None = None
+    # Sessions in the last RECENT_WORK_DAYS; None when not loaded from a db.
+    recent_sessions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +228,8 @@ class GardenTimeline:
     # Per repo, per frame: calendar days since that repo was last worked,
     # None before its first day. Non-cumulative, like vitality.
     branch_idle_days: dict[str, list[int | None]] = field(default_factory=dict)
+    # Per repo, per frame: sessions in the RECENT_WORK_DAYS up to it.
+    branch_recent_sessions: dict[str, list[int]] = field(default_factory=dict)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -392,6 +400,8 @@ MIN_DAYS_WITH_A_GAP = 2
 # attribute in the SVG. Past the budget it's the vitality decay, not the
 # frame count, that says how long you were gone.
 DORMANT_FRAMES_MAX = 6
+# How far back a bed's recent work counts -- the sprinkler window.
+RECENT_WORK_DAYS = 14
 
 
 def _dormant_days_in_gap(previous: date, current: date) -> list[date]:
@@ -456,7 +466,9 @@ def _daily_vitality(days: list[str], active: set[str]) -> list[float]:
     ]
 
 
-def _days_since_active(days: list[str], active: set[str]) -> list[int | None]:
+def _days_since_active(
+    days: list[str], active: Collection[str]
+) -> list[int | None]:
     """Calendar days from the last active day to each frame's day.
 
     Frames aren't one per calendar day -- a long lapse is sampled -- so
@@ -470,6 +482,22 @@ def _days_since_active(days: list[str], active: set[str]) -> list[int | None]:
             last_active = current
         gaps.append((current - last_active).days if last_active else None)
     return gaps
+
+
+def _sessions_in_window(days: list[str], worked: dict[str, int]) -> list[int]:
+    """Sessions in the ``RECENT_WORK_DAYS`` calendar days up to each frame."""
+    worked_dates = [(date.fromisoformat(d), n) for d, n in worked.items()]
+    totals = []
+    for day in days:
+        current = date.fromisoformat(day)
+        totals.append(
+            sum(
+                n
+                for d, n in worked_dates
+                if 0 <= (current - d).days < RECENT_WORK_DAYS
+            )
+        )
+    return totals
 
 
 def _with_seed_day(
@@ -560,6 +588,10 @@ def _load_timeline(
             repo: _days_since_active(days, branch_active[repo])
             for repo in branch_order
         },
+        branch_recent_sessions={
+            repo: _sessions_in_window(days, branch_active[repo])
+            for repo in branch_order
+        },
         days=days,
         daily_sessions=daily_sessions,
         cumulative_sessions=cumulative_sessions,
@@ -588,7 +620,9 @@ def _load_branch_days(
     days: list[str],
     day_index: dict[str, int],
     days_range: DayRange = ALL_DAYS,
-) -> tuple[list[str], dict[str, list[RepoBranchDay]], dict[str, set[str]]]:
+) -> tuple[
+    list[str], dict[str, list[RepoBranchDay]], dict[str, dict[str, int]]
+]:
     cursor = conn.execute(
         'SELECT day, repo, sessions, lines_added, lines_removed, '
         'output_tokens, input_tokens, cost, prompts, '
@@ -635,7 +669,7 @@ def _load_branch_days(
     }
     branch_active = {
         repo: {
-            day
+            day: delta[0]
             for day, delta in zip(days, deltas[repo], strict=True)
             if delta is not None
         }
@@ -1178,6 +1212,7 @@ def _load_branches(
         days.params,
     )
     model_effort_counts = _load_repo_model_effort_counts(conn, days)
+    recent = _load_recent_sessions(conn)
     return [
         RepoBranch(
             repo=row[0],
@@ -1194,9 +1229,20 @@ def _load_branches(
             last_day=row[11] or '',
             model_effort_counts=model_effort_counts.get(row[0], {}),
             idle_days=_idle_days(row[11]),
+            recent_sessions=recent.get(row[0], 0),
         )
         for row in cursor.fetchall()
     ]
+
+
+def _load_recent_sessions(conn: sqlite3.Connection) -> dict[str, int]:
+    since = date.today() - timedelta(days=RECENT_WORK_DAYS - 1)
+    cursor = conn.execute(
+        'SELECT repo, SUM(sessions) FROM daily_repo_usage'
+        ' WHERE day >= ? GROUP BY repo',
+        (since.isoformat(),),
+    )
+    return dict(cursor.fetchall())
 
 
 def _idle_days(last_day: str | None) -> int | None:
@@ -1228,6 +1274,11 @@ def exclude_repos_from_timeline(
         branch_idle_days={
             r: gaps
             for r, gaps in timeline.branch_idle_days.items()
+            if r not in repos
+        },
+        branch_recent_sessions={
+            r: counts
+            for r, counts in timeline.branch_recent_sessions.items()
             if r not in repos
         },
     )

@@ -1,6 +1,7 @@
 import pytest
 
 import ccgarden
+from ccgarden.data import GardenData
 
 
 def _noop(*_args: object, **_kwargs: object) -> None:
@@ -32,6 +33,15 @@ def calls(monkeypatch, tmp_path):
         ccgarden, 'render_timeline_svg', lambda _t, **_kw: '<svg/>'
     )
     monkeypatch.setattr(ccgarden, 'render_svg', lambda _g, **_kw: '<static/>')
+    monkeypatch.setattr(ccgarden, 'load_repo_model_efforts', lambda *_a: {})
+    monkeypatch.setattr(
+        ccgarden,
+        'render_plot_timeline_svg',
+        lambda _t, **_kw: '<plot/>',
+    )
+    monkeypatch.setattr(
+        ccgarden, 'render_plot_svg', lambda _g, **_kw: '<static-plot/>'
+    )
     monkeypatch.setattr(
         ccgarden, 'DEFAULT_OUTPUT_PATH', tmp_path / 'ccgarden.svg'
     )
@@ -58,7 +68,7 @@ def test_svg_is_still_written_when_not_opening(calls, tmp_path):
     del calls
     ccgarden.main(['--no-open'])
 
-    assert (tmp_path / 'ccgarden.svg').read_text() == '<svg/>'
+    assert (tmp_path / 'ccgarden.svg').read_text() == '<plot/>'
 
 
 def test_output_flag_redirects_the_svg(calls, tmp_path):
@@ -67,7 +77,7 @@ def test_output_flag_redirects_the_svg(calls, tmp_path):
 
     ccgarden.main(['--no-open', '--output', str(target)])
 
-    assert target.read_text() == '<svg/>'
+    assert target.read_text() == '<plot/>'
 
 
 def test_static_flag_renders_the_still_garden(calls, tmp_path):
@@ -75,17 +85,45 @@ def test_static_flag_renders_the_still_garden(calls, tmp_path):
 
     ccgarden.main(['--no-open', '--static', '--output', str(target)])
 
-    assert target.read_text() == '<static/>'
+    assert target.read_text() == '<static-plot/>'
     assert 'static_db' in calls
 
 
-def test_style_tree_is_default(calls, tmp_path):
-    target = tmp_path / 'tree.svg'
+@pytest.mark.parametrize(
+    ('argv', 'expected'),
+    [
+        ([], '<plot/>'),
+        (['--plot'], '<plot/>'),
+        (['--static'], '<static-plot/>'),
+        (['--tree'], '<svg/>'),
+        (['--tree', '--static'], '<static/>'),
+    ],
+)
+def test_plot_is_default_and_tree_is_opt_in(calls, tmp_path, argv, expected):
+    del calls
+    target = tmp_path / 'out.svg'
 
-    ccgarden.main(['--no-open', '--output', str(target)])
+    ccgarden.main(['--no-open', '--output', str(target), *argv])
 
-    assert target.read_text() == '<svg/>'
-    assert 'static_db' not in calls
+    assert target.read_text() == expected
+
+
+def test_web_renders_the_tree(calls, monkeypatch, tmp_path):
+    del calls
+    monkeypatch.setattr(
+        ccgarden, 'load_garden_data', lambda *_a, **_kw: GardenData([], [])
+    )
+    target = tmp_path / 'web.svg'
+
+    ccgarden.main(['--no-open', '--output', str(target), '--web'])
+
+    assert target.read_text() == '<static/>'
+
+
+def test_tree_and_plot_are_exclusive(calls):
+    del calls
+    with pytest.raises(SystemExit):
+        ccgarden.main(['--no-open', '--tree', '--plot'])
 
 
 def test_db_flag_selects_the_database(calls, tmp_path):
@@ -144,7 +182,7 @@ def test_poster_passes_start_paused_at_end(calls, monkeypatch):  # noqa: ARG001
         'render_timeline_svg',
         lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
     )
-    ccgarden.main(['--no-open', '--poster'])
+    ccgarden.main(['--no-open', '--tree', '--poster'])
 
     assert captured.get('start_paused_at_end') is True
 
@@ -156,7 +194,7 @@ def test_poster_default_is_false(calls, monkeypatch):  # noqa: ARG001
         'render_timeline_svg',
         lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
     )
-    ccgarden.main(['--no-open'])
+    ccgarden.main(['--no-open', '--tree'])
 
     assert captured.get('start_paused_at_end') is False
 
@@ -188,7 +226,7 @@ def test_exclude_repo_filters_timeline(calls, monkeypatch):  # noqa: ARG001
             '<svg/>',
         )[1],
     )
-    ccgarden.main(['--no-open', '--exclude-repo', 'drop'])
+    ccgarden.main(['--no-open', '--tree', '--exclude-repo', 'drop'])
 
     assert passed['branch_order'] == ['keep']
 
@@ -217,6 +255,6 @@ def test_plot_poster_passes_start_paused_at_end(
         'render_plot_timeline_svg',
         lambda _t, **kw: (captured.update(kw), '<svg/>')[1],
     )
-    ccgarden.main(['--no-open', '--plot', *argv])
+    ccgarden.main(['--no-open', *argv])
 
     assert captured.get('start_paused_at_end') is expected

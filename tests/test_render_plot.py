@@ -1687,6 +1687,7 @@ def _branch(
     cache_write_tokens: int = 0,
     model_effort_counts: dict[str, int] | None = None,
     idle_days: int | None = None,
+    recent_sessions: int | None = None,
 ) -> RepoBranch:
     return RepoBranch(
         repo=repo,
@@ -1701,6 +1702,7 @@ def _branch(
         cache_write_tokens=cache_write_tokens,
         model_effort_counts=model_effort_counts or {},
         idle_days=idle_days,
+        recent_sessions=recent_sessions,
     )
 
 
@@ -1808,6 +1810,59 @@ class TestSprinklers:
     )
     def test_strength_fades_over_the_window(self, idle, expected):
         assert _sprinkler_strength(idle) == pytest.approx(expected)
+
+    def test_strength_grows_with_how_much_you_worked(self):
+        light = _sprinkler_strength(0, 1)
+        busy = _sprinkler_strength(0, 20)
+        heavy = _sprinkler_strength(0, 100)
+        assert 0 < light < busy < heavy <= 1
+        assert heavy > 0.9
+        assert _sprinkler_strength(0, 0) == 0
+
+    def test_strength_still_fades_with_idle_days(self):
+        assert _sprinkler_strength(SPRINKLER_DAYS // 2, 20) == pytest.approx(
+            _sprinkler_strength(0, 20) / 2
+        )
+
+    def test_busy_bed_sprays_wider_than_a_quiet_one(self):
+        def reach(recent: int) -> float:
+            svg = render_plot_svg(
+                _garden(
+                    branches=[_branch(idle_days=0, recent_sessions=recent)]
+                )
+            )
+            m = re.search(
+                r'class="sprinkler-reach"[^>]*\br="([\d.]+)"',
+                _garden_part(svg),
+            )
+            assert m
+            return float(m.group(1))
+
+        assert reach(1) < reach(10) < reach(60)
+
+    def test_busy_bed_soil_is_wetter(self):
+        def wet(recent: int) -> float:
+            svg = render_plot_svg(
+                _garden(
+                    branches=[_branch(idle_days=0, recent_sessions=recent)]
+                )
+            )
+            m = re.search(r'class="bed-wet"[^>]*opacity="([\d.]+)"', svg)
+            assert m
+            return float(m.group(1))
+
+        assert wet(1) < wet(60)
+
+    def test_replay_sprays_harder_on_a_busy_stretch(self):
+        tl = replace(
+            _timeline(n_days=4),
+            branch_idle_days={'test-repo': [None, 0, 0, 0]},
+            branch_recent_sessions={'test-repo': [0, 1, 10, 60]},
+        )
+        heads = _grow_scales(render_plot_timeline_svg(tl), 'sprinkler-grow')
+        assert heads
+        scales = heads[0]
+        assert 0 < scales[1] < scales[2] < scales[3]
 
     def test_scale_is_zero_only_when_off(self):
         assert _sprinkler_scale(0.0) == 0

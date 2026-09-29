@@ -17,11 +17,11 @@ Three modules, each a stage; keep them in that order of dependency
   frame) and `GardenTimeline` (per-day cumulative frames). Pure dataclasses.
 - `src/ccgarden/render.py` — turns those dataclasses into SVG strings.
   `render_svg` for a static garden, `render_timeline_svg` for the animated
-  timelapse (what the CLI actually ships).
+  timelapse (the CLI's `--tree`).
 - `src/ccgarden/plot_species.py` — the plot's plant catalog (one
   top-down drawing per species) and `assign_species`, which maps each
   model/effort combo to a plant from its family's pool.
-- `src/ccgarden/render_plot.py` — the `--plot` renderer: a top-down
+- `src/ccgarden/render_plot.py` — the default renderer: a top-down
   kitchen garden from the same dataclasses. `render_plot_svg` (static)
   and `render_plot_timeline_svg` (replay + scrubber, `--poster`).
   Shared SVG/animation helpers live in `render_utils.py`.
@@ -223,7 +223,10 @@ made the tree replay crawl in the browser.
   today) and `GardenTimeline.branch_idle_days` (per frame, on the
   calendar -- a sampled lapse still counts every day) feed
   `_sprinkler_strength`, which fades linearly to off at
-  `SPRINKLER_DAYS`. Recency reads mainly through the soil: a
+  `SPRINKLER_DAYS`, times how *much* you worked it: sessions in that
+  window (`recent_sessions` / `branch_recent_sessions`) through a
+  saturating curve on `SPRINKLER_SATURATION`. So a one-session poke
+  gets a small spray and damp soil, a busy week a soaked bed. Recency reads mainly through the soil: a
   `bed-wet` overlay under the plants, darkest the day you work the
   bed and drying out across the window. `_sprinkler_grid` puts one
   head per cell (capped at `SPRINKLER_MAX_HEADS` by widening cells),
