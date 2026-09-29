@@ -4,17 +4,38 @@ Grow a garden from your local Claude Code session history.
 
 `ccgarden` reads the JSONL transcripts under `~/.claude/projects`, rolls
 them up into a small sqlite history db, and renders the result as an SVG
-tree: one growing organism that represents everything you've built with
-Claude Code on this machine.
+garden: by default a top-down kitchen garden plot, or with `--tree` one
+growing tree that represents everything you've built with Claude Code on
+this machine.
+
+![Example plot, rendered from synthetic sample data](docs/images/plot-example.png)
+
+*(These are dummied-up examples with a few months of synthetic data
+across five repos, several models, and a handful of tools — enough to
+show every shape the renderers draw. Your own garden will look sparser
+at first and fill in as you work.)*
+
+## The plot (default)
+
+A bird's-eye kitchen garden. Each repo is a raised
+bed (area = lines added + sessions). Every model and effort combo is its
+own plant: Opus grows brassicas and fruiting plants, Sonnet leafy
+greens, Haiku herbs. More plants mean more sessions, bigger plants mean
+more effort, and the legend lists which plant is which and its share of
+replies — hover one to find it in the beds. Skills bloom in
+the flower border. The potting bench holds your busiest tools, the rain
+barrel fills with tokens, and the sundial shows the hours you prompt
+(blue petals = night). Butterflies come out on working days, fireflies
+at night, and rain and weeds when you stay away. A bed you've worked in
+the last 14 days has its sprinklers running and dark, wet soil — the
+more sessions in that window, the wider the spray and the wetter the
+soil; both dry up the longer the bed is left. In the timelapse each
+plant sprouts and grows as its repo's sessions add up, and each flower
+swells with its skill's calls; it has a Replay button and a day slider.
+
+## The tree (`--tree`)
 
 ![Example garden, rendered from synthetic sample data](docs/images/garden-example.png)
-
-*(This is a dummied-up example with a few months of synthetic data across
-five repos, several models, and a handful of tools — enough to show every
-shape the renderer draws. Your own garden will look sparser at first and
-fill in as you work.)*
-
-## What each shape means
 
 | Shape | Grows with |
 |---|---|
@@ -74,9 +95,9 @@ rings, longer branches, bigger clouds, more leaves.
 | `--static` | render one still garden instead of the timelapse |
 | `--since`, `--until` | limit the garden to a date range |
 | `--no-record` | render the db as-is, skipping today's snapshot |
-| `--plot` | draw a top-down kitchen garden instead of the tree |
+| `--tree` | draw the side-on tree instead of the plot |
 | `--poster` | open on the finished garden, scrubber showing, no auto-play |
-| `--web` | tree for a web page: light wind, no scrubber |
+| `--web` | tree for a web page: light wind, no scrubber (implies `--tree`) |
 | `--exclude-repo REPO` | leave a repo out (repeatable) |
 | `--version` | print the installed version |
 
@@ -86,25 +107,6 @@ without touching the db, is:
 ```sh
 ccgarden --static --since 2026-01-01 --no-record --no-open -o garden.svg
 ```
-
-### The plot (`--plot`)
-
-![Example plot, rendered from synthetic sample data](docs/images/plot-example.png)
-
-A bird's-eye kitchen garden from the same data. Each repo is a raised
-bed (area = lines added + sessions). Every model and effort combo is its
-own plant: Opus grows brassicas and fruiting plants, Sonnet leafy
-greens, Haiku herbs. More plants mean more sessions, bigger plants mean
-more effort, and the legend lists which plant is which and its share of
-replies — hover one to find it in the beds. Skills bloom in
-the flower border. The potting bench holds your busiest tools, the rain
-barrel fills with tokens, and the sundial shows the hours you prompt
-(blue petals = night). Butterflies come out on working days, fireflies
-at night, and rain and weeds when you stay away. A bed you've worked in
-the last 14 days has its sprinklers running and dark, wet soil; the soil
-dries and the spray shrinks the longer it's left. In the timelapse each
-plant sprouts and grows as its repo's sessions add up, and each flower
-swells with its skill's calls; it has a Replay button and a day slider.
 
 ### `ccstats`
 

@@ -110,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         '--poster',
         action='store_true',
         help=(
-            'render the finished garden (tree or --plot) with the scrubber '
+            'render the finished garden (plot or --tree) with the scrubber '
             'visible but no auto-play animation (for embedding on a website)'
         ),
     )
@@ -125,17 +125,23 @@ def build_parser() -> argparse.ArgumentParser:
         '--web',
         action='store_true',
         help=(
-            'render a garden for embedding on a web page: '
+            'render a tree for embedding on a web page: '
             'light wind animation, no scrubber, date range in the legend'
         ),
     )
-    parser.add_argument(
+    style = parser.add_mutually_exclusive_group()
+    style.add_argument(
         '--plot',
         action='store_true',
         help=(
-            'render a top-down garden plot instead of the tree: '
+            'render the top-down garden plot (the default): '
             'repos as beds, models as plants, tools in a shed'
         ),
+    )
+    style.add_argument(
+        '--tree',
+        action='store_true',
+        help='render the side-on tree instead of the plot',
     )
     return parser
 
@@ -146,12 +152,13 @@ def _render(
     excluded: set[str],
 ) -> str:
     db = str(args.db)
-    if args.plot and args.static:
+    plot = not (args.tree or (args.web and not args.plot))
+    if plot and args.static:
         garden = load_garden_data(db, days=days)
         if excluded:
             garden = exclude_repos_from_data(garden, excluded)
         return render_plot_svg(garden)
-    if args.plot:
+    if plot:
         tl = load_garden_timeline(db, days=days)
         if excluded:
             tl = exclude_repos_from_timeline(tl, excluded)
