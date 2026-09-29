@@ -1,3 +1,9 @@
+## v0.7.6 (2026-09-29)
+
+### Fix
+
+- sprinklers indicate volume of contributions (#4)
+
 ## v0.7.5 (2026-09-28)
 
 ### Fix
