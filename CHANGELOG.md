@@ -1,3 +1,9 @@
+## v0.7.7 (2026-09-29)
+
+### Fix
+
+- show max plans on legend, don't show things on legend not actually in garden (#5)
+
 ## v0.7.6 (2026-09-29)
 
 ### Fix
