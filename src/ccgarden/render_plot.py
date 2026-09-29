@@ -87,6 +87,7 @@ LEGEND_ROW_H = 36
 LEGEND_TOP_PAD = 12
 LEGEND_BOTTOM_PAD = 8
 LEGEND_KEY_HEADER = 26
+LEGEND_MAX_PLANTS = 3 * LEGEND_COLS
 
 # ── Features above the fence ─────────────────────────────────
 
@@ -607,6 +608,29 @@ def _garden_combos(branches: list[RepoBranch]) -> list[Combo]:
         for label in sorted(totals, key=lambda k: (-totals[k], k))
         if totals[label] > 0
     ]
+
+
+class PlantKey(NamedTuple):
+    shown: list[Combo]
+    hidden: list[Combo]
+
+
+def _plant_key(beds: list[BedRect]) -> PlantKey:
+    """The combos the beds actually grow, capped at LEGEND_MAX_PLANTS.
+
+    A combo too small to win a single plant has nothing on the plot for
+    its key to point at, so it goes; the cap keeps the busiest.
+    """
+    branches = [b.branch for b in beds]
+    max_sessions = max((b.sessions for b in branches), default=1)
+    species = _garden_species(branches)
+    planted = {
+        plant.spec.label
+        for bed in beds
+        for plant in _plant_layout(bed, max_sessions, species)
+    }
+    grown = [c for c in _garden_combos(branches) if c.label in planted]
+    return PlantKey(grown[:LEGEND_MAX_PLANTS], grown[LEGEND_MAX_PLANTS:])
 
 
 def _percent(share: float) -> str:
@@ -3073,17 +3097,25 @@ def _legend_plant_entry(
     )
 
 
+def _key_overflow(hidden: list[Combo]) -> str:
+    if not hidden:
+        return ''
+    share = _percent(sum(c.share for c in hidden))
+    return f'; +{len(hidden)} more ({share}), hover a bed'
+
+
 def _render_plot_legend(
     ly: float,
-    combos: list[Combo] | None = None,
+    key: PlantKey | None = None,
 ) -> str:
     """The key, in a `.legend` group so every icon holds still.
 
     Below the fixed entries sits the plant key: one row per model and
-    effort combo the garden grows, most-used first, with its share of
+    effort combo planted in a bed, most-used first, with its share of
     replies. Hovering one picks its plants out on the plot.
     """
-    combos = combos or []
+    combos = key.shown if key else []
+    overflow = _key_overflow(key.hidden) if key else ''
     lh = _legend_height(len(combos))
     lpad = 16
     parts = [
@@ -3121,7 +3153,7 @@ def _render_plot_legend(
             f'<tspan class="legend-desc" font-weight="normal" font-size="8"'
             f' fill="#666"> — one per model and effort, % of replies;'
             f' bigger = more effort, more plants = more sessions;'
-            f' hover to find</tspan></text>'
+            f' hover to find{_escape_xml(overflow)}</tspan></text>'
         )
         key_top = header_y + LEGEND_KEY_HEADER - 4
         for i, combo in enumerate(combos):
@@ -3271,7 +3303,8 @@ def _render_plot_tap_tooltip(total_h: int) -> str:
 def render_plot_svg(garden: GardenData) -> str:
     beds = _layout_beds(garden.branches)
     combos = _garden_combos(garden.branches)
-    layout = _plot_layout(len(garden.skills), len(combos))
+    key = _plant_key(beds)
+    layout = _plot_layout(len(garden.skills), len(key.shown))
     total_h = layout.total_h
     body = (
         _render_background(garden.vitality, total_h, layout.legend_y)
@@ -3290,7 +3323,7 @@ def render_plot_svg(garden: GardenData) -> str:
         )
         + _render_plot_rain(garden.vitality, layout.legend_y)
         + _render_plot_night(garden.nightness, layout.legend_y)
-        + _render_plot_legend(layout.legend_y, combos)
+        + _render_plot_legend(layout.legend_y, key)
         + _render_plot_tap_tooltip(total_h)
     )
 
@@ -3757,8 +3790,9 @@ def render_plot_timeline_svg(
     branches = _final_branches(timeline, repo_model_efforts)
     beds = _layout_beds(branches)
     combos = _garden_combos(branches)
+    key = _plant_key(beds)
 
-    layout = _plot_layout(len(timeline.skill_order), len(combos))
+    layout = _plot_layout(len(timeline.skill_order), len(key.shown))
     total_h = layout.total_h + PLOT_SCRUBBER_H
     body = (
         _render_timeline_grass(
@@ -3790,7 +3824,7 @@ def render_plot_timeline_svg(
         + _render_timeline_rain(vitality, layout.legend_y, key_times, dur)
         + _render_timeline_night(nightness, layout.legend_y, key_times, dur)
         + _render_date_label(timeline, key_times, dur)
-        + _render_plot_legend(layout.legend_y, combos)
+        + _render_plot_legend(layout.legend_y, key)
         + _render_plot_scrubber(
             timeline,
             key_times,

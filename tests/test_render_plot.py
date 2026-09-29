@@ -40,6 +40,7 @@ from ccgarden.render_plot import (
     FRAME_WIDTH,
     LEGEND_COLS,
     LEGEND_ENTRIES,
+    LEGEND_MAX_PLANTS,
     PATCH_GAP,
     STONE_STEP,
     PLANT_MAX_SPACING,
@@ -1116,6 +1117,44 @@ class TestLegend:
         )
         assert f'data-species="{TOP_OPUS}"' in svg
         assert f'class="legend-plant" data-species="{TOP_OPUS}"' in svg
+
+    def test_combo_with_no_plants_is_left_out(self):
+        tiny = {f'claude-sonnet-{i} (low)': 1 for i in range(1, 7)}
+        branch = _branch(
+            sessions=5,
+            model_effort_counts={'claude-opus-5 (low)': 10_000, **tiny},
+        )
+        svg = render_plot_svg(_garden(branches=[branch]))
+        planted = set(
+            re.findall(r'data-species="([\w-]+)"', _garden_part(svg))
+        )
+        keyed = set(
+            re.findall(r'class="legend-plant" data-species="([\w-]+)"', svg)
+        )
+        assert len(planted) < 1 + len(tiny)
+        assert keyed == planted
+
+    @pytest.mark.parametrize('render', ['static', 'timeline'])
+    def test_key_caps_and_counts_the_rest(self, render):
+        combos = {
+            **{f'claude-opus-{i} (low)': 10 for i in range(1, 9)},
+            **{f'claude-sonnet-{i} (low)': 10 for i in range(1, 7)},
+        }
+        if render == 'static':
+            branch = _branch(sessions=50, model_effort_counts=combos)
+            svg = render_plot_svg(_garden(branches=[branch]))
+        else:
+            svg = render_plot_timeline_svg(
+                _timeline(), repo_model_efforts={'test-repo': combos}
+            )
+        legend = _legend(svg)
+        assert legend.count('class="legend-plant"') == LEGEND_MAX_PLANTS
+        extra = len(combos) - LEGEND_MAX_PLANTS
+        assert f'+{extra} more' in legend
+
+    def test_no_overflow_note_when_everything_fits(self):
+        garden = _garden(branches=[_branch(model_effort_counts=MIXED)])
+        assert not re.search(r'\+\d+ more', _legend(render_plot_svg(garden)))
 
     def test_legend_grows_with_combos(self):
         few = _plot_layout(0, 2).total_h
