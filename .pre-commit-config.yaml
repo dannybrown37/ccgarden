@@ -6,7 +6,7 @@ repos:
   # ruff and pytest live in git-a-grip so every repo shares one copy, rather
   # than each keeping its own `bash -c '... && git add "$@"'` wrapper.
   - repo: https://github.com/dannybrown37/git-a-grip
-    rev: v0.15.1
+    rev: v0.16.1
     hooks:
       # Rejects a bad commit message before the slow hooks run, by recovering
       # it from git's argv. fail_fast so a typo'd subject costs 0.3s, not a
@@ -26,13 +26,13 @@ repos:
 
   # The cases commitizen-early can't see from argv: -F, editor, merge, rebase.
   - repo: https://github.com/commitizen-tools/commitizen
-    rev: v4.17.0
+    rev: v4.19.0
     hooks:
       - id: commitizen
         stages: [commit-msg]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.6.0
+    rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
       - id: trailing-whitespace
