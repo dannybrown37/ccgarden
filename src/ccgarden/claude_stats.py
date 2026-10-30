@@ -2207,12 +2207,20 @@ def record_today(
     roots: list[Path],
     db_path: Path,
     pricing: PricingTable | None,
+    *,
+    today: date | None = None,
 ) -> None:
-    today = date.today()
+    """Record today plus any days missed since the last recorded one.
+
+    The last recorded day is redone too: it was likely saved mid-day.
+    """
+    today = today or date.today()
     conn = sqlite3.connect(db_path)
     try:
         ensure_schema(conn)
-        record_range(conn, roots, today, today, pricing)
+        last = conn.execute('SELECT MAX(day) FROM daily_totals').fetchone()[0]
+        since = min(date.fromisoformat(last), today) if last else today
+        record_range(conn, roots, since, today, pricing)
         conn.commit()
     finally:
         conn.close()
