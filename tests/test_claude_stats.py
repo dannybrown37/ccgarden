@@ -48,6 +48,7 @@ from ccgarden.claude_stats import (
     record_day,
     record_range,
     record_repo_day,
+    record_today,
     RepoReport,
     resolve_repo_roots,
     run_cartoon_stats,
@@ -2145,6 +2146,51 @@ def test_record_repo_day_leaves_cost_null_without_pricing() -> None:
         row[0] for row in conn.execute('SELECT cost FROM daily_repo_usage')
     ]
     assert costs == [None]
+
+
+@pytest.mark.parametrize(
+    ('already_recorded', 'expected_days'),
+    [
+        pytest.param(
+            '2026-07-25',
+            ['2026-07-25', '2026-07-26', '2026-07-27', '2026-07-28'],
+            id='fills-gap-since-last-recorded-day',
+        ),
+        pytest.param(None, ['2026-07-28'], id='empty-db-records-today-only'),
+    ],
+)
+def test_record_today_fills_days_missed_since_last_run(
+    tmp_path: Path,
+    already_recorded: str | None,
+    expected_days: list[str],
+) -> None:
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    _write_log(
+        logs,
+        [
+            _assistant(timestamp=f'2026-07-{day}T12:00:00.000Z')
+            for day in (24, 25, 26, 27, 28)
+        ],
+    )
+    db_path = tmp_path / 'stats.db'
+    if already_recorded:
+        conn = sqlite3.connect(db_path)
+        ensure_schema(conn)
+        day = date.fromisoformat(already_recorded)
+        record_range(conn, [logs], day, day, pricing=None)
+        conn.commit()
+        conn.close()
+
+    record_today([logs], db_path, None, today=date(2026, 7, 28))
+
+    conn = sqlite3.connect(db_path)
+    days = [
+        row[0]
+        for row in conn.execute('SELECT day FROM daily_totals ORDER BY day')
+    ]
+    conn.close()
+    assert days == expected_days
 
 
 def test_record_range_attributes_each_day_to_its_repo(tmp_path: Path) -> None:
