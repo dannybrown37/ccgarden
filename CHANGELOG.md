@@ -1,3 +1,9 @@
+## v0.7.9 (2026-10-30)
+
+### Fix
+
+- add gap-fill when this hasn't been run for some time (#14)
+
 ## v0.7.8 (2026-10-01)
 
 ### Fix
