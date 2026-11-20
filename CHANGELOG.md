@@ -1,3 +1,9 @@
+## v0.7.10 (2026-11-20)
+
+### Fix
+
+- update how claude stats are calculated so that cross-repo work is properly attributed (#16)
+
 ## v0.7.9 (2026-10-30)
 
 ### Fix
