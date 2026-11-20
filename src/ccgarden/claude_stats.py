@@ -7,9 +7,11 @@ still present on this machine. Each run also upserts today's rollup into the
 sqlite history db (see --db-path), so daily totals survive log rotation;
 --record backfills a --since/--until range instead of printing a report.
 
-Work is attributed to a repo by the launch directory recorded in each
-transcript, so sessions spread across worktrees and subdirectories roll up
-into the repo they belong to. See resolve_repo_roots for the ladder.
+Work is attributed to a repo turn by turn -- by the files a turn's tools
+touched, else its cwd, else the session's launch directory -- so a session
+that hops repos (or always starts in one "home" repo) splits correctly, and
+worktrees and subdirectories roll up into the repo they belong to. See
+RepoAttribution and resolve_repo_roots for the ladders.
 """
 
 import argparse
@@ -491,6 +493,24 @@ def tally_record(
         stats.lines_removed += removed
 
 
+def tally_line(
+    stats: UsageStats,
+    record: dict,
+    stamp: datetime | None,
+    turn: TurnTracker,
+) -> None:
+    if stamp:
+        track_span(stats, stamp)
+        if is_prompt(record):
+            stats.hours[stamp.astimezone().hour] += 1
+
+    session = record.get('sessionId') or record.get('session_id')
+    if session:
+        stats.session_ids.add(session)
+
+    tally_record(stats, record, stamp, turn)
+
+
 def collect_stats_from_logs(
     logs: Iterable[Path],
     since: date | None = None,
@@ -509,20 +529,11 @@ def collect_stats_from_logs(
             if not in_window(stamp, since, until):
                 continue
 
-            if stamp:
-                track_span(stats, stamp)
-                if is_prompt(record):
-                    stats.hours[stamp.astimezone().hour] += 1
-
-            session = record.get('sessionId') or record.get('session_id')
-            if session:
-                stats.session_ids.add(session)
-
             if is_subagent and not counted_subagent:
                 stats.subagent_runs += 1
                 counted_subagent = True
 
-            tally_record(stats, record, stamp, turn)
+            tally_line(stats, record, stamp, turn)
 
     return stats
 
@@ -545,6 +556,9 @@ SCRATCH_DIRS = (
 )
 WORKTREES_SUFFIX = '-worktrees'
 GITDIR_PREFIX = 'gitdir:'
+EDIT_TOOLS = frozenset({'Edit', 'MultiEdit', 'Write', 'NotebookEdit'})
+PATH_TOOLS = EDIT_TOOLS | {'Read', 'Grep', 'Glob'}
+PATH_KEYS = ('file_path', 'notebook_path', 'path')
 
 
 def peek_cwd(path: Path) -> str | None:
@@ -661,27 +675,215 @@ def label_repo_roots(roots: Iterable[Path]) -> dict[Path, str]:
     }
 
 
-def group_logs_by_repo(
+def split_turns(records: Iterable[dict]) -> Iterator[list[dict]]:
+    """Records grouped into turns, each opened by a typed prompt."""
+    turn: list[dict] = []
+    for record in records:
+        if turn and is_prompt(record):
+            yield turn
+            turn = []
+        turn.append(record)
+    if turn:
+        yield turn
+
+
+def _tool_paths(record: dict) -> Iterator[tuple[str, str]]:
+    """(tool, absolute path) for each file a reply's tool calls name."""
+    if record.get('type') != 'assistant':
+        return
+    cwd = record.get('cwd')
+    for block in record.get('message', {}).get('content', []):
+        if not isinstance(block, dict) or block.get('type') != 'tool_use':
+            continue
+        name = block.get('name')
+        tool_input = block.get('input')
+        if name not in PATH_TOOLS or not isinstance(tool_input, dict):
+            continue
+        raw = next(
+            (
+                value
+                for key in PATH_KEYS
+                if isinstance(value := tool_input.get(key), str) and value
+            ),
+            None,
+        )
+        if raw is None:
+            continue
+        path = Path(raw)
+        if not path.is_absolute():
+            if not isinstance(cwd, str) or not cwd:
+                continue
+            path = Path(cwd) / path
+        yield name, os.path.normpath(path)
+
+
+@dataclass
+class TurnClues:
+    """What a turn says about where its work happened, strongest first."""
+
+    edited: list[str] = field(default_factory=list)
+    read: list[str] = field(default_factory=list)
+    cwd: str | None = None
+
+
+def turn_clues(turn: list[dict]) -> TurnClues:
+    clues = TurnClues()
+    cwds: Counter = Counter()
+    for record in turn:
+        cwd = record.get('cwd')
+        if isinstance(cwd, str) and cwd:
+            cwds[cwd] += 1
+        for name, path in _tool_paths(record):
+            target = clues.edited if name in EDIT_TOOLS else clues.read
+            target.append(path)
+    if cwds:
+        clues.cwd = cwds.most_common(1)[0][0]
+    return clues
+
+
+def path_repo_root(path: Path, known: set[Path]) -> Path | None:
+    """The repo a touched file sits in, or None -- never an invented one.
+
+    Unlike a cwd, a stray path (a transcript, a /tmp scratch file) is not
+    evidence of a repo, so it is dropped instead of becoming its own root.
+    """
+    existing = next((p for p in (path, *path.parents) if p.is_dir()), None)
+    candidates = (
+        git_root_on_disk(existing) if existing else None,
+        worktree_sibling_root(path),
+        enclosing_root(path, known),
+    )
+    return next(
+        (
+            root
+            for root in candidates
+            if root is not None and not is_scratch_dir(root)
+        ),
+        None,
+    )
+
+
+@dataclass
+class RepoAttribution:
+    """Resolves each turn of a transcript to the repo it worked in.
+
+    Per turn, first match wins: the repo most of its edited files sit in,
+    else most of its read files (ties go to the first touched), else its
+    most common cwd, else the session's launch directory. A whole turn
+    goes to one repo so its prompt, replies, edits and timing stay
+    together. Anything first seen after construction -- a live transcript
+    grows between reads -- is resolved on demand.
+    """
+
+    root_by_cwd: dict[str, Path] = field(default_factory=dict)
+    root_by_path: dict[str, Path | None] = field(default_factory=dict)
+    first_cwd: dict[Path, str | None] = field(default_factory=dict)
+    labels: dict[Path, str] = field(default_factory=dict)
+    aliases: dict[str, str] = field(default_factory=dict)
+
+    def _cwd_root(self, cwd: str | None) -> Path | None:
+        if not cwd:
+            return None
+        if cwd not in self.root_by_cwd:
+            self.root_by_cwd.update(resolve_repo_roots([cwd]))
+        return self.root_by_cwd.get(cwd)
+
+    def _path_root(self, path: str) -> Path | None:
+        if path not in self.root_by_path:
+            known = set(self.root_by_cwd.values())
+            self.root_by_path[path] = path_repo_root(Path(path), known)
+        return self.root_by_path[path]
+
+    def turn_root(self, clues: TurnClues, log: Path) -> Path | None:
+        for paths in (clues.edited, clues.read):
+            roots = Counter(
+                root for path in paths if (root := self._path_root(path))
+            )
+            if roots:
+                return roots.most_common(1)[0][0]
+        if log not in self.first_cwd:
+            self.first_cwd[log] = peek_cwd(log)
+        return self._cwd_root(clues.cwd) or self._cwd_root(
+            self.first_cwd[log],
+        )
+
+    def turn_label(self, turn: list[dict], log: Path) -> str:
+        root = self.turn_root(turn_clues(turn), log)
+        label = (
+            UNKNOWN_REPO if root is None else self.labels.get(root, root.name)
+        )
+        return self.aliases.get(label, label)
+
+
+def build_attribution(
     logs: Iterable[Path],
     aliases: dict[str, str] | None = None,
-) -> dict[str, list[Path]]:
-    """Bucket transcripts by the repo their launch directory resolves to.
+) -> RepoAttribution:
+    """Resolve every transcript's turns up front so labels stay stable.
 
-    `aliases` remaps a raw repo label to a merge target so a rename set
-    with ``--merge-repo`` survives a re-record.
+    Labels widen to full paths on a basename clash, so they must be
+    settled from every repo in the run before any day is tallied --
+    otherwise a backfill could name one repo two ways on different days.
+    `aliases` remaps a raw label to a ``--merge-repo`` target so a rename
+    survives a re-record.
     """
-    cwd_by_log = {path: peek_cwd(path) for path in logs}
-    root_by_cwd = resolve_repo_roots(cwd_by_log.values())
-    labels = label_repo_roots(root_by_cwd.values())
-    alias_map = aliases or {}
+    paths = list(logs)
+    clues_by_log = {
+        path: [turn_clues(turn) for turn in split_turns(iter_records(path))]
+        for path in paths
+    }
+    first_cwd = {path: peek_cwd(path) for path in paths}
+    cwds = [
+        clue.cwd for clues in clues_by_log.values() for clue in clues
+    ] + list(first_cwd.values())
+    attribution = RepoAttribution(
+        root_by_cwd=resolve_repo_roots(cwds),
+        first_cwd=first_cwd,
+        aliases=aliases or {},
+    )
+    used = {
+        root
+        for path, clues in clues_by_log.items()
+        for clue in clues
+        if (root := attribution.turn_root(clue, path))
+    }
+    attribution.labels = label_repo_roots(used)
+    return attribution
 
-    grouped: dict[str, list[Path]] = {}
-    for path, cwd in cwd_by_log.items():
-        root = root_by_cwd.get(cwd) if cwd else None
-        label = UNKNOWN_REPO if root is None else labels[root]
-        label = alias_map.get(label, label)
-        grouped.setdefault(label, []).append(path)
-    return grouped
+
+def collect_attributed_stats(
+    logs: Iterable[Path],
+    attribution: RepoAttribution,
+    since: date | None = None,
+    until: date | None = None,
+) -> dict[str, UsageStats]:
+    """Per-repo snapshots with each turn credited to its own repo.
+
+    A session that hops repos counts once in each repo it touched.
+    """
+    by_repo: dict[str, UsageStats] = {}
+    for path in logs:
+        is_subagent = path.parent.name == SUBAGENT_DIR
+        counted_subagent: set[str] = set()
+        tracker = TurnTracker()
+        for turn in split_turns(iter_records(path)):
+            label = attribution.turn_label(turn, path)
+            stats = by_repo.setdefault(label, UsageStats())
+            for record in turn:
+                stamp = parse_timestamp(record.get('timestamp'))
+                if not in_window(stamp, since, until):
+                    continue
+                if is_subagent and label not in counted_subagent:
+                    stats.subagent_runs += 1
+                    counted_subagent.add(label)
+                tally_line(stats, record, stamp, tracker)
+    return dict(
+        sorted(
+            by_repo.items(),
+            key=lambda item: item[1].output_tokens,
+            reverse=True,
+        ),
+    )
 
 
 def load_repo_aliases(conn: sqlite3.Connection) -> dict[str, str]:
@@ -771,33 +973,16 @@ def merge_stats(parts: Iterable[UsageStats]) -> UsageStats:
     return merged
 
 
-def collect_grouped_stats(
-    grouped: dict[str, list[Path]],
-    since: date | None = None,
-    until: date | None = None,
-) -> dict[str, UsageStats]:
-    """Per-repo snapshots for pre-grouped logs, ordered by output tokens."""
-    by_repo = {
-        label: collect_stats_from_logs(paths, since, until)
-        for label, paths in grouped.items()
-    }
-    return dict(
-        sorted(
-            by_repo.items(),
-            key=lambda item: item[1].output_tokens,
-            reverse=True,
-        ),
-    )
-
-
 def collect_stats_by_repo(
     roots: list[Path],
     since: date | None = None,
     until: date | None = None,
 ) -> dict[str, UsageStats]:
     """Per-repo snapshots, keyed by repo label and ordered by output tokens."""
-    return collect_grouped_stats(
-        group_logs_by_repo(find_logs(roots)),
+    logs = find_logs(roots)
+    return collect_attributed_stats(
+        logs,
+        build_attribution(logs),
         since,
         until,
     )
@@ -1390,13 +1575,19 @@ def record_range(
 ) -> int:
     """Record each day in [since, until] and return how many had activity.
 
-    Logs are grouped by repo once up front rather than per day, so a long
-    backfill doesn't re-sniff every transcript's launch directory.
+    Repo roots are resolved once up front rather than per day, so a long
+    backfill doesn't re-stat every directory a transcript touched.
     """
-    grouped = group_logs_by_repo(find_logs(roots), load_repo_aliases(conn))
+    logs = find_logs(roots)
+    attribution = build_attribution(logs, load_repo_aliases(conn))
     written = 0
     for day in iter_days(since, until):
-        by_repo = collect_grouped_stats(grouped, since=day, until=day)
+        by_repo = collect_attributed_stats(
+            logs,
+            attribution,
+            since=day,
+            until=day,
+        )
         stats = merge_stats(by_repo.values())
         cost = compute_cost(stats, pricing) if pricing else None
         if record_day(conn, day, stats, cost):

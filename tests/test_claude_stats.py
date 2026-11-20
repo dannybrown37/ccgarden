@@ -32,7 +32,8 @@ from ccgarden.claude_stats import (
     find_model_price,
     format_report,
     git_root_on_disk,
-    group_logs_by_repo,
+    build_attribution,
+    collect_attributed_stats,
     iter_days,
     label_repo_roots,
     load_pricing,
@@ -1705,21 +1706,275 @@ def test_resolve_repo_roots_drops_the_home_dir(
     assert resolve_repo_roots([str(tmp_path)]) == {}
 
 
-def test_group_logs_by_repo_labels_a_scratch_session_unknown(
+def test_collect_stats_by_repo_labels_a_scratch_session_unknown(
     tmp_path: Path,
 ) -> None:
     log = _write_log(tmp_path, [{'type': 'user', 'cwd': '/tmp'}])  # noqa: S108
 
-    assert set(group_logs_by_repo([log])) == {UNKNOWN_REPO}
+    assert set(collect_stats_by_repo([log])) == {UNKNOWN_REPO}
 
 
-def test_group_logs_by_repo_applies_aliases(tmp_path: Path) -> None:
+def test_collect_attributed_stats_applies_aliases(tmp_path: Path) -> None:
     repo = _make_repo(tmp_path / 'deluge')
     log = _write_log(tmp_path, [_prompt(cwd=str(repo))])
+    attribution = build_attribution([log], aliases={'deluge': 'deluge-quest'})
 
-    grouped = group_logs_by_repo([log], aliases={'deluge': 'deluge-quest'})
+    by_repo = collect_attributed_stats([log], attribution)
 
-    assert set(grouped) == {'deluge-quest'}
+    assert set(by_repo) == {'deluge-quest'}
+
+
+def test_collect_attributed_stats_resolves_turns_added_after_build(
+    tmp_path: Path,
+) -> None:
+    """A live transcript grows between the build pass and a day's tally."""
+    alpha = _make_repo(tmp_path / 'alpha')
+    beta = _make_repo(tmp_path / 'beta')
+    log = _write_log(tmp_path, [_in(alpha, _prompt()), _assistant()])
+    attribution = build_attribution([log])
+    _write_log(
+        tmp_path,
+        [
+            _in(alpha, _prompt()),
+            _assistant(),
+            _in(beta, _prompt()),
+            _in(beta, _assistant()),
+        ],
+    )
+
+    by_repo = collect_attributed_stats([log], attribution)
+
+    assert by_repo['beta'].replies == 1
+
+
+def _tool_reply(cwd: Path | None, *uses: tuple[str, dict]) -> dict:
+    record = _assistant(
+        message={
+            'model': 'claude-opus-5',
+            'content': [
+                {'type': 'tool_use', 'name': name, 'input': tool_input}
+                for name, tool_input in uses
+            ],
+            'usage': {'output_tokens': REPLY_OUTPUT_TOKENS},
+        },
+    )
+    if cwd is not None:
+        record['cwd'] = str(cwd)
+    return record
+
+
+def _in(cwd: Path | None, record: dict) -> dict:
+    if cwd is not None:
+        record['cwd'] = str(cwd)
+    return record
+
+
+def _edit(path: Path) -> tuple[str, dict]:
+    return 'Edit', {'file_path': str(path)}
+
+
+def _read(path: Path) -> tuple[str, dict]:
+    return 'Read', {'file_path': str(path)}
+
+
+@pytest.fixture
+def repos(tmp_path: Path) -> dict[str, Path]:
+    return {
+        name: _make_repo(tmp_path / name) for name in ('home', 'alpha', 'beta')
+    }
+
+
+@pytest.mark.parametrize(
+    ('build', 'expected'),
+    [
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _in(r['home'], _assistant()),
+                _in(r['alpha'], _prompt()),
+                _in(r['alpha'], _assistant()),
+            ],
+            {'home': 1, 'alpha': 1},
+            id='mixed-cwd-follows-each-turn',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _in(r['home'], _assistant()),
+                _in(r['home'], _prompt()),
+                _tool_reply(r['home'], _edit(r['alpha'] / 'a.py')),
+                _in(r['home'], _assistant()),
+            ],
+            {'home': 1, 'alpha': 2},
+            id='absolute-path-edit-without-cd',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _tool_reply(
+                    r['home'],
+                    _edit(r['alpha'] / 'a.py'),
+                    _edit(r['alpha'] / 'b.py'),
+                    ('Write', {'file_path': str(r['beta'] / 'c.py')}),
+                ),
+            ],
+            {'alpha': 1},
+            id='two-repos-majority-wins',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _tool_reply(
+                    r['home'],
+                    _read(r['beta'] / 'a.py'),
+                    _read(r['beta'] / 'b.py'),
+                    _edit(r['alpha'] / 'c.py'),
+                ),
+            ],
+            {'alpha': 1},
+            id='edits-outrank-reads',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _tool_reply(r['home'], _read(r['beta'] / 'a.py')),
+            ],
+            {'beta': 1},
+            id='reads-alone-attribute',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _tool_reply(r['home'], ('Grep', {'path': '../beta'})),
+            ],
+            {'beta': 1},
+            id='relative-path-resolves-against-cwd',
+        ),
+        pytest.param(
+            lambda r, tmp: [
+                _in(r['home'], _prompt()),
+                _tool_reply(r['home'], _read(tmp / 'notes' / 'x.md')),
+            ],
+            {'home': 1},
+            id='path-outside-any-repo-is-ignored',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['home'], _prompt()),
+                _tool_reply(
+                    r['home'],
+                    _edit(r['alpha'] / '.claude' / 'worktrees' / 'w' / 'x'),
+                ),
+            ],
+            {'alpha': 1},
+            id='vanished-worktree-in-clone-rolls-up',
+        ),
+        pytest.param(
+            lambda r, _: [
+                _in(r['alpha'], _prompt()),
+                _in(r['alpha'], _assistant()),
+                _prompt(),
+                _assistant(),
+            ],
+            {'alpha': 2},
+            id='no-paths-no-cwd-falls-back-to-first-cwd',
+        ),
+    ],
+)
+def test_collect_stats_by_repo_attributes_each_turn(
+    tmp_path: Path,
+    repos: dict[str, Path],
+    build: object,
+    expected: dict[str, int],
+) -> None:
+    logs = tmp_path / 'logs'
+    logs.mkdir()
+    _write_log(logs, build(repos, tmp_path))
+
+    by_repo = collect_stats_by_repo([logs])
+
+    assert {
+        label: stats.replies
+        for label, stats in by_repo.items()
+        if stats.replies
+    } == expected
+
+
+def test_collect_stats_by_repo_rolls_a_linked_worktree_path_into_its_repo(
+    tmp_path: Path,
+    repos: dict[str, Path],
+) -> None:
+    worktree = _make_linked_worktree(
+        repos['alpha'], tmp_path / 'elsewhere' / 'wt', 'wt'
+    )
+    log = _write_log(
+        tmp_path,
+        [
+            _in(repos['home'], _prompt()),
+            _tool_reply(repos['home'], _edit(worktree / 'x.py')),
+        ],
+    )
+
+    by_repo = collect_stats_by_repo([log])
+
+    assert by_repo['alpha'].replies == 1
+
+
+def test_collect_stats_by_repo_keeps_a_turn_whole(
+    tmp_path: Path,
+    repos: dict[str, Path],
+) -> None:
+    """Prompt, replies, edit lines and timing all land on the turn's repo."""
+    log = _write_log(
+        tmp_path,
+        [
+            _in(repos['home'], _prompt()),
+            _in(repos['home'], _assistant()),
+            _turn_duration(500, cwd=str(repos['home'])),
+            _in(repos['home'], _prompt()),
+            _tool_reply(repos['home'], _edit(repos['alpha'] / 'a.py')),
+            _in(
+                repos['home'],
+                {
+                    'type': 'user',
+                    'sessionId': 's1',
+                    'timestamp': STAMP,
+                    'toolUseResult': {
+                        'structuredPatch': [{'lines': ['+a', '+b', '-c']}],
+                    },
+                },
+            ),
+            _turn_duration(700, cwd=str(repos['home'])),
+        ],
+    )
+
+    by_repo = collect_stats_by_repo([log])
+
+    alpha, home = by_repo['alpha'], by_repo['home']
+    assert (alpha.prompts, alpha.lines_added, alpha.lines_removed) == (1, 2, 1)
+    assert alpha.wall_durations_ms == [700]
+    assert home.wall_durations_ms == [500]
+    assert home.lines_added == 0
+    assert alpha.sessions == home.sessions == 1
+
+
+def test_collect_stats_by_repo_totals_match_collecting_at_once(
+    tmp_path: Path,
+    repos: dict[str, Path],
+) -> None:
+    log = _write_log(
+        tmp_path,
+        [
+            _in(repos['home'], _prompt()),
+            _in(repos['home'], _assistant()),
+            _in(repos['home'], _prompt()),
+            _tool_reply(repos['home'], _edit(repos['beta'] / 'a.py')),
+        ],
+    )
+
+    merged = merge_stats(collect_stats_by_repo([log]).values())
+
+    assert stats_as_dict(merged) == stats_as_dict(collect_stats([log]))
 
 
 def test_label_repo_roots_uses_basenames_when_unambiguous() -> None:
