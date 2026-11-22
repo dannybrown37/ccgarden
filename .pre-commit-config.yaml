@@ -1,12 +1,13 @@
-# commitizen runs at commit-msg; everything else at pre-commit.
-default_install_hook_types: [pre-commit, commit-msg]
+# commitizen runs at commit-msg, protect-branch at pre-push; everything else
+# at pre-commit.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 default_stages: [pre-commit]
 
 repos:
   # ruff and pytest live in git-a-grip so every repo shares one copy, rather
   # than each keeping its own `bash -c '... && git add "$@"'` wrapper.
   - repo: https://github.com/dannybrown37/git-a-grip
-    rev: v0.15.1
+    rev: v0.16.2
     hooks:
       # Rejects a bad commit message before the slow hooks run, by recovering
       # it from git's argv. fail_fast so a typo'd subject costs 0.3s, not a
@@ -23,6 +24,7 @@ repos:
       - id: pytest
         args: [-q]
       - id: block-private-terms
+      - id: protect-branch
 
   # The cases commitizen-early can't see from argv: -F, editor, merge, rebase.
   - repo: https://github.com/commitizen-tools/commitizen
