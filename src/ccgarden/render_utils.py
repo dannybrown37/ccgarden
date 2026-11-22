@@ -7,7 +7,7 @@ and weather-pacing helpers without duplication.
 
 from __future__ import annotations
 
-import datetime
+import datetime as dt
 import itertools
 import json
 import math
@@ -88,7 +88,7 @@ def _format_tokens(tokens: int) -> str:
 
 def _format_day(day: str) -> str:
     try:
-        return datetime.date.fromisoformat(day).strftime('%b %-d, %Y')
+        return dt.date.fromisoformat(day).strftime('%b %-d, %Y')
     except ValueError:
         return day
 
